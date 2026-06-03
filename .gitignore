@@ -1,0 +1,19 @@
+# API 키 / 민감 정보 - 절대 올리면 안 됨
+kis-config.json
+users.json
+sessions.json
+.enckey
+user-configs/
+autotrade-state.json
+autotrade-log.json
+autotrade-state-*.json
+autotrade-log-*.json
+
+# Node
+node_modules/
+npm-debug.log*
+
+# 임시
+*.bak
+gen_stocks.js
+Importamos las librerias necesarias.txt

@@ -40,12 +40,24 @@ const DEFAULT_SETTINGS = {
   intervalSec: 30              // 시세 점검 주기 (초)
 };
 
+// ── 유저별 파일 경로 ──
+function stateFileFor(userId) {
+  return userId && userId !== '_global'
+    ? path.join(__dirname, 'user-configs', `autotrade-state-${userId}.json`)
+    : STATE_FILE;
+}
+function logFileFor(userId) {
+  return userId && userId !== '_global'
+    ? path.join(__dirname, 'user-configs', `autotrade-log-${userId}.json`)
+    : LOG_FILE;
+}
+
 // ── 상태 로드/저장 ──
-function loadState() {
+function loadState(userId) {
+  const file = stateFileFor(userId);
   try {
-    if (fs.existsSync(STATE_FILE)) {
-      const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      // 기본값과 병합 (새 옵션 추가 대비)
+    if (fs.existsSync(file)) {
+      const s = JSON.parse(fs.readFileSync(file, 'utf8'));
       return {
         settings: { ...DEFAULT_SETTINGS, ...(s.settings||{}),
           strategies: { ...DEFAULT_SETTINGS.strategies, ...(s.settings?.strategies||{}) },
@@ -55,7 +67,7 @@ function loadState() {
         today: s.today || todayKey(),
         dailyRealizedPnl: s.dailyRealizedPnl || 0,
         stoppedByLoss: s.stoppedByLoss || false,
-        positions: s.positions || {}  // {code: {avgPrice, qty, peakPrice}}
+        positions: s.positions || {}
       };
     }
   } catch(e) {}
@@ -68,15 +80,15 @@ function loadState() {
   };
 }
 
-function saveState(state) {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch(e) {}
+function saveState(state, userId) {
+  try { fs.writeFileSync(stateFileFor(userId), JSON.stringify(state, null, 2)); } catch(e) {}
 }
 
 function todayKey() {
   return new Date().toISOString().slice(0,10);
 }
 
-// ── 로그 ──
+// ── 로그 (전역 — 하위호환용) ──
 let _logs = [];
 function loadLogs() {
   try { if (fs.existsSync(LOG_FILE)) _logs = JSON.parse(fs.readFileSync(LOG_FILE,'utf8')); } catch(e){ _logs=[]; }
@@ -193,14 +205,30 @@ function nowMin() {
 class AutoTrader {
   constructor(deps) {
     this.deps = deps;
-    this.state = loadState();
-    loadLogs();
+    this.userId = deps.userId || '_global';
+    this.state = loadState(this.userId);
     this.timer = null;
     this.running = false;
-    this.scanList = []; // 현재 스캔 대상 목록 (거래량 상위 + watchList)
-    this.scanListUpdated = 0; // 마지막 업데이트 시각
-    this.tickCount = 0; // 틱 카운터
+    this.scanList = [];
+    this.scanListUpdated = 0;
+    this.tickCount = 0;
+    // 인스턴스별 로그 (유저별 파일)
+    this._logs = [];
+    this._logFile = logFileFor(this.userId);
+    try { if (fs.existsSync(this._logFile)) this._logs = JSON.parse(fs.readFileSync(this._logFile,'utf8')); } catch(e){ this._logs=[]; }
   }
+
+  // 인스턴스 로그 (유저별)
+  log(type, message, meta) {
+    const entry = { time: new Date().toISOString(), type, message, meta: meta||null };
+    this._logs.unshift(entry);
+    if (this._logs.length > 500) this._logs = this._logs.slice(0, 500);
+    try { fs.writeFileSync(this._logFile, JSON.stringify(this._logs, null, 2)); } catch(e){}
+    console.log(`[자동매매:${this.userId} ${new Date().toLocaleTimeString('ko-KR')}] ${message}`);
+    return entry;
+  }
+  getLogs() { return this._logs; }
+  save() { saveState(this.state, this.userId); }
 
   getStatus() {
     return {
@@ -222,8 +250,8 @@ class AutoTrader {
       params: { ...this.state.settings.params, ...(newSettings.params||{}) },
       safety: { ...this.state.settings.safety, ...(newSettings.safety||{}) }
     };
-    saveState(this.state);
-    addLog('config', '설정이 업데이트되었습니다.');
+    this.save();
+    this.log('config', '설정이 업데이트되었습니다.');
     if (this.state.settings.enabled && !this.running) this.start();
     if (!this.state.settings.enabled && this.running) this.stop();
     return this.getStatus();
@@ -233,14 +261,14 @@ class AutoTrader {
     if (this.running) return;
     this.state.settings.enabled = true;
     this.state.stoppedByLoss = false;
-    saveState(this.state);
+    this.save();
     this.running = true;
     this.tickCount = 0;
     // 스캔 목록 크기에 따라 최소 간격 자동 조정
     // 종목당 최소 0.4초 × 예상 50종목 = 20초. 안전하게 최소 60초.
     const minInterval = 60;
     const interval = Math.max(minInterval, this.state.settings.intervalSec);
-    addLog('system', `🟢 자동매매 시작 (점검주기 ${interval}초, 거래량상위+관심종목 스캔)`);
+    this.log('system', `🟢 자동매매 시작 (점검주기 ${interval}초, 거래량상위+관심종목 스캔)`);
     this.tick();
     this.timer = setInterval(() => this.tick(), interval * 1000);
   }
@@ -248,9 +276,9 @@ class AutoTrader {
   stop() {
     this.running = false;
     this.state.settings.enabled = false;
-    saveState(this.state);
+    this.save();
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    addLog('system', '🔴 자동매매 정지');
+    this.log('system', '🔴 자동매매 정지');
   }
 
   checkDayReset() {
@@ -259,8 +287,8 @@ class AutoTrader {
       this.state.today = tk;
       this.state.dailyRealizedPnl = 0;
       this.state.stoppedByLoss = false;
-      addLog('system', '📅 새로운 거래일 — 일일 손익/정지 상태 초기화');
-      saveState(this.state);
+      this.log('system', '📅 새로운 거래일 — 일일 손익/정지 상태 초기화');
+      this.save();
     }
   }
 
@@ -276,11 +304,11 @@ class AutoTrader {
       const merged = [...new Set([...watchCodes, ...topCodes])];
       this.scanList = merged;
       this.scanListUpdated = now;
-      addLog('system', `🔍 스캔 목록 갱신: ${merged.length}종목 (거래량상위 ${topCodes.length}개 + 관심 ${watchCodes.length}개)`);
+      this.log('system', `🔍 스캔 목록 갱신: ${merged.length}종목 (거래량상위 ${topCodes.length}개 + 관심 ${watchCodes.length}개)`);
     } catch(e) {
       // 실패 시 watchList만 사용
       this.scanList = this.state.settings.watchList || [];
-      addLog('system', `🔍 거래량 상위 조회 실패, watchList ${this.scanList.length}종목으로 진행`);
+      this.log('system', `🔍 거래량 상위 조회 실패, watchList ${this.scanList.length}종목으로 진행`);
     }
   }
 
@@ -296,8 +324,8 @@ class AutoTrader {
       if (this.state.stoppedByLoss) return;
       if (this.state.dailyRealizedPnl <= s.safety.dailyLossLimit) {
         this.state.stoppedByLoss = true;
-        saveState(this.state);
-        addLog('safety', `🛑 하루 손실 한도 도달 (${this.state.dailyRealizedPnl.toLocaleString()}원 ≤ ${s.safety.dailyLossLimit.toLocaleString()}원). 오늘 자동매매 중지.`);
+        this.save();
+        this.log('safety', `🛑 하루 손실 한도 도달 (${this.state.dailyRealizedPnl.toLocaleString()}원 ≤ ${s.safety.dailyLossLimit.toLocaleString()}원). 오늘 자동매매 중지.`);
         return;
       }
 
@@ -339,7 +367,7 @@ class AutoTrader {
 
       // ── 2) 스캔 목록 전체: 전략 신호 체크 (순차 처리, 딜레이 적용) ──
       const scanTarget = this.scanList.length > 0 ? this.scanList : (s.watchList || []);
-      addLog('system', `⏱ 스캔 시작 (${scanTarget.length}종목)`);
+      this.log('system', `⏱ 스캔 시작 (${scanTarget.length}종목)`);
 
       for (const code of scanTarget) {
         if (!this.running) break; // 중간에 정지됐으면 중단
@@ -349,7 +377,7 @@ class AutoTrader {
         try {
           chart = await this.deps.getStockChart(cfg, code, 'D');
         } catch(e) {
-          addLog('error', `${name} 차트 조회 실패: ${e.message}`);
+          this.log('error', `${name} 차트 조회 실패: ${e.message}`);
           await new Promise(r => setTimeout(r, 500)); // 오류 후 0.5초 대기
           continue;
         }
@@ -380,7 +408,7 @@ class AutoTrader {
           const budget = Math.min(s.safety.maxPerOrder, s.safety.maxPerStock - curHoldAmt);
           const qty = Math.floor(budget / price);
           if (qty < 1) {
-            addLog('system', `${name} 예산 부족 (₩${budget.toLocaleString()} / 현재가 ₩${price.toLocaleString()})`);
+            this.log('system', `${name} 예산 부족 (₩${budget.toLocaleString()} / 현재가 ₩${price.toLocaleString()})`);
             continue;
           }
           await this.buy(cfg, code, qty, price, signal.reason);
@@ -395,29 +423,29 @@ class AutoTrader {
         await new Promise(r => setTimeout(r, 400));
       }
 
-      addLog('system', `✅ 스캔 완료 (${scanTarget.length}종목)`);
-      saveState(this.state);
+      this.log('system', `✅ 스캔 완료 (${scanTarget.length}종목)`);
+      this.save();
     } catch(e) {
-      addLog('error', '엔진 오류: ' + e.message);
+      this.log('error', '엔진 오류: ' + e.message);
     }
   }
 
   async buy(cfg, code, qty, price, reason) {
     const name = this.deps.codeToName(code) || code;
-    addLog('signal', `📈 매수신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
+    this.log('signal', `📈 매수신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
     const result = await this.deps.placeOrder(cfg, { side:'buy', code, qty, price, orderType:'00' });
     if (result?.rt_cd === '0') {
       const msg = `📈 <b>매수 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}\n사유: ${reason}`;
-      addLog('buy', `✅ 매수주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()}`, { code, qty, price, reason });
+      this.log('buy', `✅ 매수주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()}`, { code, qty, price, reason });
       if (this.deps.sendTelegram) await this.deps.sendTelegram(cfg, msg);
     } else {
-      addLog('error', `❌ 매수 실패 ${name}: ${result?.msg1 || '알수없음'}`);
+      this.log('error', `❌ 매수 실패 ${name}: ${result?.msg1 || '알수없음'}`);
     }
   }
 
   async sell(cfg, code, qty, price, reason, pos) {
     const name = this.deps.codeToName(code) || code;
-    addLog('signal', `📉 매도신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
+    this.log('signal', `📉 매도신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
     const result = await this.deps.placeOrder(cfg, { side:'sell', code, qty, price, orderType:'00' });
     if (result?.rt_cd === '0') {
       let realized = 0;
@@ -425,11 +453,11 @@ class AutoTrader {
       const pnlStr = (realized>=0?'+':'') + realized.toLocaleString();
       const msg = `📉 <b>매도 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}\n추정손익: ${pnlStr}원\n사유: ${reason}`;
       this.state.dailyRealizedPnl += realized;
-      addLog('sell', `✅ 매도주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()} (추정손익 ${pnlStr}원)`, { code, qty, price, reason, realized });
-      saveState(this.state);
+      this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()} (추정손익 ${pnlStr}원)`, { code, qty, price, reason, realized });
+      this.save();
       if (this.deps.sendTelegram) await this.deps.sendTelegram(cfg, msg);
     } else {
-      addLog('error', `❌ 매도 실패 ${name}: ${result?.msg1 || '알수없음'}`);
+      this.log('error', `❌ 매도 실패 ${name}: ${result?.msg1 || '알수없음'}`);
     }
   }
 }

@@ -9,11 +9,16 @@ const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
-const url   = require('url');
+const auth  = require('./auth');
 
 const PORT = 3000;
 const CONFIG_FILE = path.join(__dirname, 'kis-config.json');
 const STOCK_FILE = path.join(__dirname, 'stocks-data.json');
+
+// ── 멀티유저: 현재 요청의 userId (요청마다 설정됨) ──
+// loadConfig/saveConfig가 이 값을 보고 해당 유저 설정을 읽고 씀
+let _currentUserId = null;
+function setCurrentUser(userId) { _currentUserId = userId; }
 
 // ── KIS API 엔드포인트 ──
 const KIS_HOST_REAL = 'openapi.koreainvestment.com:9443';
@@ -44,8 +49,12 @@ function addToMaster(code, name) {
   }
 }
 
-// ── 설정 로드 ──
+// ── 설정 로드 (멀티유저) ──
+// _currentUserId가 있으면 그 유저 설정, 없으면 기존 전역 파일(하위호환/admin)
 function loadConfig() {
+  if (_currentUserId) {
+    return auth.loadUserConfig(_currentUserId);
+  }
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
@@ -55,6 +64,10 @@ function loadConfig() {
 }
 
 function saveConfig(cfg) {
+  if (_currentUserId) {
+    auth.saveUserConfig(_currentUserId, cfg);
+    return;
+  }
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
 }
 
@@ -138,28 +151,106 @@ async function getHashkey(cfg, bodyObj) {
 }
 
 // ── KIS API 프록시 요청 ──
-async function kisProxy(cfg, kispath, trId, queryParams) {
-  const token = await getKisToken(cfg);
+// ── 전역 우선순위 큐: 모든 KIS 호출을 최소 간격으로 줄 세워 초당 한도(EGW00201) 방지 ──
+// high = 사용자 동작(호가/체결/현재가) — 백그라운드 폴링을 새치기한다
+const KIS_MIN_GAP_MS = 350;
+let _kisLast = 0;
+const _kisHigh = [], _kisLow = [];
+let _kisPumping = false;
+function kisSchedule(fn, priority) {
+  return new Promise((resolve, reject) => {
+    (priority === 'high' ? _kisHigh : _kisLow).push({ fn, resolve, reject });
+    pumpKis();
+  });
+}
+async function pumpKis() {
+  if (_kisPumping) return;
+  _kisPumping = true;
+  try {
+    while (_kisHigh.length || _kisLow.length) {
+      const job = _kisHigh.length ? _kisHigh.shift() : _kisLow.shift();
+      const wait = KIS_MIN_GAP_MS - (Date.now() - _kisLast);
+      if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      _kisLast = Date.now();
+      try { job.resolve(await job.fn()); }
+      catch (e) { job.reject(e); }
+    }
+  } finally { _kisPumping = false; }
+}
+
+async function kisProxy(cfg, kispath, trId, queryParams, priority) {
   const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
   const [hostname, port] = host.split(':');
-
   const qs = new URLSearchParams(queryParams).toString();
   const fullPath = kispath + (qs ? '?' + qs : '');
 
-  const res = await httpsRequest({
-    hostname, port: parseInt(port),
-    path: fullPath,
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'authorization': 'Bearer ' + token,
-      'appkey': cfg.appKey,
-      'appsecret': cfg.appSecret,
-      'tr_id': trId,
-      'custtype': 'P'
+  // 우선순위 큐로 간격 보장 + EGW00201(초당 한도 초과) 시 백오프 재시도
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await kisSchedule(async () => {
+      const token = await getKisToken(cfg);
+      return httpsRequest({
+        hostname, port: parseInt(port),
+        path: fullPath,
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'authorization': 'Bearer ' + token,
+          'appkey': cfg.appKey,
+          'appsecret': cfg.appSecret,
+          'tr_id': trId,
+          'custtype': 'P'
+        }
+      });
+    }, priority);
+    if (res?.body && res.body.msg_cd === 'EGW00201' && attempt < 3) {
+      await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+      continue;
     }
-  });
-  return res;
+    return res;
+  }
+}
+
+// ── 실전 도메인 전용 토큰/호출 (순위 등 모의투자 도메인 미지원 API용) ──
+// 모의투자(vts)는 ranking 등 일부 조회 API를 지원하지 않으므로 실전 도메인으로 호출한다.
+// 키가 실전 도메인을 지원하지 않으면 토큰 발급이 실패하며, 5분 쿨다운 후 재시도한다.
+async function getKisTokenReal(cfg) {
+  const now = Date.now();
+  if (cfg.tokenReal && cfg.tokenRealExpiry > now + 60000) return cfg.tokenReal;
+  if (cfg._realTokenFailUntil && now < cfg._realTokenFailUntil) throw new Error('실전 도메인 토큰 쿨다운 중');
+  const [hostname, port] = KIS_HOST_REAL.split(':');
+  const body = JSON.stringify({ grant_type: 'client_credentials', appkey: cfg.appKey, appsecret: cfg.appSecret });
+  const res = await httpsRequest({
+    hostname, port: parseInt(port), path: '/oauth2/tokenP', method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+  }, body);
+  if (res.body && res.body.access_token) {
+    cfg.tokenReal = res.body.access_token;
+    cfg.tokenRealExpiry = now + (res.body.expires_in - 600) * 1000;
+    cfg._realTokenFailUntil = 0;
+    return cfg.tokenReal;
+  }
+  cfg._realTokenFailUntil = now + 5 * 60 * 1000; // 실패 시 5분간 재시도 안 함
+  throw new Error('실전 토큰 발급 실패: ' + JSON.stringify(res.body));
+}
+
+async function kisProxyReal(cfg, kispath, trId, queryParams, priority) {
+  const [hostname, port] = KIS_HOST_REAL.split(':');
+  const qs = new URLSearchParams(queryParams).toString();
+  const fullPath = kispath + (qs ? '?' + qs : '');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await kisSchedule(async () => {
+      const token = await getKisTokenReal(cfg);
+      return httpsRequest({
+        hostname, port: parseInt(port), path: fullPath, method: 'GET',
+        headers: {
+          'Content-Type': 'application/json', 'authorization': 'Bearer ' + token,
+          'appkey': cfg.appKey, 'appsecret': cfg.appSecret, 'tr_id': trId, 'custtype': 'P'
+        }
+      });
+    }, priority);
+    if (res?.body && res.body.msg_cd === 'EGW00201' && attempt < 2) { await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue; }
+    return res;
+  }
 }
 
 // ════════════════════════════════════════
@@ -324,16 +415,32 @@ async function fetchVolTop(cfg) {
   }), '거래량상위');
 }
 
-const trader = new AutoTrader({
-  loadConfig,
-  getStockChart:   fetchChart,
-  getCurrentPrice: fetchCurrentPrice,
-  placeOrder:      executeOrder,
-  getAccount:      fetchAccount,
-  getVolTop:       fetchVolTop,
-  codeToName:      codeToNameLookup,
-  sendTelegram:    sendTelegram
-});
+// ── 멀티유저: 유저별 자동매매 엔진 ──
+const _traders = {}; // userId → AutoTrader
+function getTrader(userId) {
+  if (!userId) userId = '_global'; // 로그인 안 한 경우(하위호환)
+  if (_traders[userId]) return _traders[userId];
+  // 이 유저 전용 loadConfig — 항상 이 유저 설정만 읽음 (전역 _currentUserId와 무관)
+  const userLoadConfig = () => {
+    if (userId === '_global') {
+      try { return JSON.parse(fs.readFileSync(CONFIG_FILE,'utf8')); } catch(e){ return {appKey:'',txMode:'vts'}; }
+    }
+    return auth.loadUserConfig(userId);
+  };
+  const t = new AutoTrader({
+    userId,
+    loadConfig:      userLoadConfig,
+    getStockChart:   fetchChart,       // (cfg, code, period) 시그니처 그대로 사용
+    getCurrentPrice: fetchCurrentPrice,// (cfg, code)
+    placeOrder:      executeOrder,     // (cfg, order)
+    getAccount:      fetchAccount,     // (cfg)
+    getVolTop:       fetchVolTop,      // (cfg)
+    codeToName:      codeToNameLookup,
+    sendTelegram:    sendTelegram
+  });
+  _traders[userId] = t;
+  return t;
+}
 
 // ── 일봉 → 분봉 변환 헬퍼 ──
 // 하루의 OHLCV를 n개 봉으로 자연스럽게 분할
@@ -439,12 +546,69 @@ const server = http.createServer(async (req, res) => {
   const pathname = parsed.pathname;
   const query    = Object.fromEntries(parsed.searchParams);
 
+  // ── 세션 → 현재 유저 결정 ──
+  const cookies = auth.parseCookies(req);
+  const session = auth.getUserBySession(cookies.session);
+  setCurrentUser(session ? session.userId : null);
+
   // ── 정적 파일 ──
   if (pathname === '/' || pathname === '/index.html') {
     serveStatic(res, path.join(__dirname, 'app.html')); return;
   }
   if (pathname.endsWith('.html') || pathname.endsWith('.js') || pathname.endsWith('.css')) {
     serveStatic(res, path.join(__dirname, pathname.slice(1))); return;
+  }
+
+  // ══════════════════════════════════════════
+  // 인증 API (로그인 불필요)
+  // ══════════════════════════════════════════
+  if (pathname === '/api/auth/register' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const r = auth.register(body.username, body.password);
+    if (r.ok) {
+      // 가입 후 자동 로그인
+      const lr = auth.login(body.username, body.password);
+      if (lr.ok) {
+        res.setHeader('Set-Cookie', `session=${lr.token}; HttpOnly; Path=/; Max-Age=2592000; SameSite=Lax`);
+        jsonRes(res, 200, { ok:true, username: lr.username, role: lr.role });
+        return;
+      }
+    }
+    jsonRes(res, r.ok ? 200 : 400, r);
+    return;
+  }
+  if (pathname === '/api/auth/login' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const r = auth.login(body.username, body.password);
+    if (r.ok) {
+      res.setHeader('Set-Cookie', `session=${r.token}; HttpOnly; Path=/; Max-Age=2592000; SameSite=Lax`);
+      jsonRes(res, 200, { ok:true, username: r.username, role: r.role });
+    } else {
+      jsonRes(res, 401, r);
+    }
+    return;
+  }
+  if (pathname === '/api/auth/logout' && req.method === 'POST') {
+    auth.logout(cookies.session);
+    res.setHeader('Set-Cookie', 'session=; HttpOnly; Path=/; Max-Age=0');
+    jsonRes(res, 200, { ok:true });
+    return;
+  }
+  if (pathname === '/api/auth/me') {
+    if (session) {
+      const users = auth.loadUsers();
+      const u = users[session.username];
+      jsonRes(res, 200, { ok:true, loggedIn:true, username: session.username, role: u?.role || 'user' });
+    } else {
+      jsonRes(res, 200, { ok:true, loggedIn:false });
+    }
+    return;
+  }
+
+  // ── 이하 API는 로그인 필요 ──
+  if (pathname.startsWith('/api/') && !session) {
+    jsonRes(res, 401, { ok:false, message:'로그인이 필요합니다', needLogin:true });
+    return;
   }
 
   // ── API 라우트 ──
@@ -466,9 +630,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /api/config/status — 연결 상태 확인
+  // GET /api/config/export — 설정 전체 내보내기 (API 키 포함)
+  if (pathname === '/api/config/export') {
+    const cfg = loadConfig();
+    // 토큰은 제외 (재발급되므로 불필요)
+    const { token, tokenExpiry, ...exportable } = cfg;
+    jsonRes(res, 200, { ok: true, data: exportable });
+    return;
+  }
+
   if (pathname === '/api/config/status') {
     const cfg = loadConfig();
     jsonRes(res, 200, {
+      ok: true,
       connected: !!(cfg.appKey && cfg.appSecret),
       txMode: cfg.txMode,
       hasToken: !!(cfg.token && cfg.tokenExpiry > Date.now()),
@@ -500,13 +674,16 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/auto/status — 엔진 상태
   if (pathname === '/api/auto/status') {
-    jsonRes(res, 200, { ok: true, status: trader.getStatus() });
+    const ut = getTrader(session.userId);
+    jsonRes(res, 200, { ok: true, status: ut.getStatus() });
     return;
   }
 
-  // GET /api/auto/logs — 매매 로그
+  // GET /api/auto/logs — 매매 로그 (유저별)
   if (pathname === '/api/auto/logs') {
-    jsonRes(res, 200, { ok: true, logs: getLogs().slice(0, 100) });
+    const ut = getTrader(session.userId);
+    const logs = ut.getLogs ? ut.getLogs() : getLogs();
+    jsonRes(res, 200, { ok: true, logs: logs.slice(0, 100) });
     return;
   }
 
@@ -514,22 +691,25 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/auto/start' && req.method === 'POST') {
     const cfg = loadConfig();
     if (!cfg.appKey) { jsonRes(res, 400, { ok:false, message:'KIS API 미설정 — 먼저 설정에서 연결하세요.' }); return; }
-    trader.start();
-    jsonRes(res, 200, { ok: true, status: trader.getStatus() });
+    const ut = getTrader(session.userId);
+    ut.start();
+    jsonRes(res, 200, { ok: true, status: ut.getStatus() });
     return;
   }
 
   // POST /api/auto/stop — 정지
   if (pathname === '/api/auto/stop' && req.method === 'POST') {
-    trader.stop();
-    jsonRes(res, 200, { ok: true, status: trader.getStatus() });
+    const ut = getTrader(session.userId);
+    ut.stop();
+    jsonRes(res, 200, { ok: true, status: ut.getStatus() });
     return;
   }
 
   // POST /api/auto/settings — 설정 변경
   if (pathname === '/api/auto/settings' && req.method === 'POST') {
     const body = await parseBody(req);
-    const status = trader.updateSettings(body);
+    const ut = getTrader(session.userId);
+    const status = ut.updateSettings(body);
     jsonRes(res, 200, { ok: true, status });
     return;
   }
@@ -542,6 +722,58 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // GET /api/prices?codes=005930,000660 — 여러 종목 현재가 배치
+    if (pathname === '/api/prices') {
+      const codes = (query.codes || '').split(',').filter(Boolean).slice(0, 30);
+      if (!global._priceCache) global._priceCache = {};
+      const now = Date.now();
+      const TTL = 5000; // 5초 시세 캐시 — 잦은 갱신은 KIS 안 치고 즉시 응답
+      const out = {};
+      for (const code of codes) {
+        const cached = global._priceCache[code];
+        if (cached && now - cached.t < TTL) { out[code] = cached.data; continue; } // 캐시 적중
+        try {
+          // kisProxy 자체가 직렬 큐로 간격을 보장하므로 rateLimitedCall 이중 적용 제거(속도↑)
+          const r = await withRetry(() =>
+            kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+              FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+            }), `현재가:${code}`);
+          const o = r.body?.output || {};
+          let cur = parseInt(o.stck_prpr || 0);
+          let prev = parseInt(o.stck_sdpr || 0);
+          if (!prev && cur) {
+            const vrss = parseInt(o.prdy_vrss || 0);
+            const sign = o.prdy_vrss_sign;
+            prev = (sign === '5' || sign === '4') ? cur + vrss : cur - vrss;
+          }
+          // 현재가/전일종가 둘 다 0이면 — 일봉 마지막 종가로 폴백
+          if (!cur && !prev) {
+            try {
+              const dr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-price', 'FHKST01010400', {
+                FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code,
+                FID_PERIOD_DIV_CODE: 'D', FID_ORG_ADJ_PRC: '0'
+              });
+              const days = dr.body?.output || [];
+              if (days.length) {
+                prev = parseInt(days[0].stck_clpr || 0);
+                cur = 0;
+              }
+            } catch(e2) {}
+          }
+          const data = {
+            price: cur,
+            chgPct: parseFloat(o.prdy_ctrt || 0),
+            sign: o.prdy_vrss_sign || '3',
+            prev: prev || cur
+          };
+          out[code] = data;
+          if (data.price > 0 || data.prev > 0) global._priceCache[code] = { t: Date.now(), data }; // 유효할 때만 캐시
+        } catch(e) { out[code] = global._priceCache[code]?.data || null; } // 실패 시 직전 캐시 사용(빈칸 방지)
+      }
+      jsonRes(res, 200, { ok: true, data: out });
+      return;
+    }
+
     // GET /api/price?code=005930 — 현재가 조회
     if (pathname === '/api/price') {
       const trId = cfg.txMode === 'vts' ? 'FHKST01010100' : 'FHKST01010100';
@@ -821,17 +1053,19 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/stockinfo') {
       const code = query.code || '005930';
       try {
-        const [priceR, infoR] = await Promise.all([
-          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
-            FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
-          }),
-          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/search-stock-info', 'CTPF1002R', {
+        // 현재가는 필수. 종목상세(CTPF1002R)는 모의투자에서 자주 실패 → 실패해도 현재가는 살림
+        const priceR = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+        }, 'high');
+        let infoR = null;
+        try {
+          infoR = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/search-stock-info', 'CTPF1002R', {
             PRDT_TYPE_CD: '300', PDNO: code, PRDT_NAME: '', PRDT_NAME_SRCH_TP: '1',
             PDNO_OR_PRDT_NAME_SRCH_TP: '2', CTS: ''
-          })
-        ]);
+          }, 'high');
+        } catch(_) { /* 종목상세 실패는 무시 (이름 폴백만 잃음) */ }
         const p = priceR.body?.output || {};
-        const i = (infoR.body?.output || [])[0] || {};
+        const i = (infoR?.body?.output || [])[0] || {};
         jsonRes(res, 200, { ok: true, data: {
           code,
           name: p.hts_kor_isnm || i.prdt_name || code,
@@ -848,8 +1082,8 @@ const server = http.createServer(async (req, res) => {
           per: parseFloat(p.per||0),
           pbr: parseFloat(p.pbr||0),
           eps: parseFloat(p.eps||0),
-          hi52: parseInt(p.stck_mxpr||0),
-          lo52: parseInt(p.stck_llam||0),
+          hi52: parseInt(p.w52_hgpr||p.stck_mxpr||0),
+          lo52: parseInt(p.w52_lwpr||p.stck_llam||0),
           rt_cd: priceR.body?.rt_cd
         }});
       } catch(e) {
@@ -860,21 +1094,49 @@ const server = http.createServer(async (req, res) => {
 
     // GET /api/volume100?market=J — 거래량 상위 100
     if (pathname === '/api/volume100') {
-      const trId = cfg.txMode === 'vts' ? 'FHPST01710000' : 'FHPST01710000';
-      const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/ranking/volume', trId, {
-        fid_cond_mrkt_div_code: 'J',
-        fid_cond_scr_div_code: '20171',
-        fid_input_iscd: '0000',
-        fid_div_cls_code: '0',
-        fid_blng_cls_code: '0',
-        fid_trgt_cls_code: '111111111',
-        fid_trgt_exls_cls_code: '000000',
-        fid_input_price_1: '',
-        fid_input_price_2: '',
-        fid_vol_cnt: '',
-        fid_input_date_1: ''
-      });
-      jsonRes(res, 200, { ok: true, data: result.body });
+      // 90초 캐시
+      if (!global._volCache) global._volCache = { data: null, ts: 0 };
+      if (global._volCache.data && Date.now() - global._volCache.ts < 90000) {
+        jsonRes(res, 200, { ok: true, ...global._volCache.data, cached: true });
+        return;
+      }
+      // 1) 실전 도메인 순위 API 시도 (실전 키가 있으면 진짜 TOP)
+      try {
+        const result = await kisProxyReal(cfg, '/uapi/domestic-stock/v1/ranking/volume', 'FHPST01710000', {
+          fid_cond_mrkt_div_code: 'J', fid_cond_scr_div_code: '20171', fid_input_iscd: '0000',
+          fid_div_cls_code: '0', fid_blng_cls_code: '0', fid_trgt_cls_code: '111111111',
+          fid_trgt_exls_cls_code: '000000', fid_input_price_1: '', fid_input_price_2: '',
+          fid_vol_cnt: '', fid_input_date_1: ''
+        }, 'high');
+        const out = result.body?.output || [];
+        if (out.length) {
+          global._volCache = { data: { data: result.body }, ts: Date.now() };
+          jsonRes(res, 200, { ok: true, data: result.body });
+          return;
+        }
+      } catch (e) { /* 실전 도메인 불가 → 아래 폴백 */ }
+
+      // 2) 폴백: 모의 키로도 되는 개별 시세 조회 → 주요 종목 거래량 정렬
+      const VOL_CODES = ['005930','000660','373220','207940','005380','000270','035420','035720','068270','005490','051910','006400','105560','066570'];
+      const rows = [];
+      for (const code of VOL_CODES) {
+        try {
+          const pr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100',
+            { FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code }, 'low');
+          const o = pr.body?.output;
+          if (o && parseInt(o.stck_prpr || 0) > 0) {
+            rows.push({
+              stck_shrn_iscd: code, hts_kor_isnm: o.hts_kor_isnm || code,
+              stck_prpr: o.stck_prpr, prdy_ctrt: o.prdy_ctrt,
+              acml_vol: o.acml_vol, acml_tr_pbmn: o.acml_tr_pbmn
+            });
+          }
+        } catch (e) { /* 개별 실패는 건너뜀 */ }
+      }
+      rows.sort((a, b) => parseInt(b.acml_vol || 0) - parseInt(a.acml_vol || 0));
+      const payload = { data: { output: rows }, fallback: 'curated' };
+      global._volCache = { data: payload, ts: Date.now() };
+      jsonRes(res, 200, { ok: true, ...payload });
       return;
     }
 
@@ -884,13 +1146,17 @@ const server = http.createServer(async (req, res) => {
       const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn', trId, {
         FID_COND_MRKT_DIV_CODE: 'J',
         FID_INPUT_ISCD: query.code || '005930'
-      });
+      }, 'high');
       jsonRes(res, 200, { ok: true, data: result.body });
       return;
     }
 
-    // GET /api/account — 계좌 잔고
+    // GET /api/account — 계좌 잔고 (2초 캐시 — 잦은 갱신에도 즉시 응답, 유저별 분리)
     if (pathname === '/api/account') {
+      if (!global._acctCache) global._acctCache = {};
+      const ck = session.userId || 'default';
+      const cached = global._acctCache[ck];
+      if (cached && Date.now() - cached.t < 2000) { jsonRes(res, 200, cached.data); return; }
       const trId = cfg.txMode === 'vts' ? 'VTTC8434R' : 'TTTC8434R';
       const [cano, acntPrdtCd] = (cfg.accNo || '').split('-');
       const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-balance', trId, {
@@ -906,7 +1172,10 @@ const server = http.createServer(async (req, res) => {
         CTX_AREA_FK100: '',
         CTX_AREA_NK100: ''
       });
-      jsonRes(res, 200, { ok: true, data: result.body });
+      const payload = { ok: true, data: result.body };
+      // 성공 응답만 캐시 (EGW00201 등 에러는 캐시하지 않고 다음 호출에서 재시도)
+      if (result.body && result.body.rt_cd === '0') global._acctCache[ck] = { t: Date.now(), data: payload };
+      jsonRes(res, 200, payload);
       return;
     }
 
@@ -976,7 +1245,19 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // POST /api/cancel — 주문 취소
+    // GET /api/tick?code=005930 — 당일 체결 내역
+    if (pathname === '/api/tick') {
+      const code = query.code || '005930';
+      const r = await withRetry(() => rateLimitedCall(() =>
+        kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-ccnl', 'FHKST01010300', {
+          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+        }, 'high')
+      ), `체결:${code}`);
+      jsonRes(res, 200, { ok: true, data: r.body });
+      return;
+    }
+
+    // GET /api/cancel — 주문 취소
     if (pathname === '/api/cancel' && req.method === 'POST') {
       const body = await parseBody(req);
       const trId = cfg.txMode === 'vts' ? 'VTTC0803U' : 'TTTC0803U';
@@ -1008,33 +1289,85 @@ const server = http.createServer(async (req, res) => {
     // GET /api/news?code=005930 — 종목 뉴스
     if (pathname === '/api/news') {
       const code = query.code || '005930';
-      const r = await rateLimitedCall(() =>
-        kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice', 'FHKST03010100', {})
-      ).catch(()=>({body:{}}));
-      // KIS 뉴스 API (실제 엔드포인트)
+      const fallbackUrl = `https://finance.naver.com/item/news.naver?code=${code}`;
+      // 1) KIS 뉴스 (권한 있을 때만 데이터가 옴)
       try {
-        const r2 = await rateLimitedCall(() =>
-          kisProxy(cfg, '/uapi/domestic-stock/v1/news/inquire-news-title', 'YNAAPP00650000', {
+        const r = await rateLimitedCall(() =>
+          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/news-title', 'FHKST01011800', {
             FID_NEWS_OFER_ENTP_CODE: '', FID_COND_MRKT_DIV_CODE: 'J',
-            FID_INPUT_ISCD: code, FID_INPUT_DATE_1: '', FID_INPUT_DATE_2: ''
+            FID_INPUT_ISCD: code, FID_TITL_CNTT: '',
+            FID_INPUT_DATE_1: '', FID_INPUT_HOUR_1: '',
+            FID_RANK_SORT_CLS_CODE: '', FID_INPUT_SRNO: ''
           })
         );
-        jsonRes(res, 200, { ok: true, data: r2.body });
-      } catch(e) {
-        jsonRes(res, 200, { ok: true, data: { output: [], rt_cd:'1' } });
-      }
+        const list = r.body?.output || [];
+        if (list.length) {
+          jsonRes(res, 200, { ok: true, source: 'kis', data: { output: list, rt_cd: '0' } });
+          return;
+        }
+      } catch(e) { /* KIS 뉴스 실패 → 구글 뉴스로 폴백 */ }
+
+      // 2) 키 불필요한 구글 뉴스 RSS에서 종목명으로 검색
+      try {
+        const name = codeToNameLookup(code);
+        const q = encodeURIComponent(`${name} 주가`);
+        const rss = await httpsRequest({
+          hostname: 'news.google.com',
+          path: `/rss/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`,
+          method: 'GET',
+          headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        const xml = typeof rss.body === 'string' ? rss.body : '';
+        const decode = s => s
+          .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+          .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+          .replace(/&amp;/g, '&').trim();
+        const items = [];
+        const itemRe = /<item>([\s\S]*?)<\/item>/g;
+        let m;
+        while ((m = itemRe.exec(xml)) && items.length < 15) {
+          const block = m[1];
+          const pick = tag => {
+            const mt = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(block);
+            return mt ? decode(mt[1]) : '';
+          };
+          let title = pick('title');
+          let source = pick('source');
+          if (title.includes(' - ')) {
+            const idx = title.lastIndexOf(' - ');
+            if (!source) source = title.slice(idx + 3);
+            title = title.slice(0, idx);  // 항상 제거 — source 태그 있어도 제목 끝 중복 방지
+          }
+          items.push({ title, link: pick('link'), source, date: pick('pubDate') });
+        }
+        if (items.length) {
+          jsonRes(res, 200, { ok: true, source: 'google', data: { output: items, rt_cd: '0' }, fallbackUrl });
+          return;
+        }
+      } catch(e) { /* RSS 실패 → 링크 폴백 */ }
+
+      // 3) 둘 다 실패 → 네이버 금융 링크
+      jsonRes(res, 200, { ok: true, data: { output: [], rt_cd: '1', noPermission: true }, fallbackUrl });
       return;
     }
 
     // GET /api/investor?code=005930 — 외국인·기관 수급
     if (pathname === '/api/investor') {
       const code = query.code || '005930';
-      const r = await withRetry(() => rateLimitedCall(() =>
+      const r = await withRetry(() =>
         kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-investor', 'FHKST01010900', {
           FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
-        })
-      ), `수급:${code}`);
-      jsonRes(res, 200, { ok: true, data: r.body });
+        }), `수급:${code}`);
+      // 외국인 보유율은 투자자 TR에 없음 → 현재가 API(hts_frgn_ehrt)에서 가져옴
+      let frgnRate = 0;
+      try {
+        const pr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+        });
+        frgnRate = parseFloat(pr.body?.output?.hts_frgn_ehrt || 0);
+      } catch(_) {}
+      jsonRes(res, 200, { ok: true, data: r.body, frgnRate });
       return;
     }
 
@@ -1050,23 +1383,45 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // GET /api/market — KOSPI/KOSDAQ 실시간 지수
+    // GET /api/market — KOSPI/KOSDAQ 지수 + 환율 (30초 캐시)
     if (pathname === '/api/market') {
-      const indices = [
-        { code:'0001', name:'KOSPI',  trId:'FHPUP02100000' },
-        { code:'1001', name:'KOSDAQ', trId:'FHPUP02100000' }
-      ];
+      if (!global._marketCache) global._marketCache = { data:null, ts:0 };
+      // 30초 캐시 (rate limit 절약)
+      if (global._marketCache.data && Date.now() - global._marketCache.ts < 30000) {
+        jsonRes(res, 200, { ok: true, data: global._marketCache.data, cached: true });
+        return;
+      }
       const results = {};
+      const indices = [
+        { code:'0001', name:'KOSPI' },
+        { code:'1001', name:'KOSDAQ' }
+      ];
       for (const idx of indices) {
         try {
           const r = await rateLimitedCall(() =>
-            kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-index-price', idx.trId, {
+            kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-index-price', 'FHPUP02100000', {
               FID_COND_MRKT_DIV_CODE: 'U', FID_INPUT_ISCD: idx.code
             })
           );
-          results[idx.name] = r.body?.output || {};
-        } catch(e) { results[idx.name] = {}; }
+          if (r.body?.output) results[idx.name] = r.body.output;
+        } catch(e) { /* 캐시된 이전 값 유지 */ }
       }
+      // 환율 (USD/KRW) — 해외주식 현재가 API로 달러원 환율 조회
+      try {
+        const fx = await rateLimitedCall(() =>
+          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+            FID_COND_MRKT_DIV_CODE: 'X', FID_INPUT_ISCD: 'FX@KRW'
+          })
+        );
+        if (fx.body?.output?.stck_prpr) results.USDKRW = { rate: fx.body.output.stck_prpr };
+      } catch(e) {}
+      // 이전 캐시값으로 빈 항목 보완
+      if (global._marketCache.data) {
+        for (const k of ['KOSPI','KOSDAQ','USDKRW']) {
+          if (!results[k] && global._marketCache.data[k]) results[k] = global._marketCache.data[k];
+        }
+      }
+      global._marketCache = { data: results, ts: Date.now() };
       jsonRes(res, 200, { ok: true, data: results });
       return;
     }
@@ -1116,23 +1471,28 @@ server.listen(PORT, () => {
   console.log('╚════════════════════════════════════════╝');
   console.log('');
 
-  const cfg = loadConfig();
+  // ── 전역(하위호환) 설정 ──
+  const cfg = (() => { try { return JSON.parse(fs.readFileSync(CONFIG_FILE,'utf8')); } catch(e){ return {}; } })();
   if (cfg.appKey && cfg.appSecret) {
-    console.log('✅ KIS API 설정 로드됨 (모드:', cfg.txMode === 'vts' ? '모의투자' : '실전투자', ')');
-    // 서버 시작 시 토큰 자동 발급/검증 → 웹에서 재인증 불필요
-    getKisToken(cfg)
-      .then(() => {
-        console.log('🔑 인증 토큰 준비 완료 — 웹에서 바로 사용 가능합니다.');
-        // 이전에 자동매매가 켜져 있었으면 자동 재개
-        if (trader.getStatus().enabled) {
-          console.log('🤖 이전 자동매매 설정 감지 — 엔진 재개');
-          trader.start();
-        }
-      })
-      .catch(e => console.log('⚠️  토큰 발급 보류:', e.message, '(첫 API 호출 시 자동 재시도)'));
-  } else {
-    console.log('⚠️  KIS API 미설정 — 대시보드 설정 탭에서 App Key를 입력하세요. (최초 1회만)');
+    console.log('✅ (전역) KIS API 설정 로드됨');
+    setCurrentUser(null);
+    getKisToken(cfg).then(()=>console.log('🔑 (전역) 토큰 준비 완료')).catch(()=>{});
   }
+
+  // ── 멀티유저: 가입된 유저 중 자동매매 켜져있던 사람 엔진 재개 ──
+  try {
+    const users = auth.loadUsers();
+    for (const username of Object.keys(users)) {
+      const uid = users[username].userId;
+      const ut = getTrader(uid);
+      if (ut.getStatus().enabled) {
+        console.log(`🤖 [${username}] 이전 자동매매 설정 감지 — 엔진 재개`);
+        ut.start();
+      }
+    }
+    const n = Object.keys(users).length;
+    console.log(`👥 가입 유저: ${n}명`);
+  } catch(e) { console.log('유저 로드 보류:', e.message); }
   console.log('🤖 자동매매 엔진 로드됨 — 웹의 [전략 설정] 탭에서 제어하세요.');
   console.log('');
 });
