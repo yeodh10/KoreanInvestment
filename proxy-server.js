@@ -641,7 +641,8 @@ function serveStatic(res, filepath) {
   const mime = mimeTypes[ext] || 'text/plain';
   try {
     const content = fs.readFileSync(filepath);
-    res.writeHead(200, { 'Content-Type': mime });
+    // no-cache: UI 업데이트가 새로고침만으로 즉시 반영되게 (캐시된 옛 화면 방지)
+    res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
     res.end(content);
   } catch(e) {
     res.writeHead(404);
