@@ -481,18 +481,18 @@ td.mono,th.mono{font-family:var(--mono)}
             <div><div class="lbl" style="font-size:9px;color:var(--text-3)">52주 저가</div><div style="font-size:11px;font-family:var(--mono);color:var(--down)" id="infoLo">—</div></div>
           </div>
         </div>
-        <!-- 차트 아래 2단 — 보유종목 + 자동매매 로그 -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <!-- 차트 아래 2단 — 보유종목(넓게) + 자동매매 로그 -->
+        <div style="display:grid;grid-template-columns:1.5fr 1fr;gap:12px">
           <!-- 보유종목 -->
           <div class="panel">
             <div class="panel-head">
               <span class="panel-title">보유종목</span>
               <button class="panel-btn" onclick="showPage('portfolio')">전체보기</button>
             </div>
-            <div class="tbl-wrap" style="max-height:280px;overflow-y:auto"><!-- 160→280px: 3종목 이상 보유 시 잘리던 문제 -->
+            <div class="tbl-wrap" style="max-height:420px;overflow-y:auto"><!-- 보유종목 패널 대폭 확대 + 스크롤 -->
               <table>
-                <thead><tr><th>종목</th><th>수익률</th><th>평가손익</th><th>현재가</th></tr></thead>
-                <tbody id="dashHoldBody"><tr><td colspan="4" class="empty" style="padding:16px">아직 보유한 종목이 없어요</td></tr></tbody>
+                <thead><tr><th>종목</th><th>수량</th><th>수익률</th><th>평가손익</th><th>현재가</th></tr></thead>
+                <tbody id="dashHoldBody"><tr><td colspan="5" class="empty" style="padding:16px">아직 보유한 종목이 없어요</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -2562,9 +2562,10 @@ async function loadNews(code) {
     const timeDisp = esc(fmtNewsTime(n));
     const source = esc(n.source || '');
     const link = safeUrl(n.link); // http(s) 외 스킴(javascript: 등) 차단
-    const titleHtml = link
+    const mktChip = n.market ? '<span style="font-size:9px;color:var(--blue);background:var(--blue-dim);padding:1px 5px;border-radius:8px;margin-right:5px;vertical-align:1px">시장</span>' : '';
+    const titleHtml = mktChip + (link
       ? `<a href="${esc(link)}" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:none">${title}</a>`
-      : title;
+      : title);
     return `<div style="padding:8px 4px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:baseline;gap:8px">
         <div style="flex:1;min-width:0;font-size:13px;color:var(--text-0);line-height:1.4;font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${titleHtml}</div>
@@ -2993,9 +2994,10 @@ async function loadDashNews() {
     const date  = n.data_dt||n.dscls_time||n.date||n.pubDate||'';
     const meta  = esc([n.source||'', date].filter(Boolean).join(' · '));
     const link  = safeUrl(n.link);
+    const mktChip = n.market ? '<span style="font-size:9px;color:var(--blue);background:var(--blue-dim);padding:1px 5px;border-radius:8px;margin-right:5px;vertical-align:1px">시장</span>' : '';
     const titleHtml = link ? `<a href="${esc(link)}" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:none">${title}</a>` : title;
     return `<div style="padding:10px 8px;border-bottom:1px solid var(--border);text-align:left">
-      <div style="font-size:12.5px;color:var(--text-0);line-height:1.45;font-weight:500;margin-bottom:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${titleHtml}</div>
+      <div style="font-size:12.5px;color:var(--text-0);line-height:1.45;font-weight:500;margin-bottom:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${mktChip}${titleHtml}</div>
       ${meta?`<div style="font-size:10px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${meta}</div>`:''}
     </div>`;
   }).join('');
@@ -3053,17 +3055,19 @@ async function refreshDashHoldings(accountData) {
   if (!tbody) return;
   const positions = (accountData?.output1 || []).filter(p => parseInt(p.hldg_qty||0) > 0);
   if (!positions.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty" style="padding:12px">보유 종목 없음</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty" style="padding:12px">보유 종목 없음</td></tr>';
     return;
   }
-  tbody.innerHTML = positions.slice(0, 30).map(p => { // 8→30: 스크롤로 전부 표시
+  tbody.innerHTML = positions.slice(0, 30).map(p => { // 스크롤로 전부 표시
     const name = esc(p.prdt_name || nameOf(p.pdno));
+    const qty = parseInt(p.hldg_qty||0);
     const plRt = parseFloat(p.evlu_pfls_rt||0);
     const pl = parseInt(p.evlu_pfls_amt||0);
     const cur = parseInt(p.prpr||0);
     const u = pl >= 0;
     return `<tr>
-      <td style="cursor:pointer;font-weight:600" onclick="loadStock('${p.pdno}')">${name}</td>
+      <td style="cursor:pointer;font-weight:600" onclick="loadStock('${esc(p.pdno)}')">${name}</td>
+      <td class="mono">${qty}</td>
       <td class="mono ${u?'up':'dn'}">${u?'+':''}${plRt.toFixed(1)}%</td>
       <td class="mono ${u?'up':'dn'}">${u?'+':''}₩${pl.toLocaleString()}</td>
       <td class="mono">₩${cur.toLocaleString()}</td>

@@ -566,44 +566,69 @@ async function _fetchNews(cfg, code, fallbackUrl) {
       global._kisNewsFailAt = Date.now(); // 빈 응답 = 권한 없음으로 간주
     } catch (e) { global._kisNewsFailAt = Date.now(); }
   }
-  // 2) 구글 뉴스 RSS (키 불필요)
+  // 2) 구글 뉴스 RSS (키 불필요) — 종목 뉴스 + 시장 뉴스를 7:3 비율로 혼합
   try {
     const name = codeToNameLookup(code);
-    const q = encodeURIComponent(`${name} 주가`);
-    const rss = await httpsRequest({
-      hostname: 'news.google.com',
-      path: `/rss/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`,
-      method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    const xml = typeof rss.body === 'string' ? rss.body : '';
-    const decode = s => s
-      .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-      .replace(/&amp;/g, '&').trim();
-    const items = [];
-    const itemRe = /<item>([\s\S]*?)<\/item>/g;
-    let m;
-    while ((m = itemRe.exec(xml)) && items.length < 15) {
-      const block = m[1];
-      const pick = tag => {
-        const mt = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(block);
-        return mt ? decode(mt[1]) : '';
-      };
-      let title = pick('title');
-      let source = pick('source');
-      if (title.includes(' - ')) {
-        const idx = title.lastIndexOf(' - ');
-        if (!source) source = title.slice(idx + 3);
-        title = title.slice(0, idx); // source 태그 있어도 제목 끝 중복 제거
-      }
-      items.push({ title, link: pick('link'), source, date: pick('pubDate') });
+    const [stockItems, marketItems] = await Promise.all([
+      _fetchGoogleRss(`${name} 주가`, 15),
+      _fetchMarketNews() // 코스피 시장 뉴스 (10분 공유 캐시)
+    ]);
+    if (stockItems.length || marketItems.length) {
+      const mkt = marketItems.map(n => ({ ...n, market: true })); // 시장 뉴스 표시용 플래그
+      const items = [...stockItems.slice(0, 10), ...mkt.slice(0, 5)] // 종목 7 : 시장 3 비율
+        .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)); // 최신순 통합 정렬
+      return { ok: true, source: 'google', data: { output: items, rt_cd: '0' }, fallbackUrl };
     }
-    if (items.length) return { ok: true, source: 'google', data: { output: items, rt_cd: '0' }, fallbackUrl };
   } catch (e) { /* RSS 실패 → 링크 폴백 */ }
   // 3) 둘 다 실패 → 네이버 금융 링크
   return { ok: true, data: { output: [], rt_cd: '1', noPermission: true }, fallbackUrl };
+}
+
+// 구글 뉴스 RSS 공용 파서
+async function _fetchGoogleRss(queryText, limit) {
+  const q = encodeURIComponent(queryText);
+  const rss = await httpsRequest({
+    hostname: 'news.google.com',
+    path: `/rss/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`,
+    method: 'GET',
+    headers: { 'User-Agent': 'Mozilla/5.0' }
+  });
+  const xml = typeof rss.body === 'string' ? rss.body : '';
+  const decode = s => s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&').trim();
+  const items = [];
+  const itemRe = /<item>([\s\S]*?)<\/item>/g;
+  let m;
+  while ((m = itemRe.exec(xml)) && items.length < (limit || 15)) {
+    const block = m[1];
+    const pick = tag => {
+      const mt = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(block);
+      return mt ? decode(mt[1]) : '';
+    };
+    let title = pick('title');
+    let source = pick('source');
+    if (title.includes(' - ')) {
+      const idx = title.lastIndexOf(' - ');
+      if (!source) source = title.slice(idx + 3);
+      title = title.slice(0, idx); // source 태그 있어도 제목 끝 중복 제거
+    }
+    items.push({ title, link: pick('link'), source, date: pick('pubDate') });
+  }
+  return items;
+}
+
+// 시장(코스피) 뉴스 — 모든 종목이 공유, 10분 캐시
+async function _fetchMarketNews() {
+  const c = global._mktNewsCache;
+  if (c && Date.now() - c.t < 10 * 60 * 1000) return c.items;
+  try {
+    const items = await _fetchGoogleRss('코스피 증시', 8);
+    global._mktNewsCache = { t: Date.now(), items };
+    return items;
+  } catch (e) { return c ? c.items : []; }
 }
 
 // ── 일봉 → 분봉 변환 헬퍼 ──
@@ -1682,30 +1707,41 @@ const server = http.createServer(async (req, res) => {
       const kstToday = orderJournal._kstDateKey().replace(/-/g, '');
       const sd = (query.startDate || kstToday).replace(/-/g, '') || kstToday;
       const ed = (query.endDate || kstToday).replace(/-/g, '') || kstToday;
-      const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-daily-ccld', trId, {
-        CANO: cano || '',
-        ACNT_PRDT_CD: acntPrdtCd || '01',
-        INQR_STRT_DT: sd,
-        INQR_END_DT: ed,
-        SLL_BUY_DVSN_CD: '00',
-        INQR_DVSN: '00',
-        PDNO: '',
-        CCLD_DVSN: '00',
-        ORD_GNO_BRNO: '',
-        ODNO: '',
-        INQR_DVSN_3: '00',
-        INQR_DVSN_1: '',
-        CTX_AREA_FK100: '',
-        CTX_AREA_NK100: ''
-      }, 'high'); // 사용자 화면 — 백그라운드 새치기
-      const kisRows = result.body?.output1 || [];
-      if (kisRows.length) { jsonRes(res, 200, { ok: true, data: result.body }); return; }
-      // KIS(특히 모의)가 내역을 안 줌 → 로컬 주문 저널로 응답 (접수/체결/취소 상태 포함)
+      let result = null;
+      try {
+        result = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-daily-ccld', trId, {
+          CANO: cano || '',
+          ACNT_PRDT_CD: acntPrdtCd || '01',
+          INQR_STRT_DT: sd,
+          INQR_END_DT: ed,
+          SLL_BUY_DVSN_CD: '00',
+          INQR_DVSN: '00',
+          PDNO: '',
+          CCLD_DVSN: '00',
+          ORD_GNO_BRNO: '',
+          ODNO: '',
+          INQR_DVSN_3: '00',
+          INQR_DVSN_1: '',
+          CTX_AREA_FK100: '',
+          CTX_AREA_NK100: ''
+        }, 'high'); // 사용자 화면 — 백그라운드 새치기
+      } catch (e) { result = null; } // KIS 타임아웃/큐 거부에도 저널 폴백으로 진행 — 내역 화면이 죽지 않게
+      const kisRows = result?.body?.output1 || [];
+      // 로컬 주문 저널 — 주문 직후·장마감·VTS 반영지연에도 즉시 표시되는 1차 소스
       const jEntries = (sd === kstToday && ed === kstToday)
         ? orderJournal.todayList(session.userId)
         : orderJournal.listRange(session.userId, sd, ed);
       const jRows = orderJournal.toKisFormat(jEntries, codeToNameLookup);
-      jsonRes(res, 200, { ok: true, data: { output1: jRows, rt_cd: '0' }, journal: true });
+      if (!kisRows.length) {
+        // KIS(특히 모의)가 내역을 안 줌 → 저널만으로 응답
+        jsonRes(res, 200, { ok: true, data: { output1: jRows, rt_cd: '0' }, journal: true });
+        return;
+      }
+      // ★ 병합: KIS 미반영(접수 직후) 주문을 저널에서 보충 — "빠딱빠딱" 표시
+      const kisOdnos = new Set(kisRows.map(o => String(parseInt(o.odno || 0)))); // 선행 0 무시 비교
+      const extra = jRows.filter(j => j.odno && !kisOdnos.has(String(parseInt(j.odno))));
+      const merged = [...extra, ...kisRows]; // 최신(저널 미반영분)을 위로
+      jsonRes(res, 200, { ok: true, data: { ...result.body, output1: merged }, merged: extra.length });
       return;
     }
 
