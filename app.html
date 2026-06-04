@@ -1179,6 +1179,7 @@ td.mono,th.mono{font-family:var(--mono)}
               </select>
             </div>
           </div>
+          <div class="form-group"><div class="form-label">HTS ID <span style="color:var(--text-3);font-weight:400">(선택 — 입력 시 체결 즉시 통보)</span></div><input class="form-input" type="text" id="kisHtsId" placeholder="한국투자증권 로그인 아이디"></div>
           <button class="order-submit buy" onclick="saveKisConfig()" style="width:auto;padding:9px 20px;margin:0">저장 및 연결</button>
           <div class="kiss-msg info" id="kisMsg" style="margin-top:8px;display:none"></div>
         </div>
@@ -2200,10 +2201,11 @@ async function refreshOrders() {
   if (!proxyOnline) return;
   const r = await api('/api/orders');
   if (!r?.ok) return;
-  const orders = r.data?.output || [];
+  const orders = r.data?.output1 || r.data?.output || []; // KIS·저널 모두 output1 (기존 output 참조는 버그)
   const tbody = $('todayOrders');
   const countEl = $('ordersCount');
-  if (countEl) countEl.textContent = orders.length ? `${orders.length}건` : '';
+  const pendingN = orders.filter(o => o.cncl_yn !== 'Y' && o._status !== '취소' && parseInt(o.tot_ccld_qty||0) < parseInt(o.ord_qty||0)).length;
+  if (countEl) countEl.textContent = orders.length ? `${orders.length}건${pendingN ? ' · ⏳ 미체결 ' + pendingN : ''}` : '';
   if (!orders.length) {
     tbody.innerHTML = '<tr><td colspan="9" class="empty">주문 내역 없음</td></tr>';
     return;
@@ -2215,10 +2217,12 @@ async function refreshOrders() {
     const qty = parseInt(o.ord_qty || 0), filled = parseInt(o.tot_ccld_qty || 0);
     const oprc = parseInt(o.ord_unpr || 0);
     const typeName = o.ord_dvsn_name || '지정가';
-    const status = filled >= qty ? '<span style="color:var(--green)">체결</span>' :
+    const canceled = o.cncl_yn === 'Y' || o._status === '취소';
+    const status = canceled     ? '<span style="color:var(--text-3)">취소됨</span>' :
+                   filled >= qty ? '<span style="color:var(--green)">체결</span>' :
                    filled > 0   ? `<span style="color:var(--amber)">부분(${filled}/${qty})</span>` :
-                                  '<span style="color:var(--text-3)">미체결</span>';
-    const canCancel = filled < qty;
+                                  '<span style="color:var(--amber)">⏳ 미체결</span>';
+    const canCancel = !canceled && filled < qty;
     const time = (o.ord_tmd || '').replace(/(\d{2})(\d{2})(\d{2})/, '$1:$2:$3');
     return `<tr>
       <td class="mono" style="font-size:10px">${time}</td>
@@ -2782,9 +2786,13 @@ function renderAlertHistory() {
 async function checkAlerts() {
   const active = alerts.filter(a => !a.triggered);
   if (!active.length || !proxyOnline) return;
+  // 배치 시세 1회로 전체 알림 확인 (예전: 알림마다 개별 KIS 호출 → rate limit 낭비)
+  const codes = [...new Set(active.map(a => a.code))].join(',');
+  const pr = await api(`/api/prices?codes=${codes}`);
+  const priceMap = pr?.data || {};
   for (const a of active) {
-    const r = await api(`/api/price?code=${a.code}`);
-    const price = parseInt(r?.data?.output?.stck_prpr || 0);
+    const d = priceMap[a.code];
+    const price = (d && (d.price || d.prev)) || 0;
     if (!price) continue;
     const triggered = a.cond === 'above' ? price >= a.price : price <= a.price;
     if (triggered) {
@@ -3278,13 +3286,15 @@ function initHistDates() {
   $('histFrom').value=from.toISOString().slice(0,10);
   $('histTo').value=now.toISOString().slice(0,10);
 }
+let _histRows = [];
 async function loadHistory() {
   if(!proxyOnline){$('histBody').innerHTML='<tr><td colspan="10" class="empty">미연결</td></tr>';return;}
   const from=($('histFrom').value||'').replace(/-/g,''), to=($('histTo').value||'').replace(/-/g,'');
   $('histBody').innerHTML='<tr><td colspan="10" class="empty">불러오는 중...</td></tr>';
   const r=await api(`/api/orders?startDate=${from}&endDate=${to}`);
   if(!r?.ok){$('histBody').innerHTML='<tr><td colspan="10" class="empty">조회 실패</td></tr>';return;}
-  const orders=r.data?.output||[];
+  const orders=r.data?.output1||r.data?.output||[];
+  _histRows = orders;
   let buyAmt=0, sellAmt=0, pnl=0;
   if(!orders.length){$('histBody').innerHTML='<tr><td colspan="10" class="empty">거래 내역 없음</td></tr>';setText('histCount','0건');return;}
   $('histBody').innerHTML=orders.map(o=>{
@@ -3312,7 +3322,22 @@ async function loadHistory() {
   setText('histSell','₩'+sellAmt.toLocaleString());
   setText('histPnl','₩'+(sellAmt-buyAmt).toLocaleString());
 }
-function exportHistCSV() { alert('CSV 내보내기 준비 중입니다.'); }
+function exportHistCSV() {
+  if (!_histRows.length) { alert('먼저 기간을 선택해 조회하세요.'); return; }
+  const head = ['날짜','시간','종목','코드','구분','유형','주문가','수량','체결수량','상태'];
+  const lines = [head.join(',')].concat(_histRows.map(o => {
+    const filled = parseInt(o.tot_ccld_qty||0), qty = parseInt(o.ord_qty||0);
+    const status = o._status || (o.cncl_yn==='Y' ? '취소' : filled>=qty ? '체결' : '미체결');
+    return [o.ord_dt||'', o.ord_tmd||'', (o.prdt_name||'').replace(/,/g,' '), o.pdno||'',
+      o.sll_buy_dvsn_cd==='02'?'매수':'매도', o.ord_dvsn_name||'', o.ord_unpr||0, qty, filled, status].join(',');
+  }));
+  const blob = new Blob(['﻿'+lines.join('\n')], {type:'text/csv;charset=utf-8'}); // BOM — 엑셀 한글 호환
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `거래내역_${$('histFrom').value||''}_${$('histTo').value||''}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 
 // ══════════════════════════════════════════════════════
 // 성과분석
@@ -3330,7 +3355,12 @@ async function loadPerformance() {
   setText('perfEval','₩'+total.toLocaleString());
   setText('perfCash','₩'+cash.toLocaleString());
   setText('perfHold',hold+'종목');
-  setText('perfTrades','—');
+  // 이번 달 거래 횟수 (주문 저널 기반)
+  api(`/api/orders?startDate=${new Date(Date.now()+9*3600*1000).toISOString().slice(0,7).replace('-','')}01&endDate=99991231`).then(o=>{
+    const list=o?.data?.output1||[];
+    const filled=list.filter(x=>x._status==='체결'||parseInt(x.tot_ccld_qty||0)>0).length;
+    setText('perfTrades', list.length?`${list.length}건 (체결 ${filled})`:'—');
+  }).catch(()=>setText('perfTrades','—'));
   $('perfDetail').innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:12px">
       <div><div style="color:var(--text-3);margin-bottom:4px">평가 손익</div><div class="mono ${up?'up':'dn'}">${up?'+':''}₩${pnl.toLocaleString()}</div></div>
@@ -3511,15 +3541,17 @@ async function loadSettings(){
 async function saveKisConfig(){
   const key=$('kisKey').value.trim(), secret=$('kisSecret').value.trim();
   const accNo=$('kisAccNo').value.trim(), txMode=$('kisTxMode').value;
-  // 이미 저장된 경우 키/시크릿 빈칸이어도 OK (서버 기존 값 유지)
-  if(!window._kisAlreadySaved && (!key||!secret)){
-    showKisMsg('err','❌ App Key와 App Secret을 입력하세요');
-    return;
+  // 키/시크릿 빈칸이어도 서버에 이미 연결돼 있으면 OK (기존 값 유지 — HTS ID 등 부분 저장 허용)
+  if(!key||!secret){
+    const st = await api('/api/config/status');
+    if(!st?.connected){ showKisMsg('err','❌ App Key와 App Secret을 입력하세요'); return; }
   }
   // body 구성 — 빈칸이면 해당 필드 제외 (서버가 기존 값 유지)
   const body={accNo,txMode};
   if(key) body.appKey=key;
   if(secret) body.appSecret=secret;
+  const htsId=($('kisHtsId')&&$('kisHtsId').value.trim())||'';
+  if(htsId) body.htsId=htsId;
   showKisMsg('info','저장 중...');
   const r=await apiPost('/api/config',body);
   if(!r?.ok){ showKisMsg('err','❌ '+(r?.message||'저장 실패')); return; }

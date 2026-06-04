@@ -9,6 +9,7 @@ autotrade-log.json
 autotrade-state-*.json
 autotrade-log-*.json
 data-cache.json
+order-journal.json
 
 # Node
 node_modules/

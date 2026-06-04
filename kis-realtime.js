@@ -201,7 +201,7 @@ function parseKisMessage(text) {
     try {
       const j = JSON.parse(text);
       if (j.header?.tr_id === 'PINGPONG') return { type: 'pingpong', raw: text };
-      return { type: 'control', rtCd: j.body?.rt_cd, msg: j.body?.msg1, trId: j.header?.tr_id, raw: text };
+      return { type: 'control', rtCd: j.body?.rt_cd, msg: j.body?.msg1, trId: j.header?.tr_id, output: j.body?.output, raw: text };
     } catch (e) { return { type: 'unknown', raw: text }; }
   }
   // 데이터 메시지: flag|trId|count|payload
@@ -209,7 +209,7 @@ function parseKisMessage(text) {
   if (p1 === -1 || p2 === -1 || p3 === -1) return { type: 'unknown', raw: text };
   const flag = text.slice(0, p1), trId = text.slice(p1 + 1, p2);
   const count = parseInt(text.slice(p2 + 1, p3)) || 1;
-  if (flag === '1') return { type: 'encrypted', trId }; // 암호화 TR은 미사용
+  if (flag === '1') return { type: 'encrypted', trId, payloadB64: text.slice(p3 + 1) }; // 암호화 TR(체결통보)
   const f = text.slice(p3 + 1).split('^');
 
   if (trId === TR_PRICE) {
@@ -259,6 +259,8 @@ class KisFeed {
     this.regs = new Map();      // 'TRID:code' → { lastUsed }
     this.clients = new Set();   // SSE 클라이언트 { res, codes:Set, obCode }
     this.onPrice = null;        // (code, data) → 서버 가격캐시 갱신 훅
+    this.onExecution = null;    // 체결통보 훅 ({odno, code, qty, price, filled})
+    this.aes = {};              // 암호화 TR별 AES key/iv (구독 응답에서 수신)
     this._retry = 0;
     this._closed = false;
   }
@@ -283,6 +285,12 @@ class KisFeed {
         for (const key of this.regs.keys()) {
           const [trId, code] = key.split(':');
           this._sendSub(trId, code, true);
+        }
+        // 체결통보 구독 (HTS ID 설정 시) — 체결 즉시 푸시 (모의 H0STCNI9 / 실전 H0STCNI0)
+        if (this.cfg.htsId) {
+          this._cniId = this.cfg.htsId;
+          this._sendSub(this.cfg.txMode === 'live' ? 'H0STCNI0' : 'H0STCNI9', this.cfg.htsId, true);
+          this.log(`📨 체결통보 구독 (${this.cfg.htsId})`);
         }
         this._broadcast('status', { connected: true });
       };
@@ -339,8 +347,23 @@ class KisFeed {
     const m = parseKisMessage(text);
     if (m.type === 'pingpong') { this.ws.sendText(m.raw); return; } // 동일 페이로드 에코
     if (m.type === 'control') {
+      // 암호화 TR(체결통보) 구독 응답에 AES key/iv가 담겨 옴 — 보관
+      if (m.output && m.output.key && m.output.iv && m.trId) this.aes[m.trId] = { key: m.output.key, iv: m.output.iv };
       if (m.rtCd && m.rtCd !== '0' && !/ALREADY/i.test(m.msg || ''))
         this.log(`⚠️ 구독 응답: ${m.msg || m.raw.slice(0, 120)}`);
+      return;
+    }
+    if (m.type === 'encrypted') {
+      // 체결통보 복호화 (AES-256-CBC, base64)
+      const k = this.aes[m.trId];
+      if (!k || !this.onExecution) return;
+      try {
+        const dec = crypto.createDecipheriv('aes-256-cbc', Buffer.from(k.key, 'utf8'), Buffer.from(k.iv, 'utf8'));
+        const txt = Buffer.concat([dec.update(Buffer.from(m.payloadB64, 'base64')), dec.final()]).toString('utf8');
+        const f = txt.split('^');
+        // 체결통보 필드: [2]주문번호 [8]종목코드 [9]체결수량 [10]체결단가 [13]체결여부('2'=체결)
+        this.onExecution({ odno: f[2], code: f[8], qty: parseInt(f[9] || 0), price: parseInt(f[10] || 0), filled: f[13] === '2' });
+      } catch (e) { this.log('⚠️ 체결통보 복호화 실패: ' + e.message); }
       return;
     }
     if (m.type === 'price') {
@@ -378,6 +401,12 @@ class KisFeed {
       this.ensure(TR_PRICE, client.obCode);
       this.ensure(TR_ORDERBOOK, client.obCode);
     }
+    // HTS ID가 새로 설정/변경됐고 이미 연결돼 있으면 체결통보 즉시 구독 (재시작 불필요)
+    if (this.connected && this.cfg.htsId && this._cniId !== this.cfg.htsId) {
+      this._cniId = this.cfg.htsId;
+      this._sendSub(this.cfg.txMode === 'live' ? 'H0STCNI0' : 'H0STCNI9', this.cfg.htsId, true);
+      this.log(`📨 체결통보 구독 (${this.cfg.htsId})`);
+    }
     this.connect(); // 미연결이면 연결 시작
   }
 
@@ -396,7 +425,7 @@ function getFeed(cfg) {
 // ════════════════════════════════════════
 // SSE 핸들러 — GET /api/stream?codes=005930,000660&ob=005930
 // ════════════════════════════════════════
-function handleStream(req, res, { cfg, query, onPrice }) {
+function handleStream(req, res, { cfg, query, onPrice, onExecution }) {
   const codes = (query.codes || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 15);
   const obCode = (query.ob || '').trim() || null;
 
@@ -410,6 +439,7 @@ function handleStream(req, res, { cfg, query, onPrice }) {
 
   const feed = getFeed(cfg);
   if (onPrice) feed.onPrice = onPrice;
+  if (onExecution) feed.onExecution = onExecution;
   const client = { res, codes: new Set(codes), obCode };
   feed.addClient(client);
   res.write(`event: status\ndata: ${JSON.stringify({ connected: feed.connected })}\n\n`);

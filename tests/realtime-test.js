@@ -136,6 +136,20 @@ function startFakeKis(onClientMsg) {
   await sleep(200);
   ok('SSE orderbook 이벤트 전달', sse.some(s => s.includes('event: orderbook') && s.includes('"totBid":8000')));
 
+  // 체결통보 (암호화 TR): 구독응답 key/iv 수신 → AES 복호화 → onExecution 콜백
+  const aesKey = '01234567890123456789012345678901', aesIv = '0123456789012345';
+  let execGot = null;
+  feed.onExecution = ex => { execGot = ex; };
+  fake.sendText(JSON.stringify({ header: { tr_id: 'H0STCNI9' }, body: { rt_cd: '0', msg1: 'SUBSCRIBE SUCCESS', output: { key: aesKey, iv: aesIv } } }));
+  await sleep(150);
+  const ef = Array(20).fill('0');
+  ef[2] = '0000099999'; ef[8] = '035720'; ef[9] = '1'; ef[10] = '42000'; ef[13] = '2';
+  const ciph = crypto.createCipheriv('aes-256-cbc', Buffer.from(aesKey), Buffer.from(aesIv));
+  const encB64 = Buffer.concat([ciph.update(Buffer.from(ef.join('^'), 'utf8')), ciph.final()]).toString('base64');
+  fake.sendText('1|H0STCNI9|001|' + encB64);
+  await sleep(200);
+  ok('체결통보 복호화·파싱', !!execGot && execGot.odno === '0000099999' && execGot.code === '035720' && execGot.price === 42000 && execGot.filled === true);
+
   // 재연결 + 재구독
   fake.received.length = 0;
   fake.killAll();
