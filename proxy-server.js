@@ -15,10 +15,18 @@ const PORT = 3000;
 const CONFIG_FILE = path.join(__dirname, 'kis-config.json');
 const STOCK_FILE = path.join(__dirname, 'stocks-data.json');
 
-// ── 멀티유저: 현재 요청의 userId (요청마다 설정됨) ──
-// loadConfig/saveConfig가 이 값을 보고 해당 유저 설정을 읽고 씀
-let _currentUserId = null;
-function setCurrentUser(userId) { _currentUserId = userId; }
+// ── 멀티유저: 요청 스코프 userId (AsyncLocalStorage) ──
+// 이전엔 전역 변수 하나를 공유 → A 요청이 await 중 B 요청이 값을 바꾸면
+// A가 재개될 때 B의 계좌를 읽고 쓰는 치명적 경합이 있었다.
+// AsyncLocalStorage는 각 요청이 await를 건너도 자기 store를 유지하므로 교차가 불가능하다.
+const { AsyncLocalStorage } = require('async_hooks');
+const _als = new AsyncLocalStorage();
+function currentUserId() {
+  const store = _als.getStore();
+  return store ? store.userId : (global._fallbackUserId || null);
+}
+// 서버 기동 시 전역(하위호환) 경로 등 als 컨텍스트 밖에서 쓰는 경우만 사용
+function setCurrentUser(userId) { global._fallbackUserId = userId; }
 
 // ── KIS API 엔드포인트 ──
 const KIS_HOST_REAL = 'openapi.koreainvestment.com:9443';
@@ -52,8 +60,9 @@ function addToMaster(code, name) {
 // ── 설정 로드 (멀티유저) ──
 // _currentUserId가 있으면 그 유저 설정, 없으면 기존 전역 파일(하위호환/admin)
 function loadConfig() {
-  if (_currentUserId) {
-    return auth.loadUserConfig(_currentUserId);
+  const uid = currentUserId();
+  if (uid) {
+    return auth.loadUserConfig(uid);
   }
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -64,8 +73,10 @@ function loadConfig() {
 }
 
 function saveConfig(cfg) {
-  if (_currentUserId) {
-    auth.saveUserConfig(_currentUserId, cfg);
+  // cfg에 각인된 소유자 우선 → 없으면 요청 컨텍스트 → 둘 다 없으면 전역(하위호환)
+  const uid = (cfg && cfg.__userId) || currentUserId();
+  if (uid) {
+    auth.saveUserConfig(uid, cfg);
     return;
   }
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
@@ -999,9 +1010,11 @@ async function cancelStaleOrders() {
     if (e.orderType === '01') continue;                              // 시장가는 즉시 체결 — 대상 아님
     if (now - e.t < STALE_ORDER_CANCEL_MIN * 60000) continue;
     if (!e.odno) continue;
+    // 이 주문 주인의 als 컨텍스트로 실행 — getKisToken의 토큰 저장이 올바른 유저 파일로 가게
+    await _als.run({ userId: e.userId || null }, async () => {
     try {
       const cfg2 = e.userId ? auth.loadUserConfig(e.userId) : (() => { try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (err) { return null; } })();
-      if (!cfg2 || !cfg2.appKey) continue;
+      if (!cfg2 || !cfg2.appKey) return;
       const trId = cfg2.txMode === 'vts' ? 'VTTC0803U' : 'TTTC0803U';
       const [cano, prd] = (cfg2.accNo || '').split('-');
       const r = await kisPost(cfg2, '/uapi/domestic-stock/v1/trading/order-rvsecncl', trId, {
@@ -1011,11 +1024,12 @@ async function cancelStaleOrders() {
         ORD_QTY: String(e.qty), ORD_UNPR: '0', QTY_ALL_ORD_YN: 'N'
       });
       if (r.body?.rt_cd === '0') {
-        orderJournal.markCancel(e.odno);
+        orderJournal.markCancel(e.odno, e.userId);
         console.log(`[자동취소] ${e.code} ${e.qty}주 @${e.price.toLocaleString()} — ${STALE_ORDER_CANCEL_MIN}분 미체결`);
       }
       // 실패(이미 체결 등)는 잔고 대조가 곧 상태를 정리함
     } catch (err) {}
+    });
   }
 }
 setInterval(() => { cancelStaleOrders().catch(() => {}); }, 60000).unref();
@@ -1023,18 +1037,28 @@ setInterval(() => { cancelStaleOrders().catch(() => {}); }, 60000).unref();
 // ════════════════════════════════════════
 // HTTP 서버
 // ════════════════════════════════════════
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => {
+  // 세션은 동기로 먼저 확정한 뒤, 그 userId를 요청 전용 als 컨텍스트에 담아 핸들러를 실행.
+  // 이렇게 하면 await가 끼어들어도 이 요청의 userId가 다른 요청에 의해 바뀌지 않는다.
+  let session = null;
+  try {
+    const cookies = auth.parseCookies(req);
+    session = auth.getUserBySession(cookies.session);
+  } catch (_) {}
+  _als.run({ userId: session ? session.userId : null }, () => {
+    handleRequest(req, res, session).catch(err => {
+      console.error('요청 처리 오류:', err && err.message);
+      try { jsonRes(res, 500, { ok: false, message: '서버 오류' }); } catch (_) {}
+    });
+  });
+});
+async function handleRequest(req, res, session) {
   setCors(res, req);
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const parsed  = new URL(req.url, 'http://localhost');
   const pathname = parsed.pathname;
   const query    = Object.fromEntries(parsed.searchParams);
-
-  // ── 세션 → 현재 유저 결정 ──
-  const cookies = auth.parseCookies(req);
-  const session = auth.getUserBySession(cookies.session);
-  setCurrentUser(session ? session.userId : null);
 
   // ── 정적 파일 — 화이트리스트 방식 (서버 소스 .js·설정 파일 노출 차단) ──
   const STATIC_WHITELIST = { '/': 'app.html', '/index.html': 'app.html', '/app.html': 'app.html' };
@@ -1256,16 +1280,17 @@ const server = http.createServer(async (req, res) => {
     // GET /api/stream?codes=005930,000660&ob=005930 — 실시간 시세 SSE (Phase 2)
     // KIS WebSocket을 구독해 체결가/호가를 브라우저로 푸시. 수신 시세는 가격캐시에도 반영.
     if (pathname === '/api/stream') {
+      const streamUserId = session ? session.userId : null; // 이 SSE의 소유 유저 — 체결통보를 이 유저 저널로만
       realtime.handleStream(req, res, {
         cfg, query,
         onPrice: (code, data) => {
           if (!global._priceCache) global._priceCache = {};
           global._priceCache[code] = { t: Date.now(), data };
         },
-        // 체결통보 → 저널 즉시 확정 (실제 체결가·수량)
+        // 체결통보 → 해당 유저 저널만 확정 (실제 체결가·수량) — 타 유저 주문 오염 방지
         onExecution: (ex) => {
           if (!ex.filled || !ex.odno) return;
-          const okJ = orderJournal.markFilled(ex.odno, ex.qty, ex.price);
+          const okJ = orderJournal.markFilled(ex.odno, ex.qty, ex.price, streamUserId);
           console.log(`[체결통보] ${ex.code} ${ex.qty}주 @${(ex.price || 0).toLocaleString()} (주문 ${ex.odno})${okJ ? ' — 저널 확정' : ''}`);
         }
       });
@@ -1842,7 +1867,7 @@ const server = http.createServer(async (req, res) => {
       // 큐를 통해 직렬화 + 초당 한도 거부 시 자동 재시도
       const result = await kisPost(cfg, '/uapi/domestic-stock/v1/trading/order-rvsecncl', trId, cancelObj);
       console.log(`[주문취소] ${body.ordNo} → ${result.body?.rt_cd==='0'?'✅성공':'❌'+(result.body?.msg1||'')}`);
-      if (result.body?.rt_cd === '0') orderJournal.markCancel(body.ordNo); // 저널에도 취소 반영
+      if (result.body?.rt_cd === '0') orderJournal.markCancel(body.ordNo, session && session.userId); // 저널에도 취소 반영 (본인 주문만)
       jsonRes(res, 200, { ok: true, data: result.body });
       return;
     }
@@ -1959,7 +1984,7 @@ const server = http.createServer(async (req, res) => {
     console.error('[API Error]', pathname, e.message);
     jsonRes(res, 500, { ok: false, message: e.message });
   }
-});
+}
 
 // ════════════════════════════════════════
 // 서버 시작

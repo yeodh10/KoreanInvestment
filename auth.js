@@ -30,7 +30,7 @@ function getEncKey() {
     }
   } catch(e) {}
   ENC_KEY = crypto.randomBytes(32);
-  try { fs.writeFileSync(KEY_FILE, ENC_KEY.toString('hex')); } catch(e) {}
+  try { fs.writeFileSync(KEY_FILE, ENC_KEY.toString('hex'), { mode: 0o600 }); } catch(e) {} // 소유자만 읽기 — 키 유출 방지
   return ENC_KEY;
 }
 
@@ -63,7 +63,24 @@ function verifyPassword(password, stored) {
   if (!stored || !stored.includes(':')) return false;
   const [salt, hash] = stored.split(':');
   const test = crypto.scryptSync(password, salt, 64).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(test));
+  const a = Buffer.from(hash), b = Buffer.from(test);
+  if (a.length !== b.length) return false; // 길이 다르면 timingSafeEqual이 throw → 방어
+  return crypto.timingSafeEqual(a, b);
+}
+// 더미 검증 — 존재하지 않는 아이디에도 scrypt를 돌려 응답시간을 맞춤 (유저 존재 여부 누설 차단)
+const _DUMMY_HASH = hashPassword('::dummy::');
+function dummyVerify(password) { try { verifyPassword(password || '', _DUMMY_HASH); } catch (_) {} }
+
+// 세션 토큰은 SHA-256 해시로 저장 — sessions.json 유출 시에도 원본 토큰 복원 불가
+function hashToken(token) { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
+
+// ── 원자적 파일 쓰기 (temp → rename) ──
+// 쓰기 도중 크래시로 파일이 절단되면 loadUsers가 {}를 반환 → 전 계정 소실 + 다음 가입자가 admin.
+// temp에 다 쓴 뒤 rename(원자적)하면 절단된 파일이 절대 안 남는다.
+function _atomicWrite(file, text) {
+  const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
 }
 
 // ── 유저 저장소 ──
@@ -74,7 +91,7 @@ function loadUsers() {
   return {};
 }
 function saveUsers(users) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  _atomicWrite(USERS_FILE, JSON.stringify(users, null, 2)); // 원자적 — 절단으로 인한 전 계정 소실 방지
 }
 
 // ── 세션 저장소 ──
@@ -85,7 +102,7 @@ function loadSessions() {
   return {};
 }
 function saveSessions(s) {
-  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(s));
+  _atomicWrite(SESSIONS_FILE, JSON.stringify(s));
 }
 
 // ── 회원가입 ──
@@ -93,7 +110,7 @@ function register(username, password) {
   username = (username || '').trim().toLowerCase();
   if (!username || !password) return { ok:false, message:'아이디와 비밀번호를 입력하세요' };
   if (username.length < 3) return { ok:false, message:'아이디는 3자 이상이어야 합니다' };
-  if (password.length < 4) return { ok:false, message:'비밀번호는 4자 이상이어야 합니다' };
+  if (password.length < 8) return { ok:false, message:'비밀번호는 8자 이상이어야 합니다' };
   const users = loadUsers();
   if (users[username]) return { ok:false, message:'이미 존재하는 아이디입니다' };
   const userId = 'u_' + crypto.randomBytes(6).toString('hex');
@@ -112,12 +129,12 @@ function login(username, password) {
   username = (username || '').trim().toLowerCase();
   const users = loadUsers();
   const user = users[username];
-  if (!user) return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' };
+  if (!user) { dummyVerify(password); return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' }; } // 더미 검증 — 타이밍 누설 차단
   if (!verifyPassword(password, user.passwordHash)) return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' };
-  // 세션 발급
-  const token = crypto.randomBytes(24).toString('hex');
+  // 세션 발급 — 원본 토큰은 쿠키로만 주고, 서버엔 해시만 저장
+  const token = crypto.randomBytes(32).toString('hex');
   const sessions = loadSessions();
-  sessions[token] = { userId: user.userId, username, createdAt: Date.now() };
+  sessions[hashToken(token)] = { userId: user.userId, username, createdAt: Date.now() };
   saveSessions(sessions);
   return { ok:true, token, userId: user.userId, username, role: user.role };
 }
@@ -126,11 +143,12 @@ function login(username, password) {
 function getUserBySession(token) {
   if (!token) return null;
   const sessions = loadSessions();
-  const s = sessions[token];
+  const key = hashToken(token);
+  const s = sessions[key] || sessions[token]; // 해시 우선, 레거시(원본키) 하위호환
   if (!s) return null;
   // 30일 만료
   if (Date.now() - s.createdAt > 30*24*60*60*1000) {
-    delete sessions[token]; saveSessions(sessions); return null;
+    delete sessions[key]; delete sessions[token]; saveSessions(sessions); return null;
   }
   return s; // { userId, username }
 }
@@ -138,7 +156,11 @@ function getUserBySession(token) {
 // ── 로그아웃 ──
 function logout(token) {
   const sessions = loadSessions();
-  if (sessions[token]) { delete sessions[token]; saveSessions(sessions); }
+  const key = hashToken(token);
+  let changed = false;
+  if (sessions[key]) { delete sessions[key]; changed = true; }
+  if (sessions[token]) { delete sessions[token]; changed = true; } // 레거시 키
+  if (changed) saveSessions(sessions);
   return { ok:true };
 }
 
@@ -153,6 +175,7 @@ function loadUserConfig(userId) {
       const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
       // 복호화해서 반환
       return {
+        __userId: userId, // 소유자 각인 — 어떤 컨텍스트에서 저장하든 올바른 유저 파일로 가게
         appKey: decrypt(raw.appKey),
         appSecret: decrypt(raw.appSecret),
         accNo: raw.accNo || '',
@@ -164,7 +187,7 @@ function loadUserConfig(userId) {
       };
     }
   } catch(e) {}
-  return { appKey:'', appSecret:'', accNo:'', txMode:'vts', token:'', tokenExpiry:0, telegramToken:'', telegramChatId:'' };
+  return { __userId: userId, appKey:'', appSecret:'', accNo:'', txMode:'vts', token:'', tokenExpiry:0, telegramToken:'', telegramChatId:'' };
 }
 function saveUserConfig(userId, cfg) {
   const p = userConfigPath(userId);
@@ -179,7 +202,7 @@ function saveUserConfig(userId, cfg) {
     telegramToken: encrypt(cfg.telegramToken),
     telegramChatId: cfg.telegramChatId || ''
   };
-  fs.writeFileSync(p, JSON.stringify(toSave, null, 2));
+  _atomicWrite(p, JSON.stringify(toSave, null, 2)); // 원자적 — 설정 파일 절단 방지
 }
 
 // ── 쿠키 파싱 ──

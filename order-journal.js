@@ -54,9 +54,10 @@ function add(e) {
 }
 
 // ── 체결통보 기반 체결 처리 (실제 체결가·수량 반영, 부분체결 누적) ──
-function markFilled(odno, qty, price) {
+// userId 지정 시 그 유저 주문만 매칭 — 타 유저 체결통보가 내 주문을 건드리는 것 방지
+function markFilled(odno, qty, price, userId) {
   const list = _load();
-  const e = list.find(x => x.odno === odno && x.status !== '취소');
+  const e = list.find(x => x.odno === odno && x.status !== '취소' && (!userId || x.userId === userId));
   if (e) {
     const q = parseInt(qty) || 0;
     e.fillQty = (e.fillQty || 0) + q;            // 부분체결 누적 합산
@@ -74,9 +75,9 @@ function markFilled(odno, qty, price) {
 }
 
 // ── 취소 처리 — 부분체결분 이력은 보존 ──
-function markCancel(odno) {
+function markCancel(odno, userId) {
   const list = _load();
-  const e = list.find(x => x.odno === odno && (x.status === '접수' || x.status === '부분체결'));
+  const e = list.find(x => x.odno === odno && (x.status === '접수' || x.status === '부분체결') && (!userId || x.userId === userId));
   if (e) {
     // 일부라도 체결된 주문의 취소 = 잔량 취소. 체결 이력을 '취소'로 덮어 지우지 않는다.
     e.status = (e.fillQty > 0) ? '체결' : '취소';
@@ -93,7 +94,7 @@ function reconcile(userId, holdings) {
   const list = _load();
   let changed = 0;
   for (const e of list) {
-    if (e.status !== '접수' || (userId && e.userId && e.userId !== userId)) continue;
+    if (e.status !== '접수' || (userId && e.userId !== userId)) continue; // 타 유저 주문 제외 (userId 없는 엔트리도 제외)
     if (e.qtyBefore === null || e.qtyBefore === undefined) continue; // 기준 없으면 판정 보류
     const nowQty = parseInt(holdings[e.code] || 0);
     if (e.side === 'buy'  && nowQty >= e.qtyBefore + e.qty) { e.status = '체결'; e.filledAt = Date.now(); changed++; }
@@ -103,10 +104,14 @@ function reconcile(userId, holdings) {
   return changed;
 }
 
+// userId가 지정되면 그 유저 주문만 — userId 없는(레거시) 엔트리가 전 유저에게 노출되던 정보 유출 차단.
+// userId가 falsy(전역/admin 컨텍스트)일 때만 전체 조회.
+function _owns(e, userId) { return !userId || e.userId === userId; }
+
 // ── 오늘(KST) 주문 목록 ──
 function todayList(userId) {
   const today = _kstDateKey();
-  return _load().filter(e => _kstDateKey(e.t) === today && (!userId || !e.userId || e.userId === userId));
+  return _load().filter(e => _kstDateKey(e.t) === today && _owns(e, userId));
 }
 
 // ── 미체결(접수·부분체결 잔량) 목록 ──
@@ -118,7 +123,7 @@ function pendingList(userId) {
 function listRange(userId, fromYmd, toYmd) {
   return _load().filter(e => {
     const d = _kstDateKey(e.t).replace(/-/g, '');
-    return d >= fromYmd && d <= toYmd && (!userId || !e.userId || e.userId === userId);
+    return d >= fromYmd && d <= toYmd && _owns(e, userId);
   });
 }
 

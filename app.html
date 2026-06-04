@@ -3797,7 +3797,7 @@ let _lastPriceTick = 0, _lastObTick = 0, _lastWatchPoll = 0, _lastObPoll = 0;
 let _streamWant = '';
 function startStream() {
   if (!proxyOnline || typeof EventSource === 'undefined') return;
-  const codes = watchCodes.slice(0, 15);
+  const codes = watchCodes.slice(0, 33); // 시총30 시세표 전체 실시간 (서버 한도 40 내)
   const want = codes.join(',') + '|' + (obCode || '');
   if (_es && want === _streamWant) return; // 구독 대상 동일 — 재연결 불필요
   _streamWant = want;

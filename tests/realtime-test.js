@@ -106,8 +106,8 @@ function startFakeKis(onClientMsg) {
   const feed = rt.getFeed(cfg);
   const sse = []; // 가짜 SSE 클라이언트가 받은 라인들
   let cacheHits = [];
-  feed.onPrice = (code, data) => cacheHits.push({ code, data });
-  const client = { res: { write: s => sse.push(s) }, codes: new Set(['005930']), obCode: '005930' };
+  const client = { id: 1, res: { write: s => sse.push(s) }, codes: new Set(['005930']), obCode: '005930' };
+  feed.priceHooks.set(client.id, (code, data) => cacheHits.push({ code, data }));
   feed.addClient(client);
 
   await sleep(400);
@@ -139,7 +139,7 @@ function startFakeKis(onClientMsg) {
   // 체결통보 (암호화 TR): 구독응답 key/iv 수신 → AES 복호화 → onExecution 콜백
   const aesKey = '01234567890123456789012345678901', aesIv = '0123456789012345';
   let execGot = null;
-  feed.onExecution = ex => { execGot = ex; };
+  feed.execHooks.set(client.id, ex => { execGot = ex; });
   fake.sendText(JSON.stringify({ header: { tr_id: 'H0STCNI9' }, body: { rt_cd: '0', msg1: 'SUBSCRIBE SUCCESS', output: { key: aesKey, iv: aesIv } } }));
   await sleep(150);
   const ef = Array(20).fill('0');

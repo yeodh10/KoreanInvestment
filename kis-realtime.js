@@ -23,7 +23,8 @@ const WS_PORT_VTS  = 31000;
 const REST_REAL = { hostname: 'openapi.koreainvestment.com',    port: 9443 };
 const REST_VTS  = { hostname: 'openapivts.koreainvestment.com', port: 29443 };
 
-const MAX_REG = 20;            // 세션당 실시간 등록 한도 (체결+호가 합산, 보수적)
+const MAX_REG = 40;            // 세션당 실시간 등록 한도 (KIS 41건 한도 내). 시총30 시세표(30) + 호가(2)가
+                              //  20을 넘겨 자기 구독을 스스로 LRU 축출하던 문제 → 40으로 상향
 const TR_PRICE = 'H0STCNT0';   // 실시간 체결가
 const TR_ORDERBOOK = 'H0STASP0'; // 실시간 호가
 
@@ -258,8 +259,10 @@ class KisFeed {
     this.connecting = false;
     this.regs = new Map();      // 'TRID:code' → { lastUsed }
     this.clients = new Set();   // SSE 클라이언트 { res, codes:Set, obCode }
-    this.onPrice = null;        // (code, data) → 서버 가격캐시 갱신 훅
-    this.onExecution = null;    // 체결통보 훅 ({odno, code, qty, price, filled})
+    // 콜백을 Set으로 — 매 요청 덮어쓰기로 마지막 호출자 것만 남던 버그(멀티 클라이언트 크로스 배선) 수정.
+    // clientId로 묶어 클라이언트 종료 시 정확히 해당 콜백만 해제(죽은 클로저 호출 방지).
+    this.priceHooks = new Map();     // clientId → (code, data)
+    this.execHooks = new Map();      // clientId → ({odno, code, qty, price, filled})
     this.aes = {};              // 암호화 TR별 AES key/iv (구독 응답에서 수신)
     this._retry = 0;
     this._closed = false;
@@ -378,13 +381,14 @@ class KisFeed {
     if (m.type === 'encrypted') {
       // 체결통보 복호화 (AES-256-CBC, base64)
       const k = this.aes[m.trId];
-      if (!k || !this.onExecution) return;
+      if (!k || !this.execHooks.size) return;
       try {
         const dec = crypto.createDecipheriv('aes-256-cbc', Buffer.from(k.key, 'utf8'), Buffer.from(k.iv, 'utf8'));
         const txt = Buffer.concat([dec.update(Buffer.from(m.payloadB64, 'base64')), dec.final()]).toString('utf8');
         const f = txt.split('^');
         // 체결통보 필드: [2]주문번호 [8]종목코드 [9]체결수량 [10]체결단가 [13]체결여부('2'=체결)
-        this.onExecution({ odno: f[2], code: f[8], qty: parseInt(f[9] || 0), price: parseInt(f[10] || 0), filled: f[13] === '2' });
+        const ev = { odno: f[2], code: f[8], qty: parseInt(f[9] || 0), price: parseInt(f[10] || 0), filled: f[13] === '2' };
+        for (const fn of this.execHooks.values()) try { fn(ev); } catch (_) {}
       } catch (e) { this.log('⚠️ 체결통보 복호화 실패: ' + e.message); }
       return;
     }
@@ -395,7 +399,7 @@ class KisFeed {
         const data = { price: t.price, chgPct: t.chgPct, sign: t.sign,
                        prev: t.price - t.vrss * (t.sign === '5' || t.sign === '4' ? -1 : 1),
                        accVol: t.accVol }; // 누적거래량도 캐시 — volume100 폴백 정렬용
-        if (this.onPrice) try { this.onPrice(t.code, data) } catch (_) {}
+        for (const fn of this.priceHooks.values()) try { fn(t.code, data); } catch (_) {}
         this._broadcast('price', { code: t.code, ...data, accVol: t.accVol, time: t.time });
       }
       return;
@@ -434,23 +438,45 @@ class KisFeed {
     this.connect(); // 미연결이면 연결 시작
   }
 
-  removeClient(client) { this.clients.delete(client); }
+  removeClient(client) {
+    this.clients.delete(client);
+    if (client.id) { this.priceHooks.delete(client.id); this.execHooks.delete(client.id); }
+    // 클라이언트 0명 → 2분 뒤에도 0이면 WS 연결·피드 정리 (유휴 연결·메모리 누수 방지)
+    if (this.clients.size === 0) {
+      if (this._idleTimer) clearTimeout(this._idleTimer);
+      this._idleTimer = setTimeout(() => {
+        if (this.clients.size === 0 && !this.cfg.htsId) { // 체결통보 구독(htsId) 중이면 유지
+          this._closed = true;
+          try { this.ws && this.ws.close(); } catch (_) {}
+          this._stopWatchdog && this._stopWatchdog();
+          delete _feeds[this._feedKey];
+          this.log('💤 클라이언트 없음 — 피드 정리');
+        }
+      }, 120000);
+      if (this._idleTimer.unref) this._idleTimer.unref();
+    }
+  }
 }
+let _clientSeq = 0;
 
 // ── 앱키별 피드 ──
 const _feeds = {};
 function getFeed(cfg) {
   const key = cfg.appKey || '_global';
   if (!_feeds[key]) _feeds[key] = new KisFeed(cfg);
-  _feeds[key].cfg = cfg; // 최신 설정 반영
-  return _feeds[key];
+  const f = _feeds[key];
+  f.cfg = cfg;          // 최신 설정 반영
+  f._feedKey = key;
+  f._closed = false;    // 재사용 시 닫힘 플래그 해제
+  if (f._idleTimer) { clearTimeout(f._idleTimer); f._idleTimer = null; } // 유휴 정리 예약 취소
+  return f;
 }
 
 // ════════════════════════════════════════
 // SSE 핸들러 — GET /api/stream?codes=005930,000660&ob=005930
 // ════════════════════════════════════════
 function handleStream(req, res, { cfg, query, onPrice, onExecution }) {
-  const codes = (query.codes || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 15);
+  const codes = (query.codes || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 35); // 시총30 시세표 전체 실시간 구독
   const obCode = (query.ob || '').trim() || null;
 
   res.writeHead(200, {
@@ -462,9 +488,10 @@ function handleStream(req, res, { cfg, query, onPrice, onExecution }) {
   res.write(': stream open\n\n');
 
   const feed = getFeed(cfg);
-  if (onPrice) feed.onPrice = onPrice;
-  if (onExecution) feed.onExecution = onExecution;
-  const client = { res, codes: new Set(codes), obCode };
+  const client = { id: ++_clientSeq, res, codes: new Set(codes), obCode };
+  // 클라이언트별로 콜백 등록 — 종료 시 자기 것만 해제 (덮어쓰기·죽은 클로저 호출 없음)
+  if (onPrice) feed.priceHooks.set(client.id, onPrice);
+  if (onExecution) feed.execHooks.set(client.id, onExecution);
   feed.addClient(client);
   res.write(`event: status\ndata: ${JSON.stringify({ connected: feed.connected })}\n\n`);
 
