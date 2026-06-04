@@ -112,7 +112,7 @@ button:active{transform:scale(.96)}            /* 토스 특유의 눌림감 */
 .page-body{padding:16px;max-width:100%}
 
 /* ── 대시보드 레이아웃 ── */
-.dash-grid{display:grid;grid-template-columns:1.5fr 1fr 290px;gap:12px;height:calc(100vh - var(--header-h) - 32px)}
+.dash-grid{display:grid;grid-template-columns:1.4fr 1.1fr 290px;gap:12px;height:calc(100vh - var(--header-h) - 32px)} /* 가운데(체결/뉴스/수급) 비율 확대 — 뉴스 제목 잘림 완화 */
 .dash-main{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0}
 .dash-mid{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0}
 .dash-side{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0}
@@ -391,11 +391,10 @@ td.mono,th.mono{font-family:var(--mono)}
     <div class="dash-grid">
       <div class="dash-main">
         <!-- 계좌 요약 (최상단) -->
-        <div class="pf-stats">
+        <div class="pf-stats" style="grid-template-columns:repeat(4,1fr)">
           <div class="pf-stat"><div class="lbl">총 자산</div><div class="val" id="pfTotal">—</div></div>
           <div class="pf-stat"><div class="lbl">평가손익</div><div class="val" id="pfPnl">—</div></div>
-          <div class="pf-stat"><div class="lbl">수익률</div><div class="val" id="pfRate">—</div></div>
-          <div class="pf-stat"><div class="lbl">예수금</div><div class="val" id="pfCash">—</div></div>
+          <div class="pf-stat"><div class="lbl">매입금액</div><div class="val" id="pfPrincipal2">—</div></div>
           <div class="pf-stat"><div class="lbl">보유종목</div><div class="val" id="pfHold">—</div></div>
         </div>
         <div class="panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
@@ -490,7 +489,7 @@ td.mono,th.mono{font-family:var(--mono)}
               <span class="panel-title">보유종목</span>
               <button class="panel-btn" onclick="showPage('portfolio')">전체보기</button>
             </div>
-            <div class="tbl-wrap" style="max-height:160px;overflow-y:auto">
+            <div class="tbl-wrap" style="max-height:280px;overflow-y:auto"><!-- 160→280px: 3종목 이상 보유 시 잘리던 문제 -->
               <table>
                 <thead><tr><th>종목</th><th>수익률</th><th>평가손익</th><th>현재가</th></tr></thead>
                 <tbody id="dashHoldBody"><tr><td colspan="4" class="empty" style="padding:16px">아직 보유한 종목이 없어요</td></tr></tbody>
@@ -1929,17 +1928,22 @@ async function dashOrder(side) {
     }
   } finally { _orderInflight = false; }
 }
+let _obInflight = false;
 async function refreshOB() {
-  if (!obCode || !proxyOnline) return;
+  if (!obCode || !proxyOnline || _obInflight) return;
   // 실시간 호가 수신 중엔 REST 폴링을 12초에 1번으로 감속 (스트림 끊기면 자동 복귀)
   if (_streamConnected && Date.now() - _lastObTick < 10000 && Date.now() - _lastObPoll < 12000) return;
   _lastObPoll = Date.now();
-  const r = await api(`/api/orderbook?code=${obCode}`);
-  if (!r?.ok || !r.data) return;
-  renderOB(r.data.output1 || {});
+  _obInflight = true;
+  try {
+    const r = await api(`/api/orderbook?code=${obCode}`);
+    if (!r?.ok || !r.data) return;
+    renderOB(r.data.output1 || {}, { synthetic: !!r.synthetic, cached: !!r.cached });
+  } finally { _obInflight = false; }
 }
 // 호가 렌더러 — REST(output1)와 실시간 스트림(SSE)이 공용 사용
-function renderOB(d) {
+function renderOB(d, opt) {
+  opt = opt || {};
   const asks = [], bids = [];
   for (let i=10; i>=1; i--) asks.push({ price:parseInt(d[`askp${i}`]||0), qty:parseInt(d[`askp_rsqn${i}`]||0) });
   for (let i=1; i<=10; i++)  bids.push({ price:parseInt(d[`bidp${i}`]||0), qty:parseInt(d[`bidp_rsqn${i}`]||0) });
@@ -1979,7 +1983,9 @@ function renderOB(d) {
     </div>`;
   };
   const curPct = fmtPct(curPrice);
-  const curHtml = `<span style="font-size:15px;font-weight:700;font-family:var(--mono);color:var(--red)">₩${curPrice.toLocaleString()}</span>${curPct!==null?`<span style="font-size:11px;font-family:var(--mono);margin-left:6px;color:${pctColor(curPct)}">${parseFloat(curPct)>=0?'+':''}${curPct}%</span>`:''}`;
+  const obNote = (d.synthetic || opt.synthetic) ? '<span style="font-size:9px;color:var(--text-3);margin-left:6px">합성호가</span>'
+               : opt.cached ? '<span style="font-size:9px;color:var(--text-3);margin-left:6px">마감 호가</span>' : '';
+  const curHtml = `<span style="font-size:15px;font-weight:700;font-family:var(--mono);color:var(--red)">₩${curPrice.toLocaleString()}</span>${curPct!==null?`<span style="font-size:11px;font-family:var(--mono);margin-left:6px;color:${pctColor(curPct)}">${parseFloat(curPct)>=0?'+':''}${curPct}%</span>`:''}${obNote}`;
 
   // 체결강도
   const totalAsk=asks.reduce((s,a)=>s+a.qty,0), totalBid=bids.reduce((s,b)=>s+b.qty,0);
@@ -2086,6 +2092,12 @@ async function loadAccount() {
   if (!proxyOnline) return;
   const r = await api('/api/account');
   if (!r?.ok || !r.data) return;
+  LS.setObj('acctSnap', r.data); // 마지막 계좌 스냅샷 — 다음 부팅 시 즉시 페인트용
+  return applyAccount(r.data);
+}
+// 계좌 데이터 → 화면 반영 (loadAccount + 부팅 시 스냅샷 페인트 공용)
+function applyAccount(data) {
+  const r = { data };
   const s = (r.data.output2 && r.data.output2[0]) || {};
   const principal = parseInt(s.pchs_amt_smtl_amt||0);
   const cash = parseInt(s.dnca_tot_amt||s.prvs_rcdl_excc_amt||0);
@@ -2101,10 +2113,10 @@ async function loadAccount() {
   $('sbPnl').textContent = (up?'+':'')+'₩'+pnl.toLocaleString();
   $('sbPnl').className = 'sub '+(up?'up':'dn');
   setText('pfTotal', '₩'+totalAsset.toLocaleString());
-  $('pfPnl').textContent = (up?'+':'')+'₩'+pnl.toLocaleString();
+  // 평가손익 옆 수익률을 괄호로 병기 — 별도 수익률 패널 제거
+  $('pfPnl').textContent = (up?'+':'')+'₩'+pnl.toLocaleString()+' ('+(up?'+':'')+rate+'%)';
   $('pfPnl').className = 'val '+(up?'up':'dn');
-  setText('pfRate', (up?'+':'')+rate+'%');
-  setText('pfCash', '₩'+cash.toLocaleString());
+  setText('pfPrincipal2', '₩'+principal.toLocaleString()); // 종목 구매금(매입금액) — 예수금 패널 대체
   setText('pfHold', holdings.length+'종목');
   // 대시보드 보유종목 미니 테이블 갱신
   refreshDashHoldings(r.data);
@@ -2168,7 +2180,7 @@ function updateMiniPortfolio(data, total, pnl, cash, rate, up) {
     listEl.innerHTML = '<div style="font-size:11px;color:var(--text-3);text-align:center;padding:8px">보유 종목 없음</div>';
     return;
   }
-  listEl.innerHTML = positions.slice(0, 4).map(p => {
+  listEl.innerHTML = positions.slice(0, 12).map(p => { // 4→12: 미니 포트폴리오도 확대
     const name = esc(p.prdt_name || nameOf(p.pdno));
     const plRt = parseFloat(p.evlu_pfls_rt || 0);
     const u = plRt >= 0;
@@ -2555,10 +2567,10 @@ async function loadNews(code) {
       : title;
     return `<div style="padding:8px 4px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:baseline;gap:8px">
-        <div style="flex:1;font-size:13px;color:var(--text-0);line-height:1.4;font-weight:500">${titleHtml}</div>
-        ${timeDisp ? `<div style="flex-shrink:0;font-size:11px;font-weight:600;color:var(--blue);font-family:var(--mono);white-space:nowrap;background:var(--blue-dim);padding:2px 7px;border-radius:10px">${timeDisp}</div>` : ''}
+        <div style="flex:1;min-width:0;font-size:13px;color:var(--text-0);line-height:1.4;font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${titleHtml}</div>
+        ${timeDisp ? `<div style="flex-shrink:0;font-size:10px;font-weight:600;color:var(--blue);font-family:var(--mono);white-space:nowrap;background:var(--blue-dim);padding:1px 6px;border-radius:10px">${timeDisp}</div>` : ''}
       </div>
-      ${source ? `<div style="font-size:11px;color:var(--text-3);margin-top:3px">${source}</div>` : ''}
+      ${source ? `<div style="font-size:10.5px;color:var(--text-3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${source}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -3044,7 +3056,7 @@ async function refreshDashHoldings(accountData) {
     tbody.innerHTML = '<tr><td colspan="4" class="empty" style="padding:12px">보유 종목 없음</td></tr>';
     return;
   }
-  tbody.innerHTML = positions.slice(0, 8).map(p => {
+  tbody.innerHTML = positions.slice(0, 30).map(p => { // 8→30: 스크롤로 전부 표시
     const name = esc(p.prdt_name || nameOf(p.pdno));
     const plRt = parseFloat(p.evlu_pfls_rt||0);
     const pl = parseInt(p.evlu_pfls_amt||0);
@@ -3304,7 +3316,7 @@ async function loadVol100() {
 // ══════════════════════════════════════════════════════
 // 관심종목 페이지
 // ══════════════════════════════════════════════════════
-let watchCodes = LS.getObj('watchCodes') || ['005930','000660','035420','035720','373220'];
+let watchCodes = LS.getObj('watchCodes') || ['005930','000660','373220','207940','005380','000270','068270','035420','035720','005490']; // 우량주 10 기본
 function saveWatchlist() { LS.setObj('watchCodes', watchCodes); }
 function onWlSearch() {
   const q=$('wlAddInput').value.trim(), dd=$('wlSearchDd');
@@ -3453,7 +3465,9 @@ async function loadPerformance() {
 // ══════════════════════════════════════════════════════
 // 자동매매
 // ══════════════════════════════════════════════════════
-let autoWatchList = ['005930','000660','035720'];
+let autoWatchList = ['005930','000660','373220','207940','005380','000270','068270','005490','035420','035720',
+  '051910','006400','105560','055550','086790','316140','032830','015760','034730','003550',
+  '017670','030200','012330','009150','066570','096770','028260','010130','011200','024110']; // 우량주 30
 let autoLogPollTimer = null;
 async function loadAutoStatus() {
   const r=await api('/api/auto/status');
@@ -3844,6 +3858,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('authScreen').style.display = 'none';
   $('app').style.display = 'grid';
   setText('hdrUsername', me.username + (me.role === 'admin' ? ' 👑' : ''));
+
+  // 캐시 우선 첫 페인트 — 서버 응답 전에 마지막 계좌 스냅샷으로 즉시 그린다 (이후 실데이터로 덮어씀)
+  try { const snap = LS.getObj('acctSnap'); if (snap) applyAccount(snap); } catch(_) {}
 
   // 프록시 연결 확인 후 시작
   await checkProxy();

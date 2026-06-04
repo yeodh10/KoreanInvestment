@@ -53,25 +53,37 @@ function add(e) {
   return list[0];
 }
 
-// ── 체결통보 기반 확정 체결 처리 (실제 체결가·수량 반영) ──
+// ── 체결통보 기반 체결 처리 (실제 체결가·수량 반영, 부분체결 누적) ──
 function markFilled(odno, qty, price) {
   const list = _load();
   const e = list.find(x => x.odno === odno && x.status !== '취소');
   if (e) {
-    e.status = '체결';
-    e.filledAt = Date.now();
-    if (qty) e.fillQty = parseInt(qty);
+    const q = parseInt(qty) || 0;
+    e.fillQty = (e.fillQty || 0) + q;            // 부분체결 누적 합산
     if (price) { e.fillPrice = parseInt(price); e.price = parseInt(price); } // 실제 체결가로 갱신
+    if (!q || e.fillQty >= e.qty) {              // 수량 미상(구버전 호환) 또는 전량 도달 = 체결 확정
+      e.status = '체결';
+      e.fillQty = Math.min(e.fillQty || e.qty, e.qty);
+    } else {
+      e.status = '부분체결';                      // 잔량 남음 — '접수'와 구분해 자동취소·재매도 가드가 인지
+    }
+    e.filledAt = Date.now();
     _saveSoon();
   }
   return !!e;
 }
 
-// ── 취소 처리 ──
+// ── 취소 처리 — 부분체결분 이력은 보존 ──
 function markCancel(odno) {
   const list = _load();
-  const e = list.find(x => x.odno === odno && x.status === '접수');
-  if (e) { e.status = '취소'; _saveSoon(); }
+  const e = list.find(x => x.odno === odno && (x.status === '접수' || x.status === '부분체결'));
+  if (e) {
+    // 일부라도 체결된 주문의 취소 = 잔량 취소. 체결 이력을 '취소'로 덮어 지우지 않는다.
+    e.status = (e.fillQty > 0) ? '체결' : '취소';
+    if (e.fillQty > 0) e.qty = e.fillQty; // 실제 체결 수량으로 확정
+    e.canceledRemainder = true;
+    _saveSoon();
+  }
   return !!e;
 }
 
@@ -97,9 +109,9 @@ function todayList(userId) {
   return _load().filter(e => _kstDateKey(e.t) === today && (!userId || !e.userId || e.userId === userId));
 }
 
-// ── 미체결(접수 상태) 목록 ──
+// ── 미체결(접수·부분체결 잔량) 목록 ──
 function pendingList(userId) {
-  return todayList(userId).filter(e => e.status === '접수');
+  return todayList(userId).filter(e => e.status === '접수' || e.status === '부분체결');
 }
 
 // ── 기간 목록 (KST yyyymmdd ~ yyyymmdd) ──
@@ -118,6 +130,7 @@ function toKisFormat(entries, nameOf) {
     const mm = String(d.getUTCMinutes()).padStart(2, '0');
     const ss = String(d.getUTCSeconds()).padStart(2, '0');
     const filled = e.status === '체결';
+    const partial = e.status === '부분체결';
     const canceled = e.status === '취소';
     return {
       ord_dt: _kstDateKey(e.t).replace(/-/g, ''),
@@ -129,9 +142,9 @@ function toKisFormat(entries, nameOf) {
       ord_dvsn_name: e.orderType === '01' ? '시장가' : '지정가',
       ord_qty: String(e.qty),
       ord_unpr: String(e.price),
-      tot_ccld_qty: filled ? String(e.qty) : '0',
-      avg_prvs: filled ? String(e.price) : '0',
-      rmn_qty: (filled || canceled) ? '0' : String(e.qty),
+      tot_ccld_qty: filled ? String(e.qty) : partial ? String(e.fillQty || 0) : '0',
+      avg_prvs: (filled || partial) ? String(e.fillPrice || e.price) : '0',
+      rmn_qty: (filled || canceled) ? '0' : partial ? String(e.qty - (e.fillQty || 0)) : String(e.qty),
       cncl_yn: canceled ? 'Y' : 'N',
       odno: e.odno || '',
       ord_gno_brno: e.orgNo || '',

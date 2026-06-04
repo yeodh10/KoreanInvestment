@@ -104,11 +104,19 @@ async function getKisToken(cfg) {
   if (cfg.token && cfg.tokenExpiry > now + 60000) return cfg.token;
 
   const tkey = cfg.appKey || '_global';
-  const st = _tokenIssue[tkey] || (_tokenIssue[tkey] = { p: null, failUntil: 0 });
+  const st = _tokenIssue[tkey] || (_tokenIssue[tkey] = { p: null, failUntil: 0, token: null, expiry: 0 });
+
+  // 메모리 토큰 미러 — cfg(매 요청 새로 로드)에 토큰이 없어도 발급분 재사용.
+  // 토큰 만료 시점이 겹쳐도 "주문 1분 불가" 없이 직전 발급 토큰으로 이어간다.
+  if (st.token && st.expiry > now + 60000) {
+    cfg.token = st.token; cfg.tokenExpiry = st.expiry;
+    return st.token;
+  }
 
   // 실패 쿨다운 중 — 기존 토큰이 아직 살아있으면 그것 사용, 아니면 대기 안내
   if (now < st.failUntil) {
     if (cfg.token && cfg.tokenExpiry > now) return cfg.token;
+    if (st.token && st.expiry > now) return st.token;
     throw new Error('토큰 발급 제한(1분 1회) — 잠시 후 자동 재시도됩니다');
   }
 
@@ -136,6 +144,7 @@ async function getKisToken(cfg) {
     if (res.body && res.body.access_token) {
       cfg.token = res.body.access_token;
       cfg.tokenExpiry = Date.now() + (res.body.expires_in - 600) * 1000; // 10분 여유
+      st.token = cfg.token; st.expiry = cfg.tokenExpiry; // 메모리 미러 — 파일 저장 실패에도 유지
       saveConfig(cfg);
       st.failUntil = 0;
       return cfg.token;
@@ -144,6 +153,7 @@ async function getKisToken(cfg) {
     st.failUntil = Date.now() + 65000;
     // 기존 토큰이 아직 안 죽었으면 그거라도 사용
     if (cfg.token && cfg.tokenExpiry > Date.now()) return cfg.token;
+    if (st.token && st.expiry > Date.now()) return st.token;
     throw new Error('토큰 발급 실패: ' + JSON.stringify(res.body));
   })();
 
@@ -540,6 +550,62 @@ function getTrader(userId) {
   return t;
 }
 
+// ── 뉴스 수집 (KIS → 구글 RSS → 네이버 링크) — 라우트는 SWR 캐시로 즉시 응답 ──
+async function _fetchNews(cfg, code, fallbackUrl) {
+  // 1) KIS 뉴스 — 권한 없는 키가 대부분. 한 번 실패하면 6시간 동안 건너뛴다.
+  if (!global._kisNewsFailAt || Date.now() - global._kisNewsFailAt > 6 * 3600 * 1000) {
+    try {
+      const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/news-title', 'FHKST01011800', {
+        FID_NEWS_OFER_ENTP_CODE: '', FID_COND_MRKT_DIV_CODE: 'J',
+        FID_INPUT_ISCD: code, FID_TITL_CNTT: '',
+        FID_INPUT_DATE_1: '', FID_INPUT_HOUR_1: '',
+        FID_RANK_SORT_CLS_CODE: '', FID_INPUT_SRNO: ''
+      });
+      const list = r.body?.output || [];
+      if (list.length) return { ok: true, source: 'kis', data: { output: list, rt_cd: '0' } };
+      global._kisNewsFailAt = Date.now(); // 빈 응답 = 권한 없음으로 간주
+    } catch (e) { global._kisNewsFailAt = Date.now(); }
+  }
+  // 2) 구글 뉴스 RSS (키 불필요)
+  try {
+    const name = codeToNameLookup(code);
+    const q = encodeURIComponent(`${name} 주가`);
+    const rss = await httpsRequest({
+      hostname: 'news.google.com',
+      path: `/rss/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const xml = typeof rss.body === 'string' ? rss.body : '';
+    const decode = s => s
+      .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&').trim();
+    const items = [];
+    const itemRe = /<item>([\s\S]*?)<\/item>/g;
+    let m;
+    while ((m = itemRe.exec(xml)) && items.length < 15) {
+      const block = m[1];
+      const pick = tag => {
+        const mt = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(block);
+        return mt ? decode(mt[1]) : '';
+      };
+      let title = pick('title');
+      let source = pick('source');
+      if (title.includes(' - ')) {
+        const idx = title.lastIndexOf(' - ');
+        if (!source) source = title.slice(idx + 3);
+        title = title.slice(0, idx); // source 태그 있어도 제목 끝 중복 제거
+      }
+      items.push({ title, link: pick('link'), source, date: pick('pubDate') });
+    }
+    if (items.length) return { ok: true, source: 'google', data: { output: items, rt_cd: '0' }, fallbackUrl };
+  } catch (e) { /* RSS 실패 → 링크 폴백 */ }
+  // 3) 둘 다 실패 → 네이버 금융 링크
+  return { ok: true, data: { output: [], rt_cd: '1', noPermission: true }, fallbackUrl };
+}
+
 // ── 일봉 → 분봉 변환 헬퍼 ──
 // 하루의 OHLCV를 n개 봉으로 자연스럽게 분할
 // 실제 장중 흐름처럼: 시가 시작 → 저가/고가 구간 통과 → 종가 마감
@@ -818,10 +884,16 @@ async function refreshVol100(cfg, priority = 'low') {
 // 우선순위 'low' — 사용자 동작(현재가/호가 등 high)을 절대 방해하지 않는다.
 // TTL이 남은 캐시는 건드리지 않아 rate limit 낭비를 막는다.
 const PREFETCH_VOL_CODES = ['005930','000660','373220','207940','005380','000270','035420','035720'];
+// KRX 휴장일 (주말 외, 2026) — auto-trader.js와 동일 목록 유지
+const KRX_HOLIDAYS = new Set([
+  '2026-01-01','2026-02-16','2026-02-17','2026-02-18','2026-03-02','2026-05-05','2026-05-25',
+  '2026-08-17','2026-09-24','2026-09-25','2026-09-28','2026-10-05','2026-10-09','2026-12-25','2026-12-31'
+]);
 function _isMarketHours() {
   const kst = new Date(Date.now() + 9 * 3600 * 1000); // UTC → KST
   const day = kst.getUTCDay();                         // 0=일, 6=토
   if (day === 0 || day === 6) return false;
+  if (KRX_HOLIDAYS.has(kst.toISOString().slice(0, 10))) return false; // 공휴일 prefetch 중단
   const mins = kst.getUTCHours() * 60 + kst.getUTCMinutes();
   return mins >= 9 * 60 && mins <= 15 * 60 + 30;        // 09:00~15:30
 }
@@ -1652,7 +1724,26 @@ const server = http.createServer(async (req, res) => {
       } else {
         // 장전/장마감 — 빈 화면 대신 마지막 거래 내역 표시
         const last = fb.get('tick:' + code);
-        jsonRes(res, 200, { ok: true, data: last || r.body, cached: !!last });
+        if (last) { jsonRes(res, 200, { ok: true, data: last, cached: true }); return; }
+        // lastGood조차 없으면(새 PC 등) 당일 분봉으로 체결 형태 합성 — 장마감에도 데이터 표시
+        try {
+          const mc = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', 'FHKST03010200', {
+            FID_ETC_CLS_CODE: '', FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code,
+            FID_INPUT_HOUR_1: '153000', FID_PW_DATA_INCU_YN: 'Y'
+          }, 'high');
+          const bars = mc.body?.output2 || [];
+          if (bars.length) {
+            const synth = bars.slice(0, 50).map(b => ({
+              stck_cntg_hour: b.stck_cntg_hour || '', stck_prpr: b.stck_prpr,
+              cntg_vol: b.cntg_vol, acml_vol: b.acml_vol || '0'
+            }));
+            const payload = { output: synth, rt_cd: '0' };
+            fb.save('tick:' + code, payload);
+            jsonRes(res, 200, { ok: true, data: payload, cached: true, synthetic: true });
+            return;
+          }
+        } catch (_) {}
+        jsonRes(res, 200, { ok: true, data: r.body, cached: false });
       }
       return;
     }
@@ -1662,12 +1753,13 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req);
       const trId = cfg.txMode === 'vts' ? 'VTTC0803U' : 'TTTC0803U';
       const [cano, acntPrdtCd] = (cfg.accNo||'').split('-');
+      const cq = parseInt(body.qty) || 0; // 문자열 "0"도 전량취소로 일관 처리
       const cancelObj = {
         CANO: cano||'', ACNT_PRDT_CD: acntPrdtCd||'01',
         KRX_FWDG_ORD_ORGNO: body.orgNo||'', ORGN_ODNO: body.ordNo||'',
         ORD_DVSN: '00', RVSE_CNCL_DVSN_CD: '02', // 02=취소
-        ORD_QTY: body.qty||'0', ORD_UNPR: '0',   // 취소는 단가 0 필수 (누락 시 '주문 금액 확인' 거부)
-        QTY_ALL_ORD_YN: body.qty?'N':'Y'
+        ORD_QTY: String(cq), ORD_UNPR: '0',      // 취소는 단가 0 필수 (누락 시 '주문 금액 확인' 거부)
+        QTY_ALL_ORD_YN: cq > 0 ? 'N' : 'Y'
       };
       // 큐를 통해 직렬화 + 초당 한도 거부 시 자동 재시도
       const result = await kisPost(cfg, '/uapi/domestic-stock/v1/trading/order-rvsecncl', trId, cancelObj);
@@ -1677,90 +1769,67 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // GET /api/news?code=005930 — 종목 뉴스
+    // GET /api/news?code=005930 — 종목 뉴스 (SWR 캐시: 즉시 응답 + 5분 경과 시 백그라운드 갱신)
     if (pathname === '/api/news') {
       const code = query.code || '005930';
       const fallbackUrl = `https://finance.naver.com/item/news.naver?code=${code}`;
-      // 1) KIS 뉴스 — 권한 없는 키가 대부분. 한 번 실패하면 6시간 동안 건너뛰어
-      //    매번 10초 타임아웃을 낭비하지 않고 바로 구글 RSS로 간다.
-      if (!global._kisNewsFailAt || Date.now() - global._kisNewsFailAt > 6*3600*1000) {
-        try {
-          const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/news-title', 'FHKST01011800', {
-              FID_NEWS_OFER_ENTP_CODE: '', FID_COND_MRKT_DIV_CODE: 'J',
-              FID_INPUT_ISCD: code, FID_TITL_CNTT: '',
-              FID_INPUT_DATE_1: '', FID_INPUT_HOUR_1: '',
-              FID_RANK_SORT_CLS_CODE: '', FID_INPUT_SRNO: ''
-            });
-          const list = r.body?.output || [];
-          if (list.length) {
-            jsonRes(res, 200, { ok: true, source: 'kis', data: { output: list, rt_cd: '0' } });
-            return;
-          }
-          global._kisNewsFailAt = Date.now(); // 빈 응답 = 권한 없음으로 간주
-        } catch(e) { global._kisNewsFailAt = Date.now(); }
+      if (!global._newsCache) global._newsCache = {};
+      if (!global._newsRefreshing) global._newsRefreshing = {};
+      const nc = global._newsCache[code];
+      if (nc && nc.payload) {
+        jsonRes(res, 200, nc.payload); // 캐시 즉시 응답 — 뉴스 체감 0ms
+        if (Date.now() - nc.t > 5 * 60 * 1000 && !global._newsRefreshing[code]) {
+          global._newsRefreshing[code] = true; // 백그라운드 갱신 (아래 본문 재사용 위해 내부 요청처럼 재실행)
+          _fetchNews(cfg, code, fallbackUrl)
+            .then(p => { if (p) global._newsCache[code] = { t: Date.now(), payload: p }; })
+            .catch(() => {})
+            .finally(() => { global._newsRefreshing[code] = false; });
+        }
+        return;
       }
-
-      // 2) 키 불필요한 구글 뉴스 RSS에서 종목명으로 검색
-      try {
-        const name = codeToNameLookup(code);
-        const q = encodeURIComponent(`${name} 주가`);
-        const rss = await httpsRequest({
-          hostname: 'news.google.com',
-          path: `/rss/search?q=${q}&hl=ko&gl=KR&ceid=KR:ko`,
-          method: 'GET',
-          headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        const xml = typeof rss.body === 'string' ? rss.body : '';
-        const decode = s => s
-          .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
-          .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-          .replace(/&amp;/g, '&').trim();
-        const items = [];
-        const itemRe = /<item>([\s\S]*?)<\/item>/g;
-        let m;
-        while ((m = itemRe.exec(xml)) && items.length < 15) {
-          const block = m[1];
-          const pick = tag => {
-            const mt = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(block);
-            return mt ? decode(mt[1]) : '';
-          };
-          let title = pick('title');
-          let source = pick('source');
-          if (title.includes(' - ')) {
-            const idx = title.lastIndexOf(' - ');
-            if (!source) source = title.slice(idx + 3);
-            title = title.slice(0, idx);  // 항상 제거 — source 태그 있어도 제목 끝 중복 방지
-          }
-          items.push({ title, link: pick('link'), source, date: pick('pubDate') });
-        }
-        if (items.length) {
-          jsonRes(res, 200, { ok: true, source: 'google', data: { output: items, rt_cd: '0' }, fallbackUrl });
-          return;
-        }
-      } catch(e) { /* RSS 실패 → 링크 폴백 */ }
-
-      // 3) 둘 다 실패 → 네이버 금융 링크
-      jsonRes(res, 200, { ok: true, data: { output: [], rt_cd: '1', noPermission: true }, fallbackUrl });
+      const payload = await _fetchNews(cfg, code, fallbackUrl);
+      if (payload && payload.data && payload.data.output && payload.data.output.length) {
+        global._newsCache[code] = { t: Date.now(), payload };
+      }
+      jsonRes(res, 200, payload || { ok: true, data: { output: [], rt_cd: '1', noPermission: true }, fallbackUrl });
       return;
     }
-
-    // GET /api/investor?code=005930 — 외국인·기관 수급
+    // (구 인라인 뉴스 로직은 _fetchNews 함수로 이동)
+    // GET /api/investor?code=005930 — 외국인·기관 수급 (SWR 캐시 5분: 즉시 응답 + 백그라운드 갱신)
     if (pathname === '/api/investor') {
       const code = query.code || '005930';
-      const r = await withRetry(() =>
-        kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-investor', 'FHKST01010900', {
-          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
-        }), `수급:${code}`);
-      // 외국인 보유율은 투자자 TR에 없음 → 현재가 API(hts_frgn_ehrt)에서 가져옴
-      let frgnRate = 0;
-      try {
-        const pr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
-          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
-        });
-        frgnRate = parseFloat(pr.body?.output?.hts_frgn_ehrt || 0);
-      } catch(_) {}
-      jsonRes(res, 200, { ok: true, data: r.body, frgnRate });
+      if (!global._invCache) global._invCache = {};
+      if (!global._invRefreshing) global._invRefreshing = {};
+      const fetchInvestor = async () => {
+        const r = await withRetry(() =>
+          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-investor', 'FHKST01010900', {
+            FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+          }), `수급:${code}`);
+        // 외국인 보유율은 투자자 TR에 없음 → 현재가 API(hts_frgn_ehrt)에서 가져옴
+        let frgnRate = 0;
+        try {
+          const pr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+            FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+          });
+          frgnRate = parseFloat(pr.body?.output?.hts_frgn_ehrt || 0);
+        } catch(_) {}
+        return { ok: true, data: r.body, frgnRate };
+      };
+      const ic = global._invCache[code];
+      if (ic && ic.payload) {
+        jsonRes(res, 200, ic.payload); // 캐시 즉시 응답 — 수급 체감 0ms
+        if (Date.now() - ic.t > 5 * 60 * 1000 && !global._invRefreshing[code]) {
+          global._invRefreshing[code] = true;
+          fetchInvestor()
+            .then(p => { if (p?.data?.output?.length) global._invCache[code] = { t: Date.now(), payload: p }; })
+            .catch(() => {})
+            .finally(() => { global._invRefreshing[code] = false; });
+        }
+        return;
+      }
+      const payload = await fetchInvestor();
+      if (payload?.data?.output?.length) global._invCache[code] = { t: Date.now(), payload };
+      jsonRes(res, 200, payload);
       return;
     }
 

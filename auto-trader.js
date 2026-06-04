@@ -37,7 +37,15 @@ const DEFAULT_SETTINGS = {
     tradeEndTime: '15:00',     // 신규 매수 종료 시간 (매도는 15:20까지)
     avoidFirst30min: true      // 장 시작 30분 신규매수 금지
   },
-  watchList: ['005930', '000660', '035720'],  // 자동매매 대상 종목
+  // 자동매매 대상 종목 — KOSPI 시총 상위 우량주 30 (반도체·2차전지·바이오·자동차·금융·통신·소재 분산)
+  watchList: [
+    '005930','000660','373220','207940','005380', // 삼성전자 SK하이닉스 LG엔솔 삼성바이오 현대차
+    '000270','068270','005490','035420','035720', // 기아 셀트리온 POSCO홀딩스 NAVER 카카오
+    '051910','006400','105560','055550','086790', // LG화학 삼성SDI KB금융 신한지주 하나금융
+    '316140','032830','015760','034730','003550', // 우리금융 삼성생명 한국전력 SK LG
+    '017670','030200','012330','009150','066570', // SKT KT 현대모비스 삼성전기 LG전자
+    '096770','028260','010130','011200','024110'  // SK이노베이션 삼성물산 고려아연 HMM 기업은행
+  ],
   intervalSec: 30              // 시세 점검 주기 (초)
 };
 
@@ -71,6 +79,8 @@ function loadState(userId) {
   try {
     if (fs.existsSync(file)) {
       const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // 마이그레이션: 구버전 기본값(3종목)으로 저장된 watchList는 우량주 30으로 확장
+      if (Array.isArray(s.settings?.watchList) && s.settings.watchList.length <= 3) delete s.settings.watchList;
       return {
         settings: { ...DEFAULT_SETTINGS, ...(s.settings||{}),
           strategies: { ...DEFAULT_SETTINGS.strategies, ...(s.settings?.strategies||{}) },
@@ -206,9 +216,26 @@ function kstParts() {
     dateKey: d.toISOString().slice(0,10)
   };
 }
+// KRX 휴장일 (주말 외) — 매년 갱신 필요. 누락 시 KIS가 주문을 거부하므로 2차 방어는 됨.
+const KRX_HOLIDAYS = new Set([
+  // 2026년
+  '2026-01-01',                            // 신정
+  '2026-02-16','2026-02-17','2026-02-18',  // 설 연휴
+  '2026-03-02',                            // 삼일절 대체
+  '2026-05-05',                            // 어린이날
+  '2026-05-25',                            // 부처님오신날 대체
+  '2026-08-17',                            // 광복절 대체
+  '2026-09-24','2026-09-25',               // 추석 연휴
+  '2026-09-28',                            // 추석 대체
+  '2026-10-05',                            // 개천절 대체
+  '2026-10-09',                            // 한글날
+  '2026-12-25',                            // 성탄절
+  '2026-12-31'                             // 연말 휴장
+]);
 function isMarketOpen() {
   const k = kstParts();
   if (k.day === 0 || k.day === 6) return false;
+  if (KRX_HOLIDAYS.has(k.dateKey)) return false; // 공휴일 — 헛스캔·휴장일 주문 방지
   return k.min >= 9*60 && k.min <= 15*60+30;
 }
 function timeToMin(hhmm) {

@@ -392,7 +392,9 @@ class KisFeed {
       for (const t of m.ticks) {
         const reg = this.regs.get(`${TR_PRICE}:${t.code}`);
         if (reg) reg.lastUsed = Date.now();
-        const data = { price: t.price, chgPct: t.chgPct, sign: t.sign, prev: t.price - t.vrss * (t.sign === '5' || t.sign === '4' ? -1 : 1) };
+        const data = { price: t.price, chgPct: t.chgPct, sign: t.sign,
+                       prev: t.price - t.vrss * (t.sign === '5' || t.sign === '4' ? -1 : 1),
+                       accVol: t.accVol }; // 누적거래량도 캐시 — volume100 폴백 정렬용
         if (this.onPrice) try { this.onPrice(t.code, data) } catch (_) {}
         this._broadcast('price', { code: t.code, ...data, accVol: t.accVol, time: t.time });
       }
