@@ -481,6 +481,30 @@ const { AutoTrader, getLogs } = require('./auto-trader.js');
 const realtime = require('./kis-realtime.js');
 // ── 빈 화면 금지 폴백: 마지막 정상 데이터(영속)·환율 공개소스·호가 사다리 ──
 const fb = require('./data-fallback.js');
+
+// ── 캐시 워밍 영속화: 가격·일봉 캐시를 디스크에 보존 — 서버 재시작 직후에도 첫 화면 즉시 ──
+global._priceCache = fb.get('persist:price') || {};
+(() => { // 일봉 캐시는 당일 키만 복원 (오래된 키 무한 누적 방지)
+  const saved = fb.get('persist:chart') || {};
+  const todayUTC = new Date().toISOString().slice(0, 10);
+  global._chartCache = {};
+  for (const k in saved) if (k.endsWith(todayUTC)) global._chartCache[k] = saved[k];
+})();
+let _persistCacheTimer = null;
+function persistCachesSoon() {
+  if (_persistCacheTimer) return;
+  _persistCacheTimer = setTimeout(() => {
+    _persistCacheTimer = null;
+    try {
+      fb.save('persist:price', global._priceCache || {});
+      const todayUTC = new Date().toISOString().slice(0, 10);
+      const pruned = {};
+      for (const k in (global._chartCache || {})) if (k.endsWith(todayUTC)) pruned[k] = global._chartCache[k];
+      fb.save('persist:chart', pruned);
+    } catch (_) {}
+  }, 30000); // 30초 디바운스 — 디스크 쓰기 최소화
+  if (_persistCacheTimer.unref) _persistCacheTimer.unref();
+}
 // ── 로컬 주문 저널: 모의투자 당일내역 API 공백 보완 + 잔고 대조 체결 판정 ──
 const orderJournal = require('./order-journal.js');
 
@@ -570,12 +594,12 @@ async function _fetchNews(cfg, code, fallbackUrl) {
   try {
     const name = codeToNameLookup(code);
     const [stockItems, marketItems] = await Promise.all([
-      _fetchGoogleRss(`${name} 주가`, 15),
+      _fetchGoogleRss(`${name} 주가`, 20),
       _fetchMarketNews() // 코스피 시장 뉴스 (10분 공유 캐시)
     ]);
     if (stockItems.length || marketItems.length) {
       const mkt = marketItems.map(n => ({ ...n, market: true })); // 시장 뉴스 표시용 플래그
-      const items = [...stockItems.slice(0, 10), ...mkt.slice(0, 5)] // 종목 7 : 시장 3 비율
+      const items = [...stockItems.slice(0, 20), ...mkt.slice(0, 8)] // 종목 위주 + 시장 — 스크롤 분량 확보
         .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)); // 최신순 통합 정렬
       return { ok: true, source: 'google', data: { output: items, rt_cd: '0' }, fallbackUrl };
     }
@@ -772,19 +796,31 @@ async function refreshPrice(cfg, code, priority = 'low') {
       const sign = o.prdy_vrss_sign;
       prev = (sign === '5' || sign === '4') ? cur + vrss : cur - vrss;
     }
-    // 현재가/전일종가 둘 다 0이면 — 일봉 마지막 종가로 폴백
+    let chgPct = parseFloat(o.prdy_ctrt || 0);
+    let sign = o.prdy_vrss_sign || '3';
+    // 현재가/전일종가 둘 다 0이면 — 일봉 마지막 두 종가로 가격 + 전일대비 등락률 직접 계산
+    // ("전일" 라벨 폴백 제거: 어떤 경우에도 전일 종가 기준 등락률을 제공한다)
     if (!cur && !prev) {
       try {
         const dr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-price', 'FHKST01010400', {
           FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code, FID_PERIOD_DIV_CODE: 'D', FID_ORG_ADJ_PRC: '0'
         }, priority);
         const days = dr.body?.output || [];
-        if (days.length) { prev = parseInt(days[0].stck_clpr || 0); cur = 0; }
+        const last = parseInt(days[0]?.stck_clpr || 0);   // 가장 최근 거래일 종가
+        const prior = parseInt(days[1]?.stck_clpr || 0);  // 그 전 거래일 종가
+        if (last) {
+          cur = last;
+          prev = prior || last;
+          if (prior) {
+            chgPct = Math.round(((last - prior) / prior) * 10000) / 100;
+            sign = last > prior ? '2' : last < prior ? '5' : '3';
+          }
+        }
       } catch (e2) {}
     }
-    const data = { price: cur, chgPct: parseFloat(o.prdy_ctrt || 0), sign: o.prdy_vrss_sign || '3', prev: prev || cur,
+    const data = { price: cur, chgPct, sign, prev: prev || cur,
                    accVol: parseInt(o.acml_vol || 0) }; // 거래량 캐시 — volume100 폴백이 거래량 0으로 정렬되던 버그 수정
-    if (data.price > 0 || data.prev > 0) global._priceCache[code] = { t: Date.now(), data };
+    if (data.price > 0 || data.prev > 0) { global._priceCache[code] = { t: Date.now(), data }; persistCachesSoon(); }
     return data;
   } catch (e) { return global._priceCache[code]?.data || null; }
   finally { if (priority === 'low') _bgRefreshing.price[code] = false; }
@@ -1254,10 +1290,15 @@ const server = http.createServer(async (req, res) => {
           missing.push(code); // 캐시 전무 → 동기 fetch 필요
         }
       }
-      for (const code of missing) {
-        out[code] = (await refreshPrice(cfg, code, 'high')) || null;
-      }
-      jsonRes(res, 200, { ok: true, data: out });
+      // 캐시 없는 종목: 앞 6개만 병렬 동기(첫 화면용), 나머지는 백그라운드 — 응답이 타임아웃에 걸리지 않게.
+      // 백그라운드 분은 다음 폴링(4~10초)에서 캐시로 채워져 점진 표시된다.
+      const syncFetch = missing.slice(0, 6);
+      const bgFetch = missing.slice(6);
+      await Promise.all(syncFetch.map(async c => {
+        try { out[c] = (await refreshPrice(cfg, c, 'high')) || null; } catch (_) { out[c] = null; }
+      }));
+      bgFetch.forEach(c => { try { refreshPrice(cfg, c, 'low'); } catch (_) {} });
+      jsonRes(res, 200, { ok: true, data: out, pending: bgFetch.length });
       return;
     }
 
@@ -1367,10 +1408,11 @@ const server = http.createServer(async (req, res) => {
       }
 
       const response = { ok: true, data: { output1, output2: allRows, rt_cd:'0', count: allRows.length } };
-      // 캐시 저장 (장 마감 후 자정에 삭제)
+      // 캐시 저장 (장 마감 후 자정에 삭제) + 디스크 보존 — 재시작에도 차트 즉시
       global._chartCache[cacheKey] = response;
-      const msToMidnight = new Date().setHours(24,0,0,0) - Date.now();
-      setTimeout(() => { delete global._chartCache[cacheKey]; }, msToMidnight);
+      persistCachesSoon();
+      const mid = setTimeout(() => { delete global._chartCache[cacheKey]; }, new Date().setHours(24,0,0,0) - Date.now());
+      if (mid.unref) mid.unref();
 
       jsonRes(res, 200, response);
       return;
