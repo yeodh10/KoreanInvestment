@@ -193,6 +193,8 @@ function kisSchedule(key, gap, fn, priority) {
   return new Promise((resolve, reject) => {
     // 백프레셔: KIS가 느려져 큐가 적체되면 — 백그라운드(low)는 즉시 포기(캐시 유지),
     // 사용자 요청(high)도 한계치를 넘으면 빠르게 실패시켜 폴백이 동작하게 한다.
+    // urgent(주문/취소)는 제한 없이 high 큐 맨 앞으로 — 항상 최우선.
+    if (priority === 'urgent') { q.high.unshift({ fn, resolve, reject }); pumpKis(key); return; }
     if (priority !== 'high' && q.low.length >= 10) { reject(new Error('큐 적체 — 백그라운드 스킵')); return; }
     if (priority === 'high' && q.high.length >= 25) { reject(new Error('큐 적체 — 잠시 후 재시도')); return; }
     (priority === 'high' ? q.high : q.low).push({ fn, resolve, reject });
@@ -305,20 +307,20 @@ async function kisPost(cfg, kispath, trId, bodyObj) {
   let res = null;
   for (let attempt = 0; attempt < 4; attempt++) {
     const token = await getKisToken(cfg);
-    const hashkey = await kisSchedule(qKey, gap, () => getHashkey(cfg, bodyObj), 'high');
+    // hashkey는 KIS 선택 항목 — 호출 1건을 아껴 주문 지연을 절반으로 (urgent: 큐 맨 앞 새치기)
     const body = JSON.stringify(bodyObj);
     res = await kisSchedule(qKey, gap, () => httpsRequest({
       hostname, port: parseInt(port), path: kispath, method: 'POST',
       headers: {
         'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
         'authorization': 'Bearer ' + token, 'appkey': cfg.appKey, 'appsecret': cfg.appSecret,
-        'tr_id': trId, 'custtype': 'P', 'hashkey': hashkey
+        'tr_id': trId, 'custtype': 'P'
       }
-    }, body), 'high');
+    }, body), 'urgent');
     const msg = res?.body?.msg1 || '', cd = res?.body?.msg_cd || '';
     if (res?.body?.rt_cd !== '0' && (cd === 'EGW00201' || msg.includes('초당 거래건수')) && attempt < 3) {
-      console.log(`[주문 재시도 ${attempt + 1}] 초당 한도 — 0.${5 * (attempt + 1)}초 후 재전송`);
-      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      console.log(`[주문 재시도 ${attempt + 1}] 초당 한도 — 재전송`);
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
       continue;
     }
     return res;
