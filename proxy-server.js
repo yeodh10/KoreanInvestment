@@ -434,11 +434,18 @@ async function fetchChart(cfg, code, period) {
 
   if (result && result.length > 0) {
     _chartCache[key] = result; // 정상 데이터만 캐시
-    // 장 마감 후 자정에 캐시 초기화
-    const msToMidnight = new Date().setHours(24,0,0,0) - Date.now();
-    setTimeout(() => { delete _chartCache[key]; }, msToMidnight);
+    // 장 마감 후 KST 자정에 캐시 초기화 — 서버 로컬 자정(UTC 서버면 개장 직후!)이 아니라 한국 자정 기준
+    const t = setTimeout(() => { delete _chartCache[key]; }, msToKstMidnight());
+    if (t.unref) t.unref();
   }
   return result;
+}
+
+// KST 자정까지 남은 ms — 서버 타임존과 무관 (리눅스/UTC 서버 호환)
+function msToKstMidnight() {
+  const kstNow = Date.now() + 9 * 3600 * 1000;
+  const nextKstMidnight = (Math.floor(kstNow / 86400000) + 1) * 86400000;
+  return nextKstMidnight - kstNow;
 }
 
 // 계좌 잔고
@@ -1436,7 +1443,7 @@ async function handleRequest(req, res, session) {
       // 캐시 저장 (장 마감 후 자정에 삭제) + 디스크 보존 — 재시작에도 차트 즉시
       global._chartCache[cacheKey] = response;
       persistCachesSoon();
-      const mid = setTimeout(() => { delete global._chartCache[cacheKey]; }, new Date().setHours(24,0,0,0) - Date.now());
+      const mid = setTimeout(() => { delete global._chartCache[cacheKey]; }, msToKstMidnight()); // KST 자정 — UTC 서버 호환
       if (mid.unref) mid.unref();
 
       jsonRes(res, 200, response);
