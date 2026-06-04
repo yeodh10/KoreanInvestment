@@ -35,7 +35,8 @@ const DEFAULT_SETTINGS = {
     stopLossPct: -3,           // 손절 기준 (%)
     tradeStartTime: '09:05',   // 매수 시작 시간
     tradeEndTime: '15:00',     // 신규 매수 종료 시간 (매도는 15:20까지)
-    avoidFirst30min: true      // 장 시작 30분 신규매수 금지
+    avoidFirst30min: true,     // 장 시작 30분 신규매수 금지
+    protectManual: true        // ★ 수동 보유 보호: 엔진이 직접 매수한 수량만 매도 (수동 매수분 불가침)
   },
   // 자동매매 대상 종목 — KOSPI 시총 상위 우량주 30 (반도체·2차전지·바이오·자동차·금융·통신·소재 분산)
   watchList: [
@@ -90,7 +91,8 @@ function loadState(userId) {
         today: s.today || todayKey(),
         dailyRealizedPnl: s.dailyRealizedPnl || 0,
         stoppedByLoss: s.stoppedByLoss || false,
-        positions: s.positions || {}
+        positions: s.positions || {},
+        botPositions: s.botPositions || {} // 엔진이 직접 매수한 수량 (종목→주수) — 수동 보유와 구분
       };
     }
   } catch(e) {}
@@ -99,7 +101,8 @@ function loadState(userId) {
     today: todayKey(),
     dailyRealizedPnl: 0,
     stoppedByLoss: false,
-    positions: {}
+    positions: {},
+    botPositions: {}
   };
 }
 
@@ -407,6 +410,13 @@ class AutoTrader {
             };
           });
           this._lastHeld = heldPositions;
+          // 봇 지분을 실보유와 대조해 축소 — 수동으로 일부 팔았으면 봇 몫도 줄어든다
+          const bot = this.state.botPositions || (this.state.botPositions = {});
+          for (const c of Object.keys(bot)) {
+            const realQty = heldPositions[c]?.qty || 0;
+            if (realQty <= 0) delete bot[c];
+            else if (bot[c] > realQty) bot[c] = realQty;
+          }
         }
       }
       heldPositions = this._lastHeld || {};
@@ -421,10 +431,12 @@ class AutoTrader {
         if (nowMin() > timeToMin('15:20')) continue;
         if (this.inCooldown(code)) continue; // 방금 주문한 종목 건너뜀 (중복 매도 방지)
         if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
+        const sellable = this._sellableQty(code, pos.qty, s); // ★ 수동 보유 보호: 봇이 산 수량만
+        if (sellable < 1) continue;
         if (pos.pnlPct >= s.safety.takeProfitPct) {
-          await this.sell(cfg, code, pos.qty, pos.curPrice, `익절 (+${pos.pnlPct}% ≥ +${s.safety.takeProfitPct}%)`, pos);
+          await this.sell(cfg, code, sellable, pos.curPrice, `익절 (+${pos.pnlPct}% ≥ +${s.safety.takeProfitPct}%)`, pos);
         } else if (pos.pnlPct <= s.safety.stopLossPct) {
-          await this.sell(cfg, code, pos.qty, pos.curPrice, `손절 (${pos.pnlPct}% ≤ ${s.safety.stopLossPct}%)`, pos);
+          await this.sell(cfg, code, sellable, pos.curPrice, `손절 (${pos.pnlPct}% ≤ ${s.safety.stopLossPct}%)`, pos);
         }
       }
 
@@ -482,8 +494,10 @@ class AutoTrader {
         } else if (signal?.side === 'SELL' && held && held.qty > 0) {
           if (this.inCooldown(code)) continue; // 쿨다운 내 중복 매도 방지
           if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
+          const sellable = this._sellableQty(code, held.qty, s); // ★ 수동 보유 보호
+          if (sellable < 1) continue;
           if (nowMin() <= timeToMin('15:20')) {
-            await this.sell(cfg, code, held.qty, held.curPrice, signal.reason, held);
+            await this.sell(cfg, code, sellable, held.curPrice, signal.reason, held);
           }
         }
 
@@ -498,6 +512,14 @@ class AutoTrader {
     } finally {
       this._ticking = false;
     }
+  }
+
+  // ★ 매도 가능 수량 — 수동 보유 보호가 켜져 있으면 엔진이 직접 매수한 수량까지만
+  // (사용자가 손으로 산 주식을 엔진이 멋대로 파는 사고 방지)
+  _sellableQty(code, heldQty, s) {
+    if (!s.safety.protectManual) return heldQty; // 보호 꺼짐 = 전량 관리 (기존 동작)
+    const botQty = (this.state.botPositions || {})[code] || 0;
+    return Math.min(botQty, heldQty);
   }
 
   // 미체결 주문 맵: { code: { buyAmt, hasBuy, hasSell } }
@@ -527,6 +549,10 @@ class AutoTrader {
     }
     if (result?.rt_cd === '0') {
       this.lastAction[code] = Date.now(); // 쿨다운 시작
+      // 봇 지분 기록 — 이 수량만큼만 엔진이 매도할 권리를 가진다
+      if (!this.state.botPositions) this.state.botPositions = {};
+      this.state.botPositions[code] = (this.state.botPositions[code] || 0) + qty;
+      this.save();
       // 낙관적 보유 반영 — 계좌 갱신 전에도 maxPerStock이 누적 매수에 적용되게
       if (!this._lastHeld) this._lastHeld = {};
       const prevPos = this._lastHeld[code];
@@ -557,6 +583,11 @@ class AutoTrader {
     }
     if (result?.rt_cd === '0') {
       this.lastAction[code] = Date.now(); // 쿨다운 시작
+      // 봇 지분 차감 — 판 만큼 엔진 몫에서 제거
+      if (this.state.botPositions && this.state.botPositions[code]) {
+        this.state.botPositions[code] -= qty;
+        if (this.state.botPositions[code] <= 0) delete this.state.botPositions[code];
+      }
       if (this._lastHeld && this._lastHeld[code]) delete this._lastHeld[code]; // 낙관적 제거 — 같은 주식 중복 매도 방지
       let realized = 0;
       if (pos?.avgPrice) realized = (price - pos.avgPrice) * qty;

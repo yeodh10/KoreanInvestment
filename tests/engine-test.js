@@ -66,6 +66,7 @@ const heldAcct = { output1: [{ pdno:'005930', hldg_qty:'10', pchs_avg_pric:'6000
   // 1) 한 틱 내 중복 매도 금지 (익절 루프 + 전략 매도 이중 발화 방지)
   orders.length = 0;
   let t = mkTrader(mkDeps({ chart: incChart, account: heldAcct }));
+  t.state.botPositions = { '005930': 10 }; // 봇이 산 물량 (수동 보유 보호 통과용)
   await t.tick();
   ok('보유종목 매도 정확히 1회/틱', orders.filter(o => o.side === 'sell').length === 1);
 
@@ -73,6 +74,28 @@ const heldAcct = { output1: [{ pdno:'005930', hldg_qty:'10', pchs_avg_pric:'6000
   const before = orders.length;
   await t.tick();
   ok('판 주식 재매도 0회', orders.length === before);
+
+  // 2-1) ★ 수동 보유 보호 — 봇이 안 산 주식은 신호가 떠도 매도 금지
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: incChart, account: heldAcct }));
+  await t.tick(); // botPositions 없음 = 전부 수동 매수분
+  ok('수동 매수분 매도 0회 (보호 ON)', orders.filter(o => o.side === 'sell').length === 0);
+
+  // 2-2) ★ 봇 지분만큼만 부분 매도 (보유 10주 중 봇 4주)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: incChart, account: heldAcct }));
+  t.state.botPositions = { '005930': 4 };
+  await t.tick();
+  const ps = orders.find(o => o.side === 'sell');
+  ok('봇 지분 4주만 매도 (수동 6주 보존)', !!ps && ps.qty === 4);
+
+  // 2-3) ★ 보호 OFF면 기존처럼 전량 매도
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: incChart, account: heldAcct }));
+  t.state.settings.safety.protectManual = false;
+  await t.tick();
+  const fs2 = orders.find(o => o.side === 'sell');
+  ok('보호 OFF 시 전량(10주) 매도', !!fs2 && fs2.qty === 10);
 
   // 3) 같은 신호 반복 매수 금지 (쿨다운)
   orders.length = 0;
