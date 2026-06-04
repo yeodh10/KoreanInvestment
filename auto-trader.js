@@ -139,6 +139,7 @@ function calcRSI(closes, period) {
   }
   const avgGain = gains / period;
   const avgLoss = losses / period;
+  if (avgGain === 0 && avgLoss === 0) return 50; // 무변동(거래정지 등) = 중립 — RSI 100 오판으로 인한 불필요 매도 방지
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
@@ -383,11 +384,16 @@ class AutoTrader {
       }
       heldPositions = this._lastHeld || {};
 
+      // 미체결 주문 맵 — 잔고 캐시(5틱)와 실제 사이의 공백을 메움
+      // (미체결 매도 종목 재매도 = 공매도성 사고, 미체결 매수 누락 = 한도 초과 매수)
+      const pending = this._pendingMap();
+
       // ── 1) 보유 종목 손절/익절 체크 ──
       for (const code of Object.keys(heldPositions)) {
         const pos = heldPositions[code];
         if (nowMin() > timeToMin('15:20')) continue;
         if (this.inCooldown(code)) continue; // 방금 주문한 종목 건너뜀 (중복 매도 방지)
+        if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
         if (pos.pnlPct >= s.safety.takeProfitPct) {
           await this.sell(cfg, code, pos.qty, pos.curPrice, `익절 (+${pos.pnlPct}% ≥ +${s.safety.takeProfitPct}%)`, pos);
         } else if (pos.pnlPct <= s.safety.stopLossPct) {
@@ -433,7 +439,9 @@ class AutoTrader {
           } catch(e) { continue; }
           if (!price || price <= 0) continue;
 
-          const curHoldAmt = held ? held.evalAmt : 0;
+          // 미체결 매수 금액도 한도에 합산 — 체결 전 추가 매수로 maxPerStock 초과 방지
+          const pendBuyAmt = pending[code]?.buyAmt || 0;
+          const curHoldAmt = (held ? held.evalAmt : 0) + pendBuyAmt;
           if (curHoldAmt >= s.safety.maxPerStock) continue;
 
           const budget = Math.min(s.safety.maxPerOrder, s.safety.maxPerStock - curHoldAmt);
@@ -446,6 +454,7 @@ class AutoTrader {
 
         } else if (signal?.side === 'SELL' && held && held.qty > 0) {
           if (this.inCooldown(code)) continue; // 쿨다운 내 중복 매도 방지
+          if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
           if (nowMin() <= timeToMin('15:20')) {
             await this.sell(cfg, code, held.qty, held.curPrice, signal.reason, held);
           }
@@ -464,10 +473,31 @@ class AutoTrader {
     }
   }
 
+  // 미체결 주문 맵: { code: { buyAmt, hasBuy, hasSell } }
+  _pendingMap() {
+    let list = [];
+    try { list = (this.deps.getPendingOrders && this.deps.getPendingOrders()) || []; } catch (_) {}
+    const m = {};
+    for (const e of list) {
+      if (!m[e.code]) m[e.code] = { buyAmt: 0, hasBuy: false, hasSell: false };
+      if (e.side === 'buy') { m[e.code].hasBuy = true; m[e.code].buyAmt += (e.qty || 0) * (e.price || 0); }
+      else if (e.side === 'sell') m[e.code].hasSell = true;
+    }
+    return m;
+  }
+
   async buy(cfg, code, qty, price, reason) {
     const name = this.deps.codeToName(code) || code;
     this.log('signal', `📈 매수신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
-    const result = await this.deps.placeOrder(cfg, { side:'buy', code, qty, price, orderType:'00' });
+    let result;
+    try {
+      result = await this.deps.placeOrder(cfg, { side:'buy', code, qty, price, orderType:'00' });
+    } catch (e) {
+      // 타임아웃이어도 KIS에 접수됐을 수 있음 — 보수적으로 쿨다운 걸어 다음 틱 중복 주문 방지
+      this.lastAction[code] = Date.now();
+      this.log('error', `❌ 매수주문 예외 ${name}: ${e.message} (쿨다운 적용, 틱 계속)`);
+      return;
+    }
     if (result?.rt_cd === '0') {
       this.lastAction[code] = Date.now(); // 쿨다운 시작
       // 낙관적 보유 반영 — 계좌 갱신 전에도 maxPerStock이 누적 매수에 적용되게
@@ -489,7 +519,15 @@ class AutoTrader {
   async sell(cfg, code, qty, price, reason, pos) {
     const name = this.deps.codeToName(code) || code;
     this.log('signal', `📉 매도신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
-    const result = await this.deps.placeOrder(cfg, { side:'sell', code, qty, price, orderType:'00' });
+    let result;
+    try {
+      result = await this.deps.placeOrder(cfg, { side:'sell', code, qty, price, orderType:'00' });
+    } catch (e) {
+      // 한 종목 매도 예외가 다른 보유 종목의 손절을 막지 않도록 틱을 끊지 않음 + 보수적 쿨다운
+      this.lastAction[code] = Date.now();
+      this.log('error', `❌ 매도주문 예외 ${name}: ${e.message} (쿨다운 적용)`);
+      return;
+    }
     if (result?.rt_cd === '0') {
       this.lastAction[code] = Date.now(); // 쿨다운 시작
       if (this._lastHeld && this._lastHeld[code]) delete this._lastHeld[code]; // 낙관적 제거 — 같은 주식 중복 매도 방지

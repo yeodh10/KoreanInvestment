@@ -279,7 +279,12 @@ class KisFeed {
       const ws = new MiniWS(ep.host, ep.port);
       this.ws = ws;
       ws.onopen = () => {
-        this.connected = true; this.connecting = false; this._retry = 0;
+        this.connected = true; this.connecting = false;
+        this._lastRecv = Date.now();
+        // 백오프 리셋은 30초 이상 유지된 연결만 — "연결 직후 끊김" 반복 시 1초 재연결 폭주 방지
+        const rt = setTimeout(() => { if (this.connected) this._retry = 0; }, 30000);
+        if (rt.unref) rt.unref();
+        this._startWatchdog();
         this.log(`🟢 KIS WebSocket 연결됨 (${ep.host}:${ep.port}, ${this.cfg.txMode === 'live' ? '실전' : '모의'})`);
         // 기존 구독 복구
         for (const key of this.regs.keys()) {
@@ -294,9 +299,10 @@ class KisFeed {
         }
         this._broadcast('status', { connected: true });
       };
-      ws.onmessage = t => this._handle(t);
+      ws.onmessage = t => { this._lastRecv = Date.now(); this._handle(t); };
       ws.onerror = e => { this.log('⚠️ WS 오류: ' + e.message); };
       ws.onclose = () => {
+        this._stopWatchdog();
         this.connected = false; this.connecting = false;
         this._broadcast('status', { connected: false });
         if (this._closed) return;
@@ -312,6 +318,22 @@ class KisFeed {
       setTimeout(() => this.connect(), delay);
     }
   }
+
+  // ── 무수신 watchdog ──
+  // TCP half-open(절전·NAT 타임아웃·단선)이면 close 이벤트가 영원히 안 옴 → 시세가 얼어붙은 채 connected=true 유지.
+  // KIS는 장중 주기적으로 PINGPONG을 보내므로, 90초 무수신 = 죽은 연결로 판단하고 강제 재연결.
+  _startWatchdog() {
+    this._stopWatchdog();
+    this._wd = setInterval(() => {
+      if (!this.connected) return;
+      if (Date.now() - (this._lastRecv || 0) > 90000) {
+        this.log('🛑 90초 무수신 — 죽은 연결로 판단, 강제 재연결');
+        try { this.ws.sock.destroy(); } catch (_) {}
+      }
+    }, 30000);
+    if (this._wd.unref) this._wd.unref();
+  }
+  _stopWatchdog() { if (this._wd) { clearInterval(this._wd); this._wd = null; } }
 
   _sendSub(trId, code, subscribe) {
     if (!this.connected) return;

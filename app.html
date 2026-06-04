@@ -1256,6 +1256,9 @@ const LS = {
 const $ = id => document.getElementById(id);
 const setText = (id, v) => { const e=$(id); if(e) e.textContent = v; };
 const setHtml = (id, v) => { const e=$(id); if(e) e.innerHTML = v; };
+// ── XSS 방어: 외부(API/RSS/서버) 유래 문자열은 innerHTML 삽입 전 반드시 esc() ──
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const safeUrl = u => /^https?:\/\//i.test(String(u||'')) ? String(u) : ''; // javascript: 등 차단
 const fmtAmt = n => {
   if (!n || isNaN(n)) return '—';
   if (n >= 1e12) return (n/1e12).toFixed(1) + '조';
@@ -1305,7 +1308,7 @@ function showToast(msg, type) {
   let el = $('toast');
   if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
   const ico = type === 'err' ? '⚠️' : type === 'info' ? 'ℹ️' : '✅';
-  el.innerHTML = `<span>${ico}</span><span>${msg}</span>`;
+  el.innerHTML = `<span>${ico}</span><span>${esc(msg)}</span>`;
   el.classList.add('show');
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => el.classList.remove('show'), 2300);
@@ -1390,9 +1393,9 @@ function onGlobalSearchKey(e) {
 function renderSearchDd(dd, items, onClick) {
   if (!items.length) { dd.style.display='none'; return; }
   dd.innerHTML = items.slice(0,15).map(m =>
-    `<div class="item" data-code="${m.code}" data-name="${m.name}">
-      <div><div class="name">${m.name}</div></div>
-      <span class="code">${m.code}</span>
+    `<div class="item" data-code="${esc(m.code)}" data-name="${esc(m.name)}">
+      <div><div class="name">${esc(m.name)}</div></div>
+      <span class="code">${esc(m.code)}</span>
     </div>`
   ).join('');
   // 이벤트 위임으로 클릭 처리
@@ -1904,20 +1907,27 @@ function fillOrderPrice(price) {
 }
 // 대시보드 호가창에서 직접 매수/매도
 async function dashOrder(side) {
+  if (_orderInflight) return;
   const code = obCode || (typeof currentCode!=='undefined' ? currentCode : '');
   const price = $('dashOrderPrice').value || '0';
   const qty = $('dashOrderQty').value;
   const msgEl = $('dashOrderMsg');
   const show = (bg,c,t)=>{ msgEl.style.display='block'; msgEl.style.background=bg; msgEl.style.color=c; msgEl.textContent=t; };
-  if (!code || !qty) { show('var(--red-dim)','var(--red)','수량을 입력하세요'); return; }
+  const type = (parseInt(price, 10) || 0) > 0 ? '00' : '01'; // 가격 입력 없으면 시장가
+  const v = validateOrder(code, qty, price, type);
+  if (v.err) { show('var(--red-dim)','var(--red)','❌ '+v.err); return; }
+  if (!confirmOrder(side, code, v.q, v.p, type)) return; // 시장가 전환도 확인창에 명시됨
+  _orderInflight = true;
   show('var(--bg-3)','var(--text-2)','주문 처리 중...');
-  const r = await apiPost('/api/order', { side, code, qty:parseInt(qty), price:parseInt(price), orderType: parseInt(price)>0?'00':'01' });
-  if (r?.ok && r.data?.rt_cd==='0') {
-    show('var(--blue-dim)','var(--blue)',`✅ ${side==='buy'?'매수':'매도'} ${qty}주 접수`);
-    loadAccount();
-  } else {
-    show('var(--red-dim)','var(--red)','❌ '+(r?.data?.msg1||r?.message||'주문 실패'));
-  }
+  try {
+    const r = await apiPost('/api/order', { side, code, qty:v.q, price:v.p, orderType:type });
+    if (r?.ok && r.data?.rt_cd==='0') {
+      show('var(--blue-dim)','var(--blue)',`✅ ${side==='buy'?'매수':'매도'} ${v.q}주 접수`);
+      loadAccount();
+    } else {
+      show('var(--red-dim)','var(--red)','❌ '+(r?.data?.msg1||r?.message||'주문 실패'));
+    }
+  } finally { _orderInflight = false; }
 }
 async function refreshOB() {
   if (!obCode || !proxyOnline) return;
@@ -2005,8 +2015,8 @@ function renderDashWatchlist() {
     el.innerHTML = '<div class="empty" style="padding:16px">관심종목을 추가하세요</div>';
     return;
   }
-  el.innerHTML = watchCodes.map(code => {
-    const name = nameOf(code);
+  el.innerHTML = watchCodes.map(raw => {
+    const code = esc(raw), name = esc(nameOf(raw));
     return `<div class="watch-item" onclick="loadStock('${code}')">
       <div>
         <div class="wname">${name}</div>
@@ -2121,7 +2131,7 @@ async function loadPortfolio() {
   if (!positions.length) { tbody.innerHTML='<tr><td colspan="11" class="empty">보유 종목 없음. 매수하면 여기에 표시됩니다.</td></tr>'; return; }
   const evalSum = positions.reduce((s,p)=>s+parseInt(p.evlu_amt||0),0) || 1;
   tbody.innerHTML = positions.map(p => {
-    const code=p.pdno, name=p.prdt_name||nameOf(code);
+    const code=esc(p.pdno), name=esc(p.prdt_name||nameOf(p.pdno));
     const qty=parseInt(p.hldg_qty||0), avg=parseInt(p.pchs_avg_pric||0), cur=parseInt(p.prpr||0);
     const ev=parseInt(p.evlu_amt||0), buy=parseInt(p.pchs_amt||0), pl=parseInt(p.evlu_pfls_amt||0);
     const plRt=parseFloat(p.evlu_pfls_rt||0), u=pl>=0, w=((ev/evalSum)*100).toFixed(1);
@@ -2159,7 +2169,7 @@ function updateMiniPortfolio(data, total, pnl, cash, rate, up) {
     return;
   }
   listEl.innerHTML = positions.slice(0, 4).map(p => {
-    const name = p.prdt_name || nameOf(p.pdno);
+    const name = esc(p.prdt_name || nameOf(p.pdno));
     const plRt = parseFloat(p.evlu_pfls_rt || 0);
     const u = plRt >= 0;
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-top:1px solid var(--border);cursor:pointer" onclick="loadStock('${p.pdno}')">
@@ -2208,19 +2218,44 @@ function updateTotal() {
   const p=parseInt($('orderPrice').value||0), q=parseInt($('orderQty').value||1);
   setText('orderTotal', p&&q?'₩'+(p*q).toLocaleString():'—');
 }
+// ── 주문 공통 안전장치: 입력 검증 + 확인창 + 중복제출 방지 ──
+let _orderInflight = false;
+function validateOrder(code, qty, price, type) {
+  const q = parseInt(qty, 10), p = parseInt(price, 10) || 0;
+  if (!/^\d{6}$/.test(String(code || ''))) return { err: '종목코드가 올바르지 않습니다' };
+  if (!Number.isInteger(q) || q < 1 || String(qty).includes('.')) return { err: '수량은 1 이상의 정수여야 합니다' };
+  if (p < 0) return { err: '가격이 올바르지 않습니다' };
+  if (type === '00' && p < 1) return { err: '지정가 주문은 가격을 입력하세요' };
+  return { q, p };
+}
+function confirmOrder(side, code, q, p, type) {
+  const mode = _txModeCached === 'live' ? '⚠️ 실전투자 ⚠️' : '모의투자';
+  const pTxt = type === '01' ? '시장가' : '₩' + p.toLocaleString();
+  return confirm(`[${mode}] ${nameOf(code)} (${code})\n${side === 'buy' ? '매수' : '매도'} ${q}주 @ ${pTxt}\n\n주문을 전송할까요?`);
+}
 async function submitOrder() {
+  if (_orderInflight) return;
   const code=$('orderCode').value, side=orderSide;
   const type=$('orderType').value, price=$('orderPrice').value||'0', qty=$('orderQty').value;
-  if(!code||!qty) return;
   const msgEl=$('orderMsg');
+  const v = validateOrder(code, qty, price, type);
+  if (v.err) { msgEl.style.display='block'; msgEl.className='kiss-msg err'; msgEl.textContent='❌ '+v.err; return; }
+  if (!confirmOrder(side, code, v.q, v.p, type)) return;
+  _orderInflight = true;
+  const btn = $('orderSubmit'); if (btn) btn.disabled = true;
   msgEl.style.display='block'; msgEl.className='kiss-msg info'; msgEl.textContent='주문 처리 중...';
-  const r=await apiPost('/api/order',{side,code,qty:parseInt(qty),price:parseInt(price),orderType:type});
-  if(r?.ok && r.data?.rt_cd==='0'){
-    msgEl.className='kiss-msg ok'; msgEl.textContent=`✅ ${side==='buy'?'매수':'매도'} 주문 접수: ${qty}주`;
-    showToast(`${side==='buy'?'매수':'매도'} ${qty}주 주문이 접수됐어요`);
-    setTimeout(refreshOrders,1000);
-  } else {
-    msgEl.className='kiss-msg err'; msgEl.textContent='❌ '+(r?.data?.msg1||r?.message||'주문 실패');
+  try {
+    const r=await apiPost('/api/order',{side,code,qty:v.q,price:v.p,orderType:type});
+    if(r?.ok && r.data?.rt_cd==='0'){
+      msgEl.className='kiss-msg ok'; msgEl.textContent=`✅ ${side==='buy'?'매수':'매도'} 주문 접수: ${v.q}주`;
+      showToast(`${side==='buy'?'매수':'매도'} ${v.q}주 주문이 접수됐어요`);
+      setTimeout(refreshOrders,1000);
+    } else {
+      msgEl.className='kiss-msg err'; msgEl.textContent='❌ '+(r?.data?.msg1||r?.message||'주문 실패');
+    }
+  } finally {
+    _orderInflight = false;
+    if (btn) btn.disabled = false;
   }
 }
 async function refreshOrders() {
@@ -2237,7 +2272,7 @@ async function refreshOrders() {
     return;
   }
   tbody.innerHTML = orders.map(o => {
-    const code = o.pdno || '', name = o.prdt_name || nameOf(code);
+    const code = esc(o.pdno || ''), name = esc(o.prdt_name || nameOf(o.pdno || ''));
     const isBuy = o.sll_buy_dvsn_cd === '02';
     const side = isBuy ? '<span class="badge buy">매수</span>' : '<span class="badge sell">매도</span>';
     const qty = parseInt(o.ord_qty || 0), filled = parseInt(o.tot_ccld_qty || 0);
@@ -2277,8 +2312,8 @@ function onTradingSearch() {
   const m = searchStocks(q);
   if (!m.length) { dd.style.display='none'; return; }
   dd.innerHTML = m.slice(0,10).map(s =>
-    `<div class="item" onclick="setTradingStock('${s.code}','${s.name}')">
-      <span class="name">${s.name}</span><span class="code">${s.code}</span>
+    `<div class="item" onclick="setTradingStock('${esc(s.code)}','${esc(s.name)}')">
+      <span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span>
     </div>`
   ).join('');
   dd.style.display = 'block';
@@ -2511,11 +2546,12 @@ async function loadNews(code) {
     return '';
   };
   el.innerHTML = list.slice(0, 15).map(n => {
-    const title = n.hts_pbnt_titl_cntt || n.news_titl || n.news_title || n.title || '(제목 없음)';
-    const timeDisp = fmtNewsTime(n);
-    const source = n.source || '';
-    const titleHtml = n.link
-      ? `<a href="${n.link}" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:none">${title}</a>`
+    const title = esc(n.hts_pbnt_titl_cntt || n.news_titl || n.news_title || n.title || '(제목 없음)');
+    const timeDisp = esc(fmtNewsTime(n));
+    const source = esc(n.source || '');
+    const link = safeUrl(n.link); // http(s) 외 스킴(javascript: 등) 차단
+    const titleHtml = link
+      ? `<a href="${esc(link)}" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:none">${title}</a>`
       : title;
     return `<div style="padding:8px 4px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:baseline;gap:8px">
@@ -2578,8 +2614,8 @@ function onBtSearch() {
   const m = searchStocks(q);
   if (!m.length) { dd.style.display='none'; return; }
   dd.innerHTML = m.slice(0,8).map(s =>
-    `<div class="item" data-code="${s.code}" data-name="${s.name}">
-      <span class="name">${s.name}</span><span class="code">${s.code}</span>
+    `<div class="item" data-code="${esc(s.code)}" data-name="${esc(s.name)}">
+      <span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span>
     </div>`
   ).join('');
   dd.onclick = e => {
@@ -2747,8 +2783,8 @@ function onAlertSearch() {
   const m = searchStocks(q);
   if (!m.length) { dd.style.display='none'; return; }
   dd.innerHTML = m.slice(0,8).map(s =>
-    `<div class="item" data-code="${s.code}" data-name="${s.name}">
-      <span class="name">${s.name}</span><span class="code">${s.code}</span>
+    `<div class="item" data-code="${esc(s.code)}" data-name="${esc(s.name)}">
+      <span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span>
     </div>`
   ).join('');
   dd.onclick = e => {
@@ -2786,7 +2822,7 @@ function renderAlerts() {
     return `<div class="alert-item ${a.triggered?'':'unread'}" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border)">
       <span style="font-size:16px">${icon}</span>
       <div style="flex:1">
-        <div style="font-size:12px;font-weight:600;color:var(--text-0)">${a.name} <span style="color:var(--text-3);font-size:10px">${a.code}</span></div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-0)">${esc(a.name)} <span style="color:var(--text-3);font-size:10px">${esc(a.code)}</span></div>
         <div style="font-size:11px;color:var(--text-2)">₩${a.price.toLocaleString()} ${condTxt} 도달 시 알림</div>
       </div>
       <div style="text-align:right">
@@ -2803,7 +2839,7 @@ function renderAlertHistory() {
     const t = new Date(h.time).toLocaleString('ko-KR');
     return `<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border);font-size:12px">
       <span>${h.cond==='above'?'📈':'📉'}</span>
-      <div style="flex:1"><strong>${h.name}</strong> ₩${h.price.toLocaleString()} ${h.cond==='above'?'이상':'이하'} 도달</div>
+      <div style="flex:1"><strong>${esc(h.name)}</strong> ₩${h.price.toLocaleString()} ${h.cond==='above'?'이상':'이하'} 도달</div>
       <span style="font-size:10px;color:var(--text-3)">${t}</span>
     </div>`;
   }).join('');
@@ -2941,10 +2977,11 @@ async function loadDashNews() {
     return;
   }
   el.innerHTML = list.slice(0,10).map(n => {
-    const title = n.hts_pbnt_titl_cntt||n.news_titl||n.news_title||n.title||'(제목없음)';
+    const title = esc(n.hts_pbnt_titl_cntt||n.news_titl||n.news_title||n.title||'(제목없음)');
     const date  = n.data_dt||n.dscls_time||n.date||n.pubDate||'';
-    const meta  = [n.source||'', date].filter(Boolean).join(' · ');
-    const titleHtml = n.link ? `<a href="${n.link}" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:none">${title}</a>` : title;
+    const meta  = esc([n.source||'', date].filter(Boolean).join(' · '));
+    const link  = safeUrl(n.link);
+    const titleHtml = link ? `<a href="${esc(link)}" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:none">${title}</a>` : title;
     return `<div style="padding:10px 8px;border-bottom:1px solid var(--border);text-align:left">
       <div style="font-size:12.5px;color:var(--text-0);line-height:1.45;font-weight:500;margin-bottom:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${titleHtml}</div>
       ${meta?`<div style="font-size:10px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${meta}</div>`:''}
@@ -2977,7 +3014,8 @@ async function loadDashVolTop() {
     return;
   }
   el.innerHTML = list.slice(0,30).map((d,i) => {
-    const code = d.stck_shrn_iscd||d.mksc_shrn_iscd||'', name = d.hts_kor_isnm||nameOf(code);
+    const raw = d.stck_shrn_iscd||d.mksc_shrn_iscd||'';
+    const code = esc(raw), name = esc(d.hts_kor_isnm||nameOf(raw));
     const price = parseInt(d.stck_prpr||0), chg = parseFloat(d.prdy_ctrt||0), up = chg>=0;
     return `<div class="watch-item" onclick="loadStock('${code}')" style="padding:7px 10px">
       <div style="display:flex;align-items:center;gap:7px;min-width:0">
@@ -3007,7 +3045,7 @@ async function refreshDashHoldings(accountData) {
     return;
   }
   tbody.innerHTML = positions.slice(0, 8).map(p => {
-    const name = p.prdt_name || nameOf(p.pdno);
+    const name = esc(p.prdt_name || nameOf(p.pdno));
     const plRt = parseFloat(p.evlu_pfls_rt||0);
     const pl = parseInt(p.evlu_pfls_amt||0);
     const cur = parseInt(p.prpr||0);
@@ -3039,7 +3077,7 @@ async function refreshDashAutoLog() {
     const t = new Date(l.time).toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'});
     return `<div style="display:flex;gap:6px;padding:4px 0;border-bottom:1px solid var(--border);font-size:11px">
       <span style="flex-shrink:0">${icons[l.type]||'•'}</span>
-      <span style="flex:1;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.message}</span>
+      <span style="flex:1;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.message)}</span>
       <span style="color:var(--text-3);font-family:var(--mono);font-size:10px;flex-shrink:0">${t}</span>
     </div>`;
   }).join('');
@@ -3063,12 +3101,18 @@ function updateSideTotal() {
   setText('sideTotal',p&&q?'₩'+(p*q).toLocaleString():'—');
 }
 async function submitSideOrder() {
+  if (_orderInflight) return;
   const code=currentCode, type=$('sideOrderType').value;
   const price=$('sidePrice').value||'0', qty=$('sideQty').value;
-  if(!code||!qty) return;
-  const r=await apiPost('/api/order',{side:sideSide,code,qty:parseInt(qty),price:parseInt(price),orderType:type});
-  if(r?.ok&&r.data?.rt_cd==='0') alert(`✅ ${sideSide==='buy'?'매수':'매도'} ${qty}주 접수`);
-  else alert('❌ '+(r?.data?.msg1||'주문 실패'));
+  const v = validateOrder(code, qty, price, type);
+  if (v.err) { alert('❌ '+v.err); return; }
+  if (!confirmOrder(sideSide, code, v.q, v.p, type)) return;
+  _orderInflight = true;
+  try {
+    const r=await apiPost('/api/order',{side:sideSide,code,qty:v.q,price:v.p,orderType:type});
+    if(r?.ok&&r.data?.rt_cd==='0') alert(`✅ ${sideSide==='buy'?'매수':'매도'} ${v.q}주 접수`);
+    else alert('❌ '+(r?.data?.msg1||'주문 실패'));
+  } finally { _orderInflight = false; }
 }
 
 // ══════════════════════════════════════════════════════
@@ -3127,7 +3171,8 @@ async function loadVol100ForMarket(market) {
     return;
   }
   tbody.innerHTML=list.slice(0,20).map((d,i)=>{
-    const code=d.stck_shrn_iscd||d.mksc_shrn_iscd||'', name=d.hts_kor_isnm||nameOf(code);
+    const raw=d.stck_shrn_iscd||d.mksc_shrn_iscd||'';
+    const code=esc(raw), name=esc(d.hts_kor_isnm||nameOf(raw));
     const price=parseInt(d.stck_prpr||0), chgPct=parseFloat(d.prdy_ctrt||0), up=chgPct>=0;
     return `<tr>
       <td class="mono" style="color:var(--text-3)">${i+1}</td>
@@ -3162,7 +3207,7 @@ function onStocksSearch() {
   if (!q) { dd.style.display='none'; renderStocksList(); return; }
   const m = searchStocks(q);
   if (m.length) {
-    dd.innerHTML = m.slice(0,8).map(s=>`<div class="item" data-code="${s.code}"><span class="name">${s.name}</span><span class="code">${s.code}</span></div>`).join('');
+    dd.innerHTML = m.slice(0,8).map(s=>`<div class="item" data-code="${esc(s.code)}"><span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span></div>`).join('');
     dd.onclick = e => { const it=e.target.closest('.item'); if(it){ dd.style.display='none'; loadStock(it.dataset.code); } };
     dd.style.display = 'block';
   } else { dd.style.display='none'; }
@@ -3195,10 +3240,11 @@ function renderStocksList() {
   // volume은 API가 이미 거래량순
   if (!list.length) { tbody.innerHTML='<tr><td colspan="8" class="empty">결과 없음</td></tr>'; return; }
   tbody.innerHTML = list.map((d,i) => {
-    const code = d.stck_shrn_iscd||d.mksc_shrn_iscd||'';
-    const name = d.hts_kor_isnm||nameOf(code);
+    const raw = d.stck_shrn_iscd||d.mksc_shrn_iscd||'';
+    const code = esc(raw);
+    const name = esc(d.hts_kor_isnm||nameOf(raw));
     const price = parseInt(d.stck_prpr||0), chg = parseFloat(d.prdy_ctrt||0), up = chg>=0;
-    const inWatch = watchCodes.includes(code);
+    const inWatch = watchCodes.includes(raw);
     return `<tr>
       <td class="mono" style="color:var(--text-3)">${i+1}</td>
       <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}<span style="color:var(--text-3);font-size:10px;margin-left:4px">${code}</span></td>
@@ -3239,7 +3285,8 @@ async function loadVol100() {
   if(!r?.ok){tbody.innerHTML='<tr><td colspan="8" class="empty">조회 실패</td></tr>';return;}
   const list=r.data?.output||[];
   tbody.innerHTML=list.map((d,i)=>{
-    const code=d.stck_shrn_iscd||d.mksc_shrn_iscd||'', name=d.hts_kor_isnm||nameOf(code);
+    const raw=d.stck_shrn_iscd||d.mksc_shrn_iscd||'';
+    const code=esc(raw), name=esc(d.hts_kor_isnm||nameOf(raw));
     const price=parseInt(d.stck_prpr||0), chgPct=parseFloat(d.prdy_ctrt||0), up=chgPct>=0;
     return `<tr>
       <td class="mono" style="color:var(--text-3)">${i+1}</td>
@@ -3265,7 +3312,7 @@ function onWlSearch() {
   const m=searchStocks(q);
   if(!m.length){dd.style.display='none';return;}
   dd.innerHTML=m.slice(0,8).map(s=>
-    `<div class="item" onclick="addToWatchlist('${s.code}')"><span class="name">${s.name}</span><span class="code">${s.code}</span></div>`
+    `<div class="item" onclick="addToWatchlist('${esc(s.code)}')"><span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span></div>`
   ).join('');
   dd.style.display='block';
 }
@@ -3332,7 +3379,7 @@ async function loadHistory() {
   let buyAmt=0, sellAmt=0, pnl=0;
   if(!orders.length){$('histBody').innerHTML='<tr><td colspan="10" class="empty">거래 내역 없음</td></tr>';setText('histCount','0건');return;}
   $('histBody').innerHTML=orders.map(o=>{
-    const code=o.pdno||'', name=o.prdt_name||nameOf(code);
+    const code=esc(o.pdno||''), name=esc(o.prdt_name||nameOf(o.pdno||''));
     const isBuy=o.sll_buy_dvsn_cd==='02', side=isBuy?'<span class="badge buy">매수</span>':'<span class="badge sell">매도</span>';
     const qty=parseInt(o.ord_qty||0), oprc=parseInt(o.ord_unpr||0), cprc=parseInt(o.avg_prvs||o.tot_ccld_unpr||0);
     const amt=cprc*qty;
@@ -3472,7 +3519,7 @@ function onWatchSearch(){
   if(!q){dd.style.display='none';return;}
   const m=searchStocks(q);
   if(!m.length){dd.style.display='none';return;}
-  dd.innerHTML=m.slice(0,8).map(s=>`<div class="item" onclick="addWatch('${s.code}')"><span class="name">${s.name}</span><span class="code">${s.code}</span></div>`).join('');
+  dd.innerHTML=m.slice(0,8).map(s=>`<div class="item" onclick="addWatch('${esc(s.code)}')"><span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span></div>`).join('');
   dd.style.display='block';
 }
 function addWatch(c){if(!autoWatchList.includes(c))autoWatchList.push(c);$('watchAddInput').value='';$('watchSearchDd').style.display='none';renderWatchChips();}
@@ -3483,7 +3530,7 @@ async function refreshAutoLogs() {
   const icons={buy:'🟢',sell:'🔵',signal:'📊',safety:'🛑',system:'⚙️',error:'❌',config:'💾'};
   el.innerHTML=r.logs.slice(0,50).map(l=>{
     const t=new Date(l.time).toLocaleTimeString('ko-KR');
-    return `<div class="log-item"><span class="log-icon">${icons[l.type]||'•'}</span><div class="log-msg">${l.message}</div><span class="log-time">${t}</span></div>`;
+    return `<div class="log-item"><span class="log-icon">${icons[l.type]||'•'}</span><div class="log-msg">${esc(l.message)}</div><span class="log-time">${t}</span></div>`;
   }).join('');
 }
 function startAutoLogPoll(){
@@ -3787,17 +3834,16 @@ async function checkAuth() {
 // 초기화
 // ══════════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', async () => {
-  // 1) 로그인 체크 — ★[임시] 로그인 화면 주석 처리(개발용 바이패스). 운영 전 반드시 원복 ★
+  // 1) 로그인 체크 — 미인증 시 로그인 화면으로 차단
   const me = await checkAuth();
-  // if (!me) {
-  //   $('authScreen').style.display = 'flex';
-  //   $('app').style.display = 'none';
-  //   return;
-  // }
-  // 로그인 여부와 무관하게 앱 진입
+  if (!me) {
+    $('authScreen').style.display = 'flex';
+    $('app').style.display = 'none';
+    return;
+  }
   $('authScreen').style.display = 'none';
   $('app').style.display = 'grid';
-  setText('hdrUsername', (me?.username || 'admin') + (me?.role === 'admin' ? ' 👑' : ''));
+  setText('hdrUsername', me.username + (me.role === 'admin' ? ' 👑' : ''));
 
   // 프록시 연결 확인 후 시작
   await checkProxy();

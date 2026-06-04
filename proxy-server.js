@@ -228,7 +228,9 @@ async function pumpKis(key) {
   } finally { q.pumping = false; }
 }
 
-async function kisProxy(cfg, kispath, trId, queryParams, priority) {
+async function kisProxy(cfg, kispath, trId, queryParams, priority = 'high') {
+  // 기본 high: 사용자 라우트·엔진 경로가 priority 누락으로 low 캡(10)에 걸려
+  // 무작위 실패하던 문제 수정. 백그라운드(prefetch/SWR)는 호출부가 'low' 명시.
   const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
   const [hostname, port] = host.split(':');
   const qs = new URLSearchParams(queryParams).toString();
@@ -530,7 +532,9 @@ function getTrader(userId) {
     getAccount:      fetchAccount,     // (cfg)
     getVolTop:       fetchVolTop,      // (cfg)
     codeToName:      codeToNameLookup,
-    sendTelegram:    sendTelegram
+    sendTelegram:    sendTelegram,
+    // 미체결(접수) 주문 목록 — 엔진의 중복매도 방지·매수한도 계산에 사용
+    getPendingOrders: () => orderJournal.pendingList(userId === '_global' ? null : userId)
   });
   _traders[userId] = t;
   return t;
@@ -687,7 +691,8 @@ async function refreshPrice(cfg, code, priority = 'low') {
         if (days.length) { prev = parseInt(days[0].stck_clpr || 0); cur = 0; }
       } catch (e2) {}
     }
-    const data = { price: cur, chgPct: parseFloat(o.prdy_ctrt || 0), sign: o.prdy_vrss_sign || '3', prev: prev || cur };
+    const data = { price: cur, chgPct: parseFloat(o.prdy_ctrt || 0), sign: o.prdy_vrss_sign || '3', prev: prev || cur,
+                   accVol: parseInt(o.acml_vol || 0) }; // 거래량 캐시 — volume100 폴백이 거래량 0으로 정렬되던 버그 수정
     if (data.price > 0 || data.prev > 0) global._priceCache[code] = { t: Date.now(), data };
     return data;
   } catch (e) { return global._priceCache[code]?.data || null; }
@@ -898,12 +903,13 @@ const server = http.createServer(async (req, res) => {
   const session = auth.getUserBySession(cookies.session);
   setCurrentUser(session ? session.userId : null);
 
-  // ── 정적 파일 ──
-  if (pathname === '/' || pathname === '/index.html') {
-    serveStatic(res, path.join(__dirname, 'app.html')); return;
+  // ── 정적 파일 — 화이트리스트 방식 (서버 소스 .js·설정 파일 노출 차단) ──
+  const STATIC_WHITELIST = { '/': 'app.html', '/index.html': 'app.html', '/app.html': 'app.html' };
+  if (STATIC_WHITELIST[pathname]) {
+    serveStatic(res, path.join(__dirname, STATIC_WHITELIST[pathname])); return;
   }
   if (pathname.endsWith('.html') || pathname.endsWith('.js') || pathname.endsWith('.css')) {
-    serveStatic(res, path.join(__dirname, pathname.slice(1))); return;
+    jsonRes(res, 404, { ok: false, message: 'not found' }); return;
   }
 
   // ══════════════════════════════════════════
@@ -1279,8 +1285,8 @@ const server = http.createServer(async (req, res) => {
     // 과거 → 하루치 OHLCV를 장중 균등 분할해 분봉처럼 렌더링
     if (pathname === '/api/minchart') {
       const code = query.code || '005930';
-      const unit = parseInt(query.unit || '5');
-      const days = Math.min(90, Math.max(1, parseInt(query.days || '30'))); // 최대 90일
+      const unit = Math.max(1, Math.min(60, parseInt(query.unit) || 5)); // 1~60 범위 강제 — unit=0 무한루프 차단
+      const days = Math.min(90, Math.max(1, parseInt(query.days) || 30)); // 최대 90일
       const market = query.market || 'J';
 
       // 60초 응답 캐시 — 기간 전환/재진입 시 즉시 응답
