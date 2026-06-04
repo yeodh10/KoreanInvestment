@@ -158,9 +158,9 @@ function startFakeKis(onClientMsg) {
   const resubs = fake.received.map(s => JSON.parse(s));
   ok('재연결 시 재구독', resubs.some(s => s.body?.input?.tr_key === '005930'));
 
-  // LRU 한도 (20등록 초과 시 해제 발신)
+  // LRU 한도 (MAX_REG=40 초과 시 해제 발신) — 시총30 시세표 + 호가 수용 위해 20→40 상향
   fake.received.length = 0;
-  for (let i = 0; i < 22; i++) feed.ensure('H0STCNT0', String(100000 + i));
+  for (let i = 0; i < 43; i++) feed.ensure('H0STCNT0', String(100000 + i));
   await sleep(200);
   const msgs = fake.received.map(s => JSON.parse(s));
   ok('한도 초과 시 LRU 해제 발신', msgs.some(s => s.header.tr_type === '2'));
