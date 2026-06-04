@@ -86,45 +86,69 @@ function httpsRequest(options, body) {
       });
     });
     req.on('error', reject);
+    // KIS 무응답 시 10초 타임아웃 — 응답 없는 소켓이 큐 전체를 정체시키는 것 방지
+    req.setTimeout(10000, () => req.destroy(new Error('KIS 응답 시간 초과(10초)')));
     if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body));
     req.end();
   });
 }
 
 // ── KIS 토큰 발급 ──
+// KIS는 접근토큰 발급을 1분 1회로 제한한다. 만료 시 엔진·실시간·주문이 동시에
+// 재발급을 치면 전부 실패하므로: ① 진행 중인 발급은 모두가 공유(동시 발급 1건으로 합침)
+// ② 실패 시 65초 쿨다운(그동안 기존 토큰이 살아있으면 그것 사용)
+const _tokenIssue = {}; // appKey → { p: Promise|null, failUntil: ts }
 async function getKisToken(cfg) {
   const now = Date.now();
   // 유효한 토큰이 있으면 무조건 재사용 (재인증 불필요)
   if (cfg.token && cfg.tokenExpiry > now + 60000) return cfg.token;
 
-  const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
-  const [hostname, port] = host.split(':');
+  const tkey = cfg.appKey || '_global';
+  const st = _tokenIssue[tkey] || (_tokenIssue[tkey] = { p: null, failUntil: 0 });
 
-  const body = JSON.stringify({
-    grant_type: 'client_credentials',
-    appkey: cfg.appKey,
-    appsecret: cfg.appSecret
-  });
-
-  const res = await httpsRequest({
-    hostname, port: parseInt(port),
-    path: '/oauth2/tokenP',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body)
-    }
-  }, body);
-
-  if (res.body && res.body.access_token) {
-    cfg.token = res.body.access_token;
-    cfg.tokenExpiry = now + (res.body.expires_in - 600) * 1000; // 10분 여유
-    saveConfig(cfg);
-    return cfg.token;
+  // 실패 쿨다운 중 — 기존 토큰이 아직 살아있으면 그것 사용, 아니면 대기 안내
+  if (now < st.failUntil) {
+    if (cfg.token && cfg.tokenExpiry > now) return cfg.token;
+    throw new Error('토큰 발급 제한(1분 1회) — 잠시 후 자동 재시도됩니다');
   }
-  // 재발급 실패했지만 기존 토큰이 아직 안 죽었으면 그거라도 사용
-  if (cfg.token && cfg.tokenExpiry > now) return cfg.token;
-  throw new Error('토큰 발급 실패: ' + JSON.stringify(res.body));
+
+  // 이미 다른 요청이 발급 진행 중이면 그 결과를 같이 기다림 (동시 발급 방지)
+  if (st.p) return st.p;
+
+  st.p = (async () => {
+    const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
+    const [hostname, port] = host.split(':');
+    const body = JSON.stringify({
+      grant_type: 'client_credentials',
+      appkey: cfg.appKey,
+      appsecret: cfg.appSecret
+    });
+    const res = await httpsRequest({
+      hostname, port: parseInt(port),
+      path: '/oauth2/tokenP',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, body);
+
+    if (res.body && res.body.access_token) {
+      cfg.token = res.body.access_token;
+      cfg.tokenExpiry = Date.now() + (res.body.expires_in - 600) * 1000; // 10분 여유
+      saveConfig(cfg);
+      st.failUntil = 0;
+      return cfg.token;
+    }
+    // 발급 실패 — 65초 쿨다운 설정 (KIS 1분 제한 준수)
+    st.failUntil = Date.now() + 65000;
+    // 기존 토큰이 아직 안 죽었으면 그거라도 사용
+    if (cfg.token && cfg.tokenExpiry > Date.now()) return cfg.token;
+    throw new Error('토큰 발급 실패: ' + JSON.stringify(res.body));
+  })();
+
+  try { return await st.p; }
+  finally { st.p = null; }
 }
 
 // ── 주문용 hashkey 발급 ──
@@ -151,31 +175,44 @@ async function getHashkey(cfg, bodyObj) {
 }
 
 // ── KIS API 프록시 요청 ──
-// ── 전역 우선순위 큐: 모든 KIS 호출을 최소 간격으로 줄 세워 초당 한도(EGW00201) 방지 ──
-// high = 사용자 동작(호가/체결/현재가) — 백그라운드 폴링을 새치기한다
-const KIS_MIN_GAP_MS = 350;
-let _kisLast = 0;
-const _kisHigh = [], _kisLow = [];
-let _kisPumping = false;
-function kisSchedule(fn, priority) {
+// ── 앱키(계좌)별 우선순위 큐 ──
+// KIS rate limit은 앱키(계좌) 단위이므로, 사용자마다 독립 큐를 둬서 서로 간섭하지 않게 한다.
+// (예전엔 전역 단일 큐라 사용자가 늘면 한도를 나눠 써 더 느려졌다.)
+// high = 사용자 동작(호가/체결/현재가) — 백그라운드 폴링을 새치기한다.
+// 간격(gap)은 모드별: 모의(vts) 약 5건/초, 실전(live) 약 16건/초(안전마진).
+const KIS_GAP_MS = { vts: 250, live: 60 }; // vts 4/s — 한도(5/s) 여유분 확보로 EGW00201 페널티 예방
+function kisGapFor(cfg) { return (cfg && cfg.txMode === 'live') ? KIS_GAP_MS.live : KIS_GAP_MS.vts; }
+
+const _kisQueues = {}; // appKey → { high, low, last, pumping, gap }
+function _kisQ(key) {
+  return _kisQueues[key] || (_kisQueues[key] = { high: [], low: [], last: 0, pumping: false, gap: KIS_GAP_MS.vts });
+}
+function kisSchedule(key, gap, fn, priority) {
+  const q = _kisQ(key);
+  q.gap = gap;
   return new Promise((resolve, reject) => {
-    (priority === 'high' ? _kisHigh : _kisLow).push({ fn, resolve, reject });
-    pumpKis();
+    // 백프레셔: KIS가 느려져 큐가 적체되면 — 백그라운드(low)는 즉시 포기(캐시 유지),
+    // 사용자 요청(high)도 한계치를 넘으면 빠르게 실패시켜 폴백이 동작하게 한다.
+    if (priority !== 'high' && q.low.length >= 10) { reject(new Error('큐 적체 — 백그라운드 스킵')); return; }
+    if (priority === 'high' && q.high.length >= 25) { reject(new Error('큐 적체 — 잠시 후 재시도')); return; }
+    (priority === 'high' ? q.high : q.low).push({ fn, resolve, reject });
+    pumpKis(key);
   });
 }
-async function pumpKis() {
-  if (_kisPumping) return;
-  _kisPumping = true;
+async function pumpKis(key) {
+  const q = _kisQ(key);
+  if (q.pumping) return;
+  q.pumping = true;
   try {
-    while (_kisHigh.length || _kisLow.length) {
-      const job = _kisHigh.length ? _kisHigh.shift() : _kisLow.shift();
-      const wait = KIS_MIN_GAP_MS - (Date.now() - _kisLast);
+    while (q.high.length || q.low.length) {
+      const job = q.high.length ? q.high.shift() : q.low.shift();
+      const wait = q.gap - (Date.now() - q.last);
       if (wait > 0) await new Promise(r => setTimeout(r, wait));
-      _kisLast = Date.now();
+      q.last = Date.now();
       try { job.resolve(await job.fn()); }
       catch (e) { job.reject(e); }
     }
-  } finally { _kisPumping = false; }
+  } finally { q.pumping = false; }
 }
 
 async function kisProxy(cfg, kispath, trId, queryParams, priority) {
@@ -185,8 +222,10 @@ async function kisProxy(cfg, kispath, trId, queryParams, priority) {
   const fullPath = kispath + (qs ? '?' + qs : '');
 
   // 우선순위 큐로 간격 보장 + EGW00201(초당 한도 초과) 시 백오프 재시도
+  const qKey = cfg.appKey || '_global';
+  const gap = kisGapFor(cfg);
   for (let attempt = 0; attempt < 4; attempt++) {
-    const res = await kisSchedule(async () => {
+    const res = await kisSchedule(qKey, gap, async () => {
       const token = await getKisToken(cfg);
       return httpsRequest({
         hostname, port: parseInt(port),
@@ -237,8 +276,10 @@ async function kisProxyReal(cfg, kispath, trId, queryParams, priority) {
   const [hostname, port] = KIS_HOST_REAL.split(':');
   const qs = new URLSearchParams(queryParams).toString();
   const fullPath = kispath + (qs ? '?' + qs : '');
+  // 실전 도메인 호출도 같은 앱키 큐를 공유한다(앱키 단위 한도 보호). 간격은 실전 한도 적용.
+  const qKey = cfg.appKey || '_global';
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await kisSchedule(async () => {
+    const res = await kisSchedule(qKey, KIS_GAP_MS.live, async () => {
       const token = await getKisTokenReal(cfg);
       return httpsRequest({
         hostname, port: parseInt(port), path: fullPath, method: 'GET',
@@ -253,21 +294,44 @@ async function kisProxyReal(cfg, kispath, trId, queryParams, priority) {
   }
 }
 
+// ── 주문/취소 POST도 같은 앱키 큐로 직렬화 (초당 한도 보호) + 거부 시 자동 재시도 ──
+// 예전엔 주문이 큐를 우회해서, 엔진 스캔 중 주문하면 "초당 거래건수 초과"로 거부됐다.
+// 거부된 주문은 접수되지 않은 것이므로 재시도해도 중복 접수 위험이 없다.
+async function kisPost(cfg, kispath, trId, bodyObj) {
+  const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
+  const [hostname, port] = host.split(':');
+  const qKey = cfg.appKey || '_global';
+  const gap = kisGapFor(cfg);
+  let res = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const token = await getKisToken(cfg);
+    const hashkey = await kisSchedule(qKey, gap, () => getHashkey(cfg, bodyObj), 'high');
+    const body = JSON.stringify(bodyObj);
+    res = await kisSchedule(qKey, gap, () => httpsRequest({
+      hostname, port: parseInt(port), path: kispath, method: 'POST',
+      headers: {
+        'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
+        'authorization': 'Bearer ' + token, 'appkey': cfg.appKey, 'appsecret': cfg.appSecret,
+        'tr_id': trId, 'custtype': 'P', 'hashkey': hashkey
+      }
+    }, body), 'high');
+    const msg = res?.body?.msg1 || '', cd = res?.body?.msg_cd || '';
+    if (res?.body?.rt_cd !== '0' && (cd === 'EGW00201' || msg.includes('초당 거래건수')) && attempt < 3) {
+      console.log(`[주문 재시도 ${attempt + 1}] 초당 한도 — 0.${5 * (attempt + 1)}초 후 재전송`);
+      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      continue;
+    }
+    return res;
+  }
+  return res;
+}
+
 // ════════════════════════════════════════
 // 자동매매 엔진용 재사용 헬퍼
 // ════════════════════════════════════════
 
-// ── Rate Limiter: KIS 모의투자는 초당 1회 제한 ──
-let _lastApiCall = 0;
-const API_MIN_INTERVAL_MS = 350; // 0.35초 간격 (안전하게)
-
-async function rateLimitedCall(fn) {
-  const now = Date.now();
-  const wait = API_MIN_INTERVAL_MS - (now - _lastApiCall);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  _lastApiCall = Date.now();
-  return fn();
-}
+// ── 이중 스로틀 제거됨(Phase 0-B): kisProxy의 앱키별 큐가 이미 간격을 보장하므로
+//    그 위에 덧씌우던 전역 rateLimitedCall(350ms) 게이트는 삭제했다. (호출당 최대 700ms→해소)
 
 // ── 재시도 래퍼: socket hang up 시 최대 2회 재시도 ──
 async function withRetry(fn, label, retries = 2) {
@@ -296,12 +360,12 @@ function chartCacheKey(code, period) { return `${code}_${period}_${new Date().to
 
 // 현재가 1종목
 async function fetchCurrentPrice(cfg, code) {
-  return withRetry(() => rateLimitedCall(async () => {
+  return withRetry(async () => {
     const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
       FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
     });
     return parseInt(r.body?.output?.stck_prpr || 0);
-  }), `현재가:${code}`);
+  }, `현재가:${code}`);
 }
 
 // 일봉 차트 (캐시 적용)
@@ -309,7 +373,7 @@ async function fetchChart(cfg, code, period) {
   const key = chartCacheKey(code, period || 'D');
   if (_chartCache[key]) return _chartCache[key]; // 캐시 히트
 
-  const result = await withRetry(() => rateLimitedCall(async () => {
+  const result = await withRetry(async () => {
     const today = new Date();
     const toDate = today.toISOString().slice(0,10).replace(/-/g,'');
     const fromDate = new Date(today - 120*24*60*60*1000).toISOString().slice(0,10).replace(/-/g,'');
@@ -324,7 +388,7 @@ async function fetchChart(cfg, code, period) {
       low: parseInt(d.stck_lwpr||0), close: parseInt(d.stck_clpr||0),
       vol: parseInt(d.acml_vol||0)
     })).filter(d => d.close > 0);
-  }), `차트:${code}`);
+  }, `차트:${code}`);
 
   if (result && result.length > 0) {
     _chartCache[key] = result; // 정상 데이터만 캐시
@@ -337,7 +401,7 @@ async function fetchChart(cfg, code, period) {
 
 // 계좌 잔고
 async function fetchAccount(cfg) {
-  return withRetry(() => rateLimitedCall(async () => {
+  return withRetry(async () => {
     const trId = cfg.txMode === 'vts' ? 'VTTC8434R' : 'TTTC8434R';
     const [cano, acntPrdtCd] = (cfg.accNo || '').split('-');
     const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-balance', trId, {
@@ -347,7 +411,7 @@ async function fetchAccount(cfg) {
       CTX_AREA_FK100:'', CTX_AREA_NK100:''
     });
     return r.body;
-  }), '계좌잔고');
+  }, '계좌잔고');
 }
 
 // 주문 실행 (엔진용)
@@ -362,20 +426,8 @@ async function executeOrder(cfg, { side, code, qty, price, orderType }) {
     PDNO: code, ORD_DVSN: orderType||'00',
     ORD_QTY: String(qty), ORD_UNPR: String(price||0)
   };
-  const orderBody = JSON.stringify(orderObj);
-  const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
-  const [hostname, port] = host.split(':');
-  const token = await getKisToken(cfg);
-  const hashkey = await getHashkey(cfg, orderObj);
-  const r = await httpsRequest({
-    hostname, port: parseInt(port),
-    path: '/uapi/domestic-stock/v1/trading/order-cash', method: 'POST',
-    headers: {
-      'Content-Type':'application/json', 'Content-Length':Buffer.byteLength(orderBody),
-      'authorization':'Bearer '+token, 'appkey':cfg.appKey, 'appsecret':cfg.appSecret,
-      'tr_id':trId, 'custtype':'P', 'hashkey':hashkey
-    }
-  }, orderBody);
+  // 큐를 통해 직렬화 + 초당 한도 거부 시 자동 재시도
+  const r = await kisPost(cfg, '/uapi/domestic-stock/v1/trading/order-cash', trId, orderObj);
   return r.body;
 }
 
@@ -387,6 +439,10 @@ function codeToNameLookup(code) {
 
 // ── 엔진 초기화 ──
 const { AutoTrader, getLogs } = require('./auto-trader.js');
+// ── Phase 2: KIS 실시간 시세 (WebSocket → SSE) ──
+const realtime = require('./kis-realtime.js');
+// ── 빈 화면 금지 폴백: 마지막 정상 데이터(영속)·환율 공개소스·호가 사다리 ──
+const fb = require('./data-fallback.js');
 // ── 텔레그램 알림 발송 ──
 async function sendTelegram(cfg, message) {
   if (!cfg.telegramToken || !cfg.telegramChatId) return;
@@ -404,7 +460,7 @@ async function sendTelegram(cfg, message) {
 
 // 거래량 상위 조회 (엔진 스캔 목록용)
 async function fetchVolTop(cfg) {
-  return withRetry(() => rateLimitedCall(async () => {
+  return withRetry(async () => {
     const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/ranking/volume', 'FHPST01710000', {
       fid_cond_mrkt_div_code: 'J', fid_cond_scr_div_code: '20171',
       fid_input_iscd: '0000', fid_div_cls_code: '0', fid_blng_cls_code: '0',
@@ -412,7 +468,7 @@ async function fetchVolTop(cfg) {
       fid_input_price_1: '', fid_input_price_2: '', fid_vol_cnt: '', fid_input_date_1: ''
     });
     return r.body;
-  }), '거래량상위');
+  }, '거래량상위');
 }
 
 // ── 멀티유저: 유저별 자동매매 엔진 ──
@@ -533,6 +589,192 @@ function serveStatic(res, filepath) {
     res.writeHead(404);
     res.end('Not found');
   }
+}
+
+// ════════════════════════════════════════
+// Phase 1 — L1 즉시 응답 (stale-while-revalidate) + 서버 prefetch
+// ════════════════════════════════════════
+// 원칙: 캐시값이 있으면 신선/만료 상관없이 "즉시" 반환하고, 만료됐으면 백그라운드(low)로
+//       갱신만 트리거한다(응답을 기다리지 않음). 캐시가 비어 있을 때만 동기 fetch(high).
+//       → 사용자를 절대 기다리게 하지 않는다.
+const SWR_TTL = { price: 5000, acct: 2000, market: 30000, vol: 90000 };
+// 진행 중 백그라운드 갱신 중복 방지 (low 우선순위 갱신에만 적용; high는 항상 즉시 실행)
+const _bgRefreshing = { price: {}, acct: {}, market: false, vol: false };
+
+// ── 단일 종목 현재가 → global._priceCache 갱신 ──
+async function refreshPrice(cfg, code, priority = 'low') {
+  if (priority === 'low') { if (_bgRefreshing.price[code]) return; _bgRefreshing.price[code] = true; }
+  if (!global._priceCache) global._priceCache = {};
+  try {
+    const r = await withRetry(() =>
+      kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+        FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+      }, priority), `현재가:${code}`);
+    const o = r.body?.output || {};
+    let cur = parseInt(o.stck_prpr || 0);
+    let prev = parseInt(o.stck_sdpr || 0);
+    if (!prev && cur) {
+      const vrss = parseInt(o.prdy_vrss || 0);
+      const sign = o.prdy_vrss_sign;
+      prev = (sign === '5' || sign === '4') ? cur + vrss : cur - vrss;
+    }
+    // 현재가/전일종가 둘 다 0이면 — 일봉 마지막 종가로 폴백
+    if (!cur && !prev) {
+      try {
+        const dr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-price', 'FHKST01010400', {
+          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code, FID_PERIOD_DIV_CODE: 'D', FID_ORG_ADJ_PRC: '0'
+        }, priority);
+        const days = dr.body?.output || [];
+        if (days.length) { prev = parseInt(days[0].stck_clpr || 0); cur = 0; }
+      } catch (e2) {}
+    }
+    const data = { price: cur, chgPct: parseFloat(o.prdy_ctrt || 0), sign: o.prdy_vrss_sign || '3', prev: prev || cur };
+    if (data.price > 0 || data.prev > 0) global._priceCache[code] = { t: Date.now(), data };
+    return data;
+  } catch (e) { return global._priceCache[code]?.data || null; }
+  finally { if (priority === 'low') _bgRefreshing.price[code] = false; }
+}
+
+// ── 계좌 잔고 → global._acctCache[userKey] 갱신 ──
+async function refreshAccount(cfg, userKey, priority = 'low') {
+  if (priority === 'low') { if (_bgRefreshing.acct[userKey]) return; _bgRefreshing.acct[userKey] = true; }
+  if (!global._acctCache) global._acctCache = {};
+  try {
+    const trId = cfg.txMode === 'vts' ? 'VTTC8434R' : 'TTTC8434R';
+    const [cano, acntPrdtCd] = (cfg.accNo || '').split('-');
+    const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-balance', trId, {
+      CANO: cano || '', ACNT_PRDT_CD: acntPrdtCd || '01', AFHR_FLPR_YN: 'N', OFL_YN: '',
+      INQR_DVSN: '02', UNPR_DVSN: '01', FUND_STTL_ICLD_YN: 'N', FNCG_AMT_AUTO_RDPT_YN: 'N',
+      PRCS_DVSN: '01', CTX_AREA_FK100: '', CTX_AREA_NK100: ''
+    }, priority);
+    const payload = { ok: true, data: result.body };
+    if (result.body && result.body.rt_cd === '0') global._acctCache[userKey] = { t: Date.now(), data: payload };
+    return payload;
+  } catch (e) { return global._acctCache[userKey]?.data || null; }
+  finally { if (priority === 'low') _bgRefreshing.acct[userKey] = false; }
+}
+
+// ── 지수/환율 → global._marketCache 갱신 ──
+async function refreshMarket(cfg, priority = 'low') {
+  if (priority === 'low') { if (_bgRefreshing.market) return; _bgRefreshing.market = true; }
+  if (!global._marketCache) global._marketCache = { data: null, ts: 0 };
+  try {
+    const results = {};
+    for (const idx of [{ code: '0001', name: 'KOSPI' }, { code: '1001', name: 'KOSDAQ' }]) {
+      try {
+        const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-index-price', 'FHPUP02100000', {
+          FID_COND_MRKT_DIV_CODE: 'U', FID_INPUT_ISCD: idx.code
+        }, priority);
+        if (r.body?.output) results[idx.name] = r.body.output;
+      } catch (e) {}
+    }
+    try {
+      const fx = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+        FID_COND_MRKT_DIV_CODE: 'X', FID_INPUT_ISCD: 'FX@KRW'
+      }, priority);
+      if (fx.body?.output?.stck_prpr) results.USDKRW = { rate: fx.body.output.stck_prpr };
+    } catch (e) {}
+    // KIS 환율(FX@KRW)은 VTS/실전 모두 자주 미지원 → 공개 API 폴백 (open.er-api.com, 1시간 캐시)
+    if (!results.USDKRW) {
+      try { const rate = await fb.fetchUsdKrw(); if (rate) results.USDKRW = { rate }; } catch (e) {}
+    }
+    const prevMkt = global._marketCache.data || fb.get('market'); // 서버 재시작 후에도 마지막 값 복원
+    if (prevMkt) {
+      for (const k of ['KOSPI', 'KOSDAQ', 'USDKRW']) {
+        if (!results[k] && prevMkt[k]) results[k] = prevMkt[k];
+      }
+    }
+    if (results.KOSPI || results.KOSDAQ) fb.save('market', results);
+    global._marketCache = { data: results, ts: Date.now() };
+    return results;
+  } catch (e) { return global._marketCache?.data || null; }
+  finally { if (priority === 'low') _bgRefreshing.market = false; }
+}
+
+// ── 거래량 상위 100 → global._volCache 갱신 ──
+async function refreshVol100(cfg, priority = 'low') {
+  if (priority === 'low') { if (_bgRefreshing.vol) return; _bgRefreshing.vol = true; }
+  if (!global._volCache) global._volCache = { data: null, ts: 0 };
+  try {
+    // 1) 실전 도메인 순위 API 시도 (실전 키가 있으면 진짜 TOP)
+    try {
+      const result = await kisProxyReal(cfg, '/uapi/domestic-stock/v1/ranking/volume', 'FHPST01710000', {
+        fid_cond_mrkt_div_code: 'J', fid_cond_scr_div_code: '20171', fid_input_iscd: '0000',
+        fid_div_cls_code: '0', fid_blng_cls_code: '0', fid_trgt_cls_code: '111111111',
+        fid_trgt_exls_cls_code: '000000', fid_input_price_1: '', fid_input_price_2: '',
+        fid_vol_cnt: '', fid_input_date_1: ''
+      }, priority);
+      const out = result.body?.output || [];
+      if (out.length) {
+        const payload = { data: result.body };
+        global._volCache = { data: payload, ts: Date.now() };
+        return payload;
+      }
+    } catch (e) { /* 실전 도메인 불가 → 폴백 */ }
+    // 2) 폴백: 모의 키로도 되는 개별 시세 → 주요 종목 거래량 정렬
+    const VOL_CODES = ['005930','000660','373220','207940','005380','000270','035420','035720','068270','005490','051910','006400','105560','066570'];
+    const rows = [];
+    for (const code of VOL_CODES) {
+      try {
+        const pr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100',
+          { FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code }, priority);
+        const o = pr.body?.output;
+        if (o && parseInt(o.stck_prpr || 0) > 0) {
+          rows.push({ stck_shrn_iscd: code, hts_kor_isnm: o.hts_kor_isnm || code,
+            stck_prpr: o.stck_prpr, prdy_ctrt: o.prdy_ctrt, acml_vol: o.acml_vol, acml_tr_pbmn: o.acml_tr_pbmn });
+        }
+      } catch (e) {}
+    }
+    rows.sort((a, b) => parseInt(b.acml_vol || 0) - parseInt(a.acml_vol || 0));
+    const payload = { data: { output: rows }, fallback: 'curated' };
+    global._volCache = { data: payload, ts: Date.now() };
+    return payload;
+  } catch (e) { return global._volCache?.data || null; }
+  finally { if (priority === 'low') _bgRefreshing.vol = false; }
+}
+
+// ── 서버 prefetch 루프 ──
+// 등록 유저의 관심종목 + 주요 거래량 종목 시세를 장중 주기적으로 미리 데워 캐시를 채운다.
+// 우선순위 'low' — 사용자 동작(현재가/호가 등 high)을 절대 방해하지 않는다.
+// TTL이 남은 캐시는 건드리지 않아 rate limit 낭비를 막는다.
+const PREFETCH_VOL_CODES = ['005930','000660','373220','207940','005380','000270','035420','035720'];
+function _isMarketHours() {
+  const kst = new Date(Date.now() + 9 * 3600 * 1000); // UTC → KST
+  const day = kst.getUTCDay();                         // 0=일, 6=토
+  if (day === 0 || day === 6) return false;
+  const mins = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  return mins >= 9 * 60 && mins <= 15 * 60 + 30;        // 09:00~15:30
+}
+let _prefetchBusy = false;
+async function prefetchTick() {
+  if (_prefetchBusy) return;
+  _prefetchBusy = true;
+  try {
+    const now = Date.now();
+    let users = {};
+    try { users = auth.loadUsers(); } catch (e) { return; }
+    for (const username of Object.keys(users)) {
+      const uid = users[username].userId;
+      let cfg;
+      try { cfg = auth.loadUserConfig(uid); } catch (e) { continue; }
+      if (!cfg || !cfg.appKey || !cfg.appSecret) continue;
+      let watch = [];
+      try { watch = (getTrader(uid).state.settings.watchList) || []; } catch (e) {}
+      const codes = [...new Set([...watch, ...PREFETCH_VOL_CODES])].slice(0, 30);
+      for (const code of codes) {
+        const c = global._priceCache && global._priceCache[code];
+        if (!c || now - c.t >= SWR_TTL.price) refreshPrice(cfg, code, 'low'); // 만료된 것만
+      }
+      // 지수·거래량 캐시도 데움(전역 캐시 — TTL 남으면 건너뜀, 중복은 플래그가 차단)
+      if (!global._marketCache || !global._marketCache.data || now - global._marketCache.ts >= SWR_TTL.market) refreshMarket(cfg, 'low');
+      if (!global._volCache || !global._volCache.data || now - global._volCache.ts >= SWR_TTL.vol) refreshVol100(cfg, 'low');
+    }
+  } catch (e) { /* 백그라운드 — 조용히 무시 */ }
+  finally { _prefetchBusy = false; }
+}
+function schedulePrefetch() {
+  const interval = _isMarketHours() ? 20000 : 120000; // 장중 20초, 장외/주말 2분
+  setTimeout(() => { prefetchTick().finally(schedulePrefetch); }, interval);
 }
 
 // ════════════════════════════════════════
@@ -714,6 +956,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /api/debug — 서버 내부 상태 (큐 적체·토큰·업타임) 진단용
+  if (pathname === '/api/debug') {
+    const qs = {};
+    for (const k in _kisQueues) {
+      const q = _kisQueues[k];
+      qs[k.slice(0, 8)] = { high: q.high.length, low: q.low.length, pumping: q.pumping, sinceLastMs: Date.now() - q.last };
+    }
+    const tok = Object.keys(_tokenIssue).map(k => ({
+      key: k.slice(0, 8), inFlight: !!_tokenIssue[k].p,
+      cooldownSec: Math.max(0, Math.round((_tokenIssue[k].failUntil - Date.now()) / 1000))
+    }));
+    jsonRes(res, 200, { ok: true, uptimeSec: Math.round(process.uptime()), queues: qs, token: tok, memMB: Math.round(process.memoryUsage().rss / 1048576) });
+    return;
+  }
+
   // ── KIS API 프록시 ──
   const cfg = loadConfig();
   if (!cfg.appKey || !cfg.appSecret) {
@@ -722,53 +979,39 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // GET /api/prices?codes=005930,000660 — 여러 종목 현재가 배치
+    // GET /api/stream?codes=005930,000660&ob=005930 — 실시간 시세 SSE (Phase 2)
+    // KIS WebSocket을 구독해 체결가/호가를 브라우저로 푸시. 수신 시세는 가격캐시에도 반영.
+    if (pathname === '/api/stream') {
+      realtime.handleStream(req, res, {
+        cfg, query,
+        onPrice: (code, data) => {
+          if (!global._priceCache) global._priceCache = {};
+          global._priceCache[code] = { t: Date.now(), data };
+        }
+      });
+      return;
+    }
+
+    // GET /api/prices?codes=005930,000660 — 여러 종목 현재가 배치 (stale-while-revalidate)
+    // 캐시값이 있으면 만료 여부와 무관하게 즉시 반환하고, 만료된 종목만 백그라운드(low)로 갱신.
+    // 캐시가 전혀 없는 종목만 동기(high)로 채운다 → 첫 화면 외에는 항상 0ms 체감.
     if (pathname === '/api/prices') {
       const codes = (query.codes || '').split(',').filter(Boolean).slice(0, 30);
       if (!global._priceCache) global._priceCache = {};
       const now = Date.now();
-      const TTL = 5000; // 5초 시세 캐시 — 잦은 갱신은 KIS 안 치고 즉시 응답
       const out = {};
+      const missing = [];
       for (const code of codes) {
         const cached = global._priceCache[code];
-        if (cached && now - cached.t < TTL) { out[code] = cached.data; continue; } // 캐시 적중
-        try {
-          // kisProxy 자체가 직렬 큐로 간격을 보장하므로 rateLimitedCall 이중 적용 제거(속도↑)
-          const r = await withRetry(() =>
-            kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
-              FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
-            }), `현재가:${code}`);
-          const o = r.body?.output || {};
-          let cur = parseInt(o.stck_prpr || 0);
-          let prev = parseInt(o.stck_sdpr || 0);
-          if (!prev && cur) {
-            const vrss = parseInt(o.prdy_vrss || 0);
-            const sign = o.prdy_vrss_sign;
-            prev = (sign === '5' || sign === '4') ? cur + vrss : cur - vrss;
-          }
-          // 현재가/전일종가 둘 다 0이면 — 일봉 마지막 종가로 폴백
-          if (!cur && !prev) {
-            try {
-              const dr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-price', 'FHKST01010400', {
-                FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code,
-                FID_PERIOD_DIV_CODE: 'D', FID_ORG_ADJ_PRC: '0'
-              });
-              const days = dr.body?.output || [];
-              if (days.length) {
-                prev = parseInt(days[0].stck_clpr || 0);
-                cur = 0;
-              }
-            } catch(e2) {}
-          }
-          const data = {
-            price: cur,
-            chgPct: parseFloat(o.prdy_ctrt || 0),
-            sign: o.prdy_vrss_sign || '3',
-            prev: prev || cur
-          };
-          out[code] = data;
-          if (data.price > 0 || data.prev > 0) global._priceCache[code] = { t: Date.now(), data }; // 유효할 때만 캐시
-        } catch(e) { out[code] = global._priceCache[code]?.data || null; } // 실패 시 직전 캐시 사용(빈칸 방지)
+        if (cached) {
+          out[code] = cached.data; // 즉시 반환(만료여도)
+          if (now - cached.t >= SWR_TTL.price) refreshPrice(cfg, code, 'low'); // 만료 → 백그라운드 갱신(대기 안 함)
+        } else {
+          missing.push(code); // 캐시 전무 → 동기 fetch 필요
+        }
+      }
+      for (const code of missing) {
+        out[code] = (await refreshPrice(cfg, code, 'high')) || null;
       }
       jsonRes(res, 200, { ok: true, data: out });
       return;
@@ -825,16 +1068,14 @@ const server = http.createServer(async (req, res) => {
         const startDate = new Date(today - totalDays * msPerDay);
         const startStr = startDate.toISOString().slice(0,10).replace(/-/g,'');
 
-        const result = await rateLimitedCall(() =>
-          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice', trId, {
+        const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice', trId, {
             FID_COND_MRKT_DIV_CODE: market,
             FID_INPUT_ISCD: code,
             FID_INPUT_DATE_1: startStr,
             FID_INPUT_DATE_2: endStr,
             FID_PERIOD_DIV_CODE: kisPeriod,
             FID_ORG_ADJ_PRC: '0'
-          })
-        );
+          }, 'high'); // 사용자가 보고 있는 차트 — 백그라운드 폴링 새치기
 
         if (result.body?.rt_cd !== '0') break;
         if (!output1 && result.body.output1) output1 = result.body.output1;
@@ -901,6 +1142,12 @@ const server = http.createServer(async (req, res) => {
       const days = Math.min(90, Math.max(1, parseInt(query.days || '30'))); // 최대 90일
       const market = query.market || 'J';
 
+      // 60초 응답 캐시 — 기간 전환/재진입 시 즉시 응답
+      if (!global._minChartCache) global._minChartCache = {};
+      const mcKey = `${code}_${unit}_${days}`;
+      const mcHit = global._minChartCache[mcKey];
+      if (mcHit && Date.now() - mcHit.t < 60000) { jsonRes(res, 200, mcHit.resp); return; }
+
       let output1 = null;
       const allCandles = []; // 최종 분봉 목록 (과거→현재)
 
@@ -909,13 +1156,11 @@ const server = http.createServer(async (req, res) => {
         const today = new Date();
         const toDate = today.toISOString().slice(0,10).replace(/-/g,'');
         const fromDate = new Date(today - days*24*60*60*1000).toISOString().slice(0,10).replace(/-/g,'');
-        const dayResult = await rateLimitedCall(() =>
-          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice', 'FHKST03010100', {
+        const dayResult = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice', 'FHKST03010100', {
             FID_COND_MRKT_DIV_CODE: market, FID_INPUT_ISCD: code,
             FID_INPUT_DATE_1: fromDate, FID_INPUT_DATE_2: toDate,
             FID_PERIOD_DIV_CODE: 'D', FID_ORG_ADJ_PRC: '0'
-          })
-        );
+          }, 'high');
         if (dayResult.body?.output1) output1 = dayResult.body.output1;
         const dayRows = (dayResult.body?.output2 || [])
           .slice().reverse() // 과거→현재 정렬
@@ -960,20 +1205,29 @@ const server = http.createServer(async (req, res) => {
       // ── 2) 오늘 실제 분봉 수집 ──
       const todayCandles = [];
       const todayStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
-      const times = ['153000','150000','143000','140000','133000','130000',
-                     '123000','120000','113000','110000','103000','100000','093000','090000'];
+      // 현재(KST) 시각까지의 30분 슬롯만 역순 조회 — 장전 0회, 오전 2~4회, 종일도 최대 14회
+      // (예전엔 무조건 14연속 호출 ≈ 3~5초 낭비 → 분봉 로딩이 느렸던 주범)
+      const kstNow = new Date(Date.now() + 9*60*60*1000);
+      const kstMin = kstNow.getUTCHours()*60 + kstNow.getUTCMinutes();
+      const kstDay = kstNow.getUTCDay();
+      const times = [];
+      if (kstDay >= 1 && kstDay <= 5 && kstMin >= 9*60) {
+        for (let m = Math.min(kstMin, 15*60+30); m >= 9*60; m -= 30) {
+          times.push(String(Math.floor(m/60)).padStart(2,'0') + String(m%60).padStart(2,'0') + '00');
+        }
+      }
 
+      let emptyStreak = 0;
       for (const hhmmss of times) {
         try {
-          const r = await rateLimitedCall(() =>
-            kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', 'FHKST03010200', {
+          const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', 'FHKST03010200', {
               FID_ETC_CLS_CODE: '', FID_COND_MRKT_DIV_CODE: market,
               FID_INPUT_ISCD: code, FID_INPUT_HOUR_1: hhmmss, FID_PW_DATA_INCU_YN: 'N'
-            })
-          );
+            }, 'high');
           if (!output1 && r.body?.output1) output1 = r.body.output1;
           const rows = r.body?.output2 || [];
           todayCandles.push(...rows);
+          if (!rows.length) { if (++emptyStreak >= 2) break; } else emptyStreak = 0; // 빈 구간 연속 2회 → 중단
         } catch(e) { break; }
       }
 
@@ -1000,10 +1254,12 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      jsonRes(res, 200, {
+      const mcResp = {
         ok: true,
         data: { output1, output2: allCandles, rt_cd:'0', count: allCandles.length, isMinute: true }
-      });
+      };
+      if (allCandles.length) global._minChartCache[mcKey] = { t: Date.now(), resp: mcResp };
+      jsonRes(res, 200, mcResp);
       return;
     }
 
@@ -1057,16 +1313,11 @@ const server = http.createServer(async (req, res) => {
         const priceR = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
           FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
         }, 'high');
-        let infoR = null;
-        try {
-          infoR = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/search-stock-info', 'CTPF1002R', {
-            PRDT_TYPE_CD: '300', PDNO: code, PRDT_NAME: '', PRDT_NAME_SRCH_TP: '1',
-            PDNO_OR_PRDT_NAME_SRCH_TP: '2', CTS: ''
-          }, 'high');
-        } catch(_) { /* 종목상세 실패는 무시 (이름 폴백만 잃음) */ }
+        // 종목상세(CTPF1002R)는 모의투자에서 무응답이 잦아 호출당 10초씩 낭비 → 제거.
+        // 이름은 현재가 응답(hts_kor_isnm) 또는 로컬 종목 마스터에서 가져온다.
         const p = priceR.body?.output || {};
-        const i = (infoR?.body?.output || [])[0] || {};
-        jsonRes(res, 200, { ok: true, data: {
+        const i = { prdt_name: codeToNameLookup(code) };
+        let data = {
           code,
           name: p.hts_kor_isnm || i.prdt_name || code,
           price: parseInt(p.stck_prpr||0),
@@ -1085,97 +1336,85 @@ const server = http.createServer(async (req, res) => {
           hi52: parseInt(p.w52_hgpr||p.stck_mxpr||0),
           lo52: parseInt(p.w52_lwpr||p.stck_llam||0),
           rt_cd: priceR.body?.rt_cd
-        }});
+        };
+        if (data.price > 0) {
+          fb.save('stockinfo:' + code, data); // 마지막 정상 데이터 보관
+        } else {
+          // 가격 0 (장전/빈 응답) — ① 마지막 정상 데이터 ② 일봉 종가 순으로 폴백 (₩0 표시 금지)
+          const last = fb.get('stockinfo:' + code);
+          if (last && last.price > 0) {
+            data = { ...last, stale: true };
+          } else {
+            try {
+              const candles = await fetchChart(cfg, code, 'D');
+              const n = candles?.length || 0;
+              if (n) {
+                const c1 = candles[n-1].close, c0 = n > 1 ? candles[n-2].close : c1;
+                data.price = c1;
+                data.change = c1 - c0;
+                data.changePct = c0 ? Math.round((c1-c0)/c0*10000)/100 : 0;
+                data.sign = c1 >= c0 ? '2' : '5';
+                data.stale = true;
+              }
+            } catch(_) {}
+          }
+        }
+        jsonRes(res, 200, { ok: true, data });
       } catch(e) {
         jsonRes(res, 500, { ok: false, message: e.message });
       }
       return;
     }
 
-    // GET /api/volume100?market=J — 거래량 상위 100
+    // GET /api/volume100?market=J — 거래량 상위 100 (stale-while-revalidate)
     if (pathname === '/api/volume100') {
-      // 90초 캐시
       if (!global._volCache) global._volCache = { data: null, ts: 0 };
-      if (global._volCache.data && Date.now() - global._volCache.ts < 90000) {
+      if (global._volCache.data) {
+        if (Date.now() - global._volCache.ts >= SWR_TTL.vol) refreshVol100(cfg, 'low'); // 만료 → 백그라운드 갱신
         jsonRes(res, 200, { ok: true, ...global._volCache.data, cached: true });
         return;
       }
-      // 1) 실전 도메인 순위 API 시도 (실전 키가 있으면 진짜 TOP)
-      try {
-        const result = await kisProxyReal(cfg, '/uapi/domestic-stock/v1/ranking/volume', 'FHPST01710000', {
-          fid_cond_mrkt_div_code: 'J', fid_cond_scr_div_code: '20171', fid_input_iscd: '0000',
-          fid_div_cls_code: '0', fid_blng_cls_code: '0', fid_trgt_cls_code: '111111111',
-          fid_trgt_exls_cls_code: '000000', fid_input_price_1: '', fid_input_price_2: '',
-          fid_vol_cnt: '', fid_input_date_1: ''
-        }, 'high');
-        const out = result.body?.output || [];
-        if (out.length) {
-          global._volCache = { data: { data: result.body }, ts: Date.now() };
-          jsonRes(res, 200, { ok: true, data: result.body });
-          return;
-        }
-      } catch (e) { /* 실전 도메인 불가 → 아래 폴백 */ }
-
-      // 2) 폴백: 모의 키로도 되는 개별 시세 조회 → 주요 종목 거래량 정렬
-      const VOL_CODES = ['005930','000660','373220','207940','005380','000270','035420','035720','068270','005490','051910','006400','105560','066570'];
-      const rows = [];
-      for (const code of VOL_CODES) {
-        try {
-          const pr = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100',
-            { FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code }, 'low');
-          const o = pr.body?.output;
-          if (o && parseInt(o.stck_prpr || 0) > 0) {
-            rows.push({
-              stck_shrn_iscd: code, hts_kor_isnm: o.hts_kor_isnm || code,
-              stck_prpr: o.stck_prpr, prdy_ctrt: o.prdy_ctrt,
-              acml_vol: o.acml_vol, acml_tr_pbmn: o.acml_tr_pbmn
-            });
-          }
-        } catch (e) { /* 개별 실패는 건너뜀 */ }
-      }
-      rows.sort((a, b) => parseInt(b.acml_vol || 0) - parseInt(a.acml_vol || 0));
-      const payload = { data: { output: rows }, fallback: 'curated' };
-      global._volCache = { data: payload, ts: Date.now() };
-      jsonRes(res, 200, { ok: true, ...payload });
+      const payload = await refreshVol100(cfg, 'high'); // 캐시 없을 때만 동기
+      jsonRes(res, 200, { ok: true, ...(payload || {}) });
       return;
     }
 
-    // GET /api/orderbook?code=005930 — 호가창
+    // GET /api/orderbook?code=005930 — 호가창 (빈 호가 시 폴백)
     if (pathname === '/api/orderbook') {
-      const trId = 'FHKST01010200';
-      const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn', trId, {
+      const obc = query.code || '005930';
+      const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn', 'FHKST01010200', {
         FID_COND_MRKT_DIV_CODE: 'J',
-        FID_INPUT_ISCD: query.code || '005930'
+        FID_INPUT_ISCD: obc
       }, 'high');
-      jsonRes(res, 200, { ok: true, data: result.body });
+      if (!fb.isOrderbookEmpty(result.body?.output1)) {
+        fb.save('ob:' + obc, result.body); // 마지막 정상 호가 보관
+        jsonRes(res, 200, { ok: true, data: result.body });
+        return;
+      }
+      // 빈 호가 — ① 마지막 정상 호가 ② 마지막 가격 기준 호가 사다리 (빈 화면 금지)
+      const lastOb = fb.get('ob:' + obc);
+      if (lastOb) { jsonRes(res, 200, { ok: true, data: lastOb, cached: true }); return; }
+      let basePrice = global._priceCache?.[obc]?.data?.price || global._priceCache?.[obc]?.data?.prev || 0;
+      if (!basePrice) basePrice = (fb.get('stockinfo:' + obc) || {}).price || 0;
+      if (!basePrice) { try { const cs = await fetchChart(cfg, obc, 'D'); basePrice = cs?.[cs.length-1]?.close || 0; } catch(_) {} }
+      const ladder = fb.buildLadder(basePrice);
+      jsonRes(res, 200, { ok: true, data: ladder ? { output1: ladder, rt_cd: '0' } : result.body, synthetic: !!ladder });
       return;
     }
 
-    // GET /api/account — 계좌 잔고 (2초 캐시 — 잦은 갱신에도 즉시 응답, 유저별 분리)
+    // GET /api/account — 계좌 잔고 (stale-while-revalidate, 유저별 분리)
+    // 캐시값이 있으면 즉시 반환하고, 2초 지났으면 백그라운드로 갱신. 캐시 없을 때만 동기 fetch.
     if (pathname === '/api/account') {
       if (!global._acctCache) global._acctCache = {};
       const ck = session.userId || 'default';
       const cached = global._acctCache[ck];
-      if (cached && Date.now() - cached.t < 2000) { jsonRes(res, 200, cached.data); return; }
-      const trId = cfg.txMode === 'vts' ? 'VTTC8434R' : 'TTTC8434R';
-      const [cano, acntPrdtCd] = (cfg.accNo || '').split('-');
-      const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-balance', trId, {
-        CANO: cano || '',
-        ACNT_PRDT_CD: acntPrdtCd || '01',
-        AFHR_FLPR_YN: 'N',
-        OFL_YN: '',
-        INQR_DVSN: '02',
-        UNPR_DVSN: '01',
-        FUND_STTL_ICLD_YN: 'N',
-        FNCG_AMT_AUTO_RDPT_YN: 'N',
-        PRCS_DVSN: '01',
-        CTX_AREA_FK100: '',
-        CTX_AREA_NK100: ''
-      });
-      const payload = { ok: true, data: result.body };
-      // 성공 응답만 캐시 (EGW00201 등 에러는 캐시하지 않고 다음 호출에서 재시도)
-      if (result.body && result.body.rt_cd === '0') global._acctCache[ck] = { t: Date.now(), data: payload };
-      jsonRes(res, 200, payload);
+      if (cached) {
+        if (Date.now() - cached.t >= SWR_TTL.acct) refreshAccount(cfg, ck, 'low'); // 만료 → 백그라운드 갱신
+        jsonRes(res, 200, cached.data);
+        return;
+      }
+      const payload = await refreshAccount(cfg, ck, 'high');
+      jsonRes(res, 200, payload || { ok: true, data: null });
       return;
     }
 
@@ -1195,26 +1434,8 @@ const server = http.createServer(async (req, res) => {
         ORD_QTY: String(body.qty),
         ORD_UNPR: String(body.price || 0)
       };
-      const orderBody = JSON.stringify(orderObj);
-      const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
-      const [hostname, port] = host.split(':');
-      const token = await getKisToken(cfg);
-      const hashkey = await getHashkey(cfg, orderObj);
-      const result = await httpsRequest({
-        hostname, port: parseInt(port),
-        path: '/uapi/domestic-stock/v1/trading/order-cash',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(orderBody),
-          'authorization': 'Bearer ' + token,
-          'appkey': cfg.appKey,
-          'appsecret': cfg.appSecret,
-          'tr_id': trId,
-          'custtype': 'P',
-          'hashkey': hashkey
-        }
-      }, orderBody);
+      // 큐를 통해 직렬화 + 초당 한도 거부 시 자동 재시도
+      const result = await kisPost(cfg, '/uapi/domestic-stock/v1/trading/order-cash', trId, orderObj);
       console.log(`[주문] ${isBuy?'매수':'매도'} ${body.code} ${body.qty}주 → ${result.body?.rt_cd==='0'?'✅접수':'❌'+(result.body?.msg1||'실패')}`);
       jsonRes(res, 200, { ok: true, data: result.body });
       return;
@@ -1240,7 +1461,7 @@ const server = http.createServer(async (req, res) => {
         INQR_DVSN_1: '',
         CTX_AREA_FK100: '',
         CTX_AREA_NK100: ''
-      });
+      }, 'high'); // 사용자 화면 — 백그라운드 새치기
       jsonRes(res, 200, { ok: true, data: result.body });
       return;
     }
@@ -1248,12 +1469,20 @@ const server = http.createServer(async (req, res) => {
     // GET /api/tick?code=005930 — 당일 체결 내역
     if (pathname === '/api/tick') {
       const code = query.code || '005930';
-      const r = await withRetry(() => rateLimitedCall(() =>
+      const r = await withRetry(() =>
         kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-ccnl', 'FHKST01010300', {
           FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
         }, 'high')
-      ), `체결:${code}`);
-      jsonRes(res, 200, { ok: true, data: r.body });
+      , `체결:${code}`);
+      const tickRows = r.body?.output || [];
+      if (tickRows.length) {
+        fb.save('tick:' + code, r.body); // 마지막 체결 내역 보관 (재시작에도 유지)
+        jsonRes(res, 200, { ok: true, data: r.body });
+      } else {
+        // 장전/장마감 — 빈 화면 대신 마지막 거래 내역 표시
+        const last = fb.get('tick:' + code);
+        jsonRes(res, 200, { ok: true, data: last || r.body, cached: !!last });
+      }
       return;
     }
 
@@ -1266,21 +1495,11 @@ const server = http.createServer(async (req, res) => {
         CANO: cano||'', ACNT_PRDT_CD: acntPrdtCd||'01',
         KRX_FWDG_ORD_ORGNO: body.orgNo||'', ORGN_ODNO: body.ordNo||'',
         ORD_DVSN: '00', RVSE_CNCL_DVSN_CD: '02', // 02=취소
-        ORD_QTY: body.qty||'0', QTY_ALL_ORD_YN: body.qty?'N':'Y'
+        ORD_QTY: body.qty||'0', ORD_UNPR: '0',   // 취소는 단가 0 필수 (누락 시 '주문 금액 확인' 거부)
+        QTY_ALL_ORD_YN: body.qty?'N':'Y'
       };
-      const cancelBody = JSON.stringify(cancelObj);
-      const host = cfg.txMode==='vts'?KIS_HOST_VTS:KIS_HOST_REAL;
-      const [hostname,port] = host.split(':');
-      const token = await getKisToken(cfg);
-      const hashkey = await getHashkey(cfg, cancelObj);
-      const result = await httpsRequest({
-        hostname,port:parseInt(port),
-        path:'/uapi/domestic-stock/v1/trading/order-rvsecncl',
-        method:'POST',
-        headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(cancelBody),
-          'authorization':'Bearer '+token,'appkey':cfg.appKey,'appsecret':cfg.appSecret,
-          'tr_id':trId,'custtype':'P','hashkey':hashkey}
-      }, cancelBody);
+      // 큐를 통해 직렬화 + 초당 한도 거부 시 자동 재시도
+      const result = await kisPost(cfg, '/uapi/domestic-stock/v1/trading/order-rvsecncl', trId, cancelObj);
       console.log(`[주문취소] ${body.ordNo} → ${result.body?.rt_cd==='0'?'✅성공':'❌'+(result.body?.msg1||'')}`);
       jsonRes(res, 200, { ok: true, data: result.body });
       return;
@@ -1290,22 +1509,24 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/news') {
       const code = query.code || '005930';
       const fallbackUrl = `https://finance.naver.com/item/news.naver?code=${code}`;
-      // 1) KIS 뉴스 (권한 있을 때만 데이터가 옴)
-      try {
-        const r = await rateLimitedCall(() =>
-          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/news-title', 'FHKST01011800', {
-            FID_NEWS_OFER_ENTP_CODE: '', FID_COND_MRKT_DIV_CODE: 'J',
-            FID_INPUT_ISCD: code, FID_TITL_CNTT: '',
-            FID_INPUT_DATE_1: '', FID_INPUT_HOUR_1: '',
-            FID_RANK_SORT_CLS_CODE: '', FID_INPUT_SRNO: ''
-          })
-        );
-        const list = r.body?.output || [];
-        if (list.length) {
-          jsonRes(res, 200, { ok: true, source: 'kis', data: { output: list, rt_cd: '0' } });
-          return;
-        }
-      } catch(e) { /* KIS 뉴스 실패 → 구글 뉴스로 폴백 */ }
+      // 1) KIS 뉴스 — 권한 없는 키가 대부분. 한 번 실패하면 6시간 동안 건너뛰어
+      //    매번 10초 타임아웃을 낭비하지 않고 바로 구글 RSS로 간다.
+      if (!global._kisNewsFailAt || Date.now() - global._kisNewsFailAt > 6*3600*1000) {
+        try {
+          const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/news-title', 'FHKST01011800', {
+              FID_NEWS_OFER_ENTP_CODE: '', FID_COND_MRKT_DIV_CODE: 'J',
+              FID_INPUT_ISCD: code, FID_TITL_CNTT: '',
+              FID_INPUT_DATE_1: '', FID_INPUT_HOUR_1: '',
+              FID_RANK_SORT_CLS_CODE: '', FID_INPUT_SRNO: ''
+            });
+          const list = r.body?.output || [];
+          if (list.length) {
+            jsonRes(res, 200, { ok: true, source: 'kis', data: { output: list, rt_cd: '0' } });
+            return;
+          }
+          global._kisNewsFailAt = Date.now(); // 빈 응답 = 권한 없음으로 간주
+        } catch(e) { global._kisNewsFailAt = Date.now(); }
+      }
 
       // 2) 키 불필요한 구글 뉴스 RSS에서 종목명으로 검색
       try {
@@ -1374,55 +1595,25 @@ const server = http.createServer(async (req, res) => {
     // GET /api/financial?code=005930 — 재무 정보
     if (pathname === '/api/financial') {
       const code = query.code || '005930';
-      const r = await withRetry(() => rateLimitedCall(() =>
+      const r = await withRetry(() =>
         kisProxy(cfg, '/uapi/domestic-stock/v1/finance/income-statement', 'FHKST66430200', {
           FID_DIV_CLS_CODE: '1', fid_cond_mrkt_div_code: 'J', fid_input_iscd: code
         })
-      ), `재무:${code}`);
+      , `재무:${code}`);
       jsonRes(res, 200, { ok: true, data: r.body });
       return;
     }
 
-    // GET /api/market — KOSPI/KOSDAQ 지수 + 환율 (30초 캐시)
+    // GET /api/market — KOSPI/KOSDAQ 지수 + 환율 (stale-while-revalidate)
     if (pathname === '/api/market') {
-      if (!global._marketCache) global._marketCache = { data:null, ts:0 };
-      // 30초 캐시 (rate limit 절약)
-      if (global._marketCache.data && Date.now() - global._marketCache.ts < 30000) {
+      if (!global._marketCache) global._marketCache = { data: null, ts: 0 };
+      if (global._marketCache.data) {
+        if (Date.now() - global._marketCache.ts >= SWR_TTL.market) refreshMarket(cfg, 'low'); // 만료 → 백그라운드 갱신
         jsonRes(res, 200, { ok: true, data: global._marketCache.data, cached: true });
         return;
       }
-      const results = {};
-      const indices = [
-        { code:'0001', name:'KOSPI' },
-        { code:'1001', name:'KOSDAQ' }
-      ];
-      for (const idx of indices) {
-        try {
-          const r = await rateLimitedCall(() =>
-            kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-index-price', 'FHPUP02100000', {
-              FID_COND_MRKT_DIV_CODE: 'U', FID_INPUT_ISCD: idx.code
-            })
-          );
-          if (r.body?.output) results[idx.name] = r.body.output;
-        } catch(e) { /* 캐시된 이전 값 유지 */ }
-      }
-      // 환율 (USD/KRW) — 해외주식 현재가 API로 달러원 환율 조회
-      try {
-        const fx = await rateLimitedCall(() =>
-          kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
-            FID_COND_MRKT_DIV_CODE: 'X', FID_INPUT_ISCD: 'FX@KRW'
-          })
-        );
-        if (fx.body?.output?.stck_prpr) results.USDKRW = { rate: fx.body.output.stck_prpr };
-      } catch(e) {}
-      // 이전 캐시값으로 빈 항목 보완
-      if (global._marketCache.data) {
-        for (const k of ['KOSPI','KOSDAQ','USDKRW']) {
-          if (!results[k] && global._marketCache.data[k]) results[k] = global._marketCache.data[k];
-        }
-      }
-      global._marketCache = { data: results, ts: Date.now() };
-      jsonRes(res, 200, { ok: true, data: results });
+      const data = await refreshMarket(cfg, 'high'); // 캐시 없을 때만 동기
+      jsonRes(res, 200, { ok: true, data: data || {} });
       return;
     }
 
@@ -1494,6 +1685,10 @@ server.listen(PORT, () => {
     console.log(`👥 가입 유저: ${n}명`);
   } catch(e) { console.log('유저 로드 보류:', e.message); }
   console.log('🤖 자동매매 엔진 로드됨 — 웹의 [전략 설정] 탭에서 제어하세요.');
+
+  // ── Phase 1: 서버 prefetch 루프 시작 (관심종목/거래량 캐시 워밍) ──
+  schedulePrefetch();
+  console.log('🔥 prefetch 루프 시작 — 관심종목/거래량 시세 백그라운드 워밍');
   console.log('');
 });
 
@@ -1507,3 +1702,4 @@ server.on('error', e => {
 });
 
 process.on('uncaughtException', e => console.error('[Uncaught]', e.message));
+// Phase 0+1 속도 개선 적용 (앱키별 큐 · 이중 스로틀 제거 · SWR · prefetch)

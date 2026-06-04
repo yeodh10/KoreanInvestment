@@ -11,6 +11,7 @@ const path = require('path');
 
 const STATE_FILE = path.join(__dirname, 'autotrade-state.json');
 const LOG_FILE   = path.join(__dirname, 'autotrade-log.json');
+const ORDER_COOLDOWN_MS = 5 * 60 * 1000; // 같은 종목 재주문 금지 시간 (중복 주문 방지, 계좌 갱신 주기와 정렬)
 
 // ── 기본 설정값 (화면에서 덮어쓸 수 있음) ──
 const DEFAULT_SETTINGS = {
@@ -52,6 +53,18 @@ function logFileFor(userId) {
     : LOG_FILE;
 }
 
+// ── 비동기 디바운스 파일 쓰기 ──
+// 동기 쓰기(writeFileSync)는 파일 잠금(백업·동기화 프로그램 등)에 걸리면
+// Node 전체가 멈춘다 → 비동기 + 0.8초 디바운스로 절대 블로킹되지 않게.
+const _writeTimers = {};
+function writeSoon(file, dataFn) {
+  if (_writeTimers[file]) return;
+  _writeTimers[file] = setTimeout(() => {
+    delete _writeTimers[file];
+    try { fs.promises.writeFile(file, dataFn()).catch(() => {}); } catch (e) {}
+  }, 800);
+}
+
 // ── 상태 로드/저장 ──
 function loadState(userId) {
   const file = stateFileFor(userId);
@@ -81,11 +94,11 @@ function loadState(userId) {
 }
 
 function saveState(state, userId) {
-  try { fs.writeFileSync(stateFileFor(userId), JSON.stringify(state, null, 2)); } catch(e) {}
+  writeSoon(stateFileFor(userId), () => JSON.stringify(state, null, 2)); // 비동기 — 블로킹 없음
 }
 
 function todayKey() {
-  return new Date().toISOString().slice(0,10);
+  return kstParts().dateKey; // 한국시간 기준 거래일
 }
 
 // ── 로그 (전역 — 하위호환용) ──
@@ -98,9 +111,9 @@ function addLog(type, message, meta) {
   const entry = { time: new Date().toISOString(), type, message, meta: meta||null };
   _logs.unshift(entry);
   if (_logs.length > 500) _logs = _logs.slice(0, 500);
-  try { fs.writeFileSync(LOG_FILE, JSON.stringify(_logs, null, 2)); } catch(e){}
   const t = new Date().toLocaleTimeString('ko-KR');
   console.log(`[자동매매 ${t}] ${message}`);
+  writeSoon(LOG_FILE, () => JSON.stringify(_logs)); // 비동기 — 블로킹 없음
   return entry;
 }
 function getLogs() { return _logs; }
@@ -116,7 +129,7 @@ function sma(closes, period) {
   return slice.reduce((a,b)=>a+b,0) / period;
 }
 
-// RSI (Wilder 방식)
+// RSI (직전 N일 단순평균 방식, Cutler RSI — Wilder 평활 아님)
 function calcRSI(closes, period) {
   if (closes.length < period + 1) return null;
   let gains = 0, losses = 0;
@@ -182,20 +195,27 @@ function decideSignal(closes, settings) {
 // ════════════════════════════════════════
 // 시간 체크
 // ════════════════════════════════════════
+// 한국시간(KST, UTC+9) — 서버 타임존과 무관하게 정확
+// epoch에 9시간을 더한 뒤 UTC 필드로 읽으면 그 값이 곧 KST 값이다.
+function kstParts() {
+  const d = new Date(Date.now() + 9*60*60*1000);
+  return {
+    day: d.getUTCDay(),
+    min: d.getUTCHours()*60 + d.getUTCMinutes(),
+    dateKey: d.toISOString().slice(0,10)
+  };
+}
 function isMarketOpen() {
-  const now = new Date();
-  const day = now.getDay();
-  if (day === 0 || day === 6) return false;
-  const t = now.getHours()*60 + now.getMinutes();
-  return t >= 9*60 && t <= 15*60+30;
+  const k = kstParts();
+  if (k.day === 0 || k.day === 6) return false;
+  return k.min >= 9*60 && k.min <= 15*60+30;
 }
 function timeToMin(hhmm) {
   const [h,m] = hhmm.split(':').map(Number);
   return h*60 + m;
 }
 function nowMin() {
-  const now = new Date();
-  return now.getHours()*60 + now.getMinutes();
+  return kstParts().min; // KST 기준
 }
 
 // ════════════════════════════════════════
@@ -212,6 +232,8 @@ class AutoTrader {
     this.scanList = [];
     this.scanListUpdated = 0;
     this.tickCount = 0;
+    this._ticking = false;     // 틱 재진입(겹침) 방지 플래그
+    this.lastAction = {};      // 종목별 마지막 주문 시각 (재주문 쿨다운)
     // 인스턴스별 로그 (유저별 파일)
     this._logs = [];
     this._logFile = logFileFor(this.userId);
@@ -223,12 +245,17 @@ class AutoTrader {
     const entry = { time: new Date().toISOString(), type, message, meta: meta||null };
     this._logs.unshift(entry);
     if (this._logs.length > 500) this._logs = this._logs.slice(0, 500);
-    try { fs.writeFileSync(this._logFile, JSON.stringify(this._logs, null, 2)); } catch(e){}
     console.log(`[자동매매:${this.userId} ${new Date().toLocaleTimeString('ko-KR')}] ${message}`);
+    writeSoon(this._logFile, () => JSON.stringify(this._logs)); // 비동기 — 블로킹 없음
     return entry;
   }
   getLogs() { return this._logs; }
   save() { saveState(this.state, this.userId); }
+
+  // 같은 종목 재주문 쿨다운 — 중복 주문 방지
+  inCooldown(code) {
+    return Date.now() - (this.lastAction[code] || 0) < ORDER_COOLDOWN_MS;
+  }
 
   getStatus() {
     return {
@@ -313,6 +340,8 @@ class AutoTrader {
   }
 
   async tick() {
+    if (this._ticking) return; // 이전 틱이 아직 실행 중 — 겹침(중복 주문) 방지
+    this._ticking = true;
     try {
       this.checkDayReset();
       this.tickCount++;
@@ -358,6 +387,7 @@ class AutoTrader {
       for (const code of Object.keys(heldPositions)) {
         const pos = heldPositions[code];
         if (nowMin() > timeToMin('15:20')) continue;
+        if (this.inCooldown(code)) continue; // 방금 주문한 종목 건너뜀 (중복 매도 방지)
         if (pos.pnlPct >= s.safety.takeProfitPct) {
           await this.sell(cfg, code, pos.qty, pos.curPrice, `익절 (+${pos.pnlPct}% ≥ +${s.safety.takeProfitPct}%)`, pos);
         } else if (pos.pnlPct <= s.safety.stopLossPct) {
@@ -390,6 +420,7 @@ class AutoTrader {
         const held = heldPositions[code];
 
         if (signal?.side === 'BUY') {
+          if (this.inCooldown(code)) continue; // 쿨다운 내 반복 매수 방지
           const startMin = s.safety.avoidFirst30min
             ? Math.max(timeToMin(s.safety.tradeStartTime), 9*60+30)
             : timeToMin(s.safety.tradeStartTime);
@@ -414,6 +445,7 @@ class AutoTrader {
           await this.buy(cfg, code, qty, price, signal.reason);
 
         } else if (signal?.side === 'SELL' && held && held.qty > 0) {
+          if (this.inCooldown(code)) continue; // 쿨다운 내 중복 매도 방지
           if (nowMin() <= timeToMin('15:20')) {
             await this.sell(cfg, code, held.qty, held.curPrice, signal.reason, held);
           }
@@ -427,6 +459,8 @@ class AutoTrader {
       this.save();
     } catch(e) {
       this.log('error', '엔진 오류: ' + e.message);
+    } finally {
+      this._ticking = false;
     }
   }
 
@@ -435,6 +469,15 @@ class AutoTrader {
     this.log('signal', `📈 매수신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
     const result = await this.deps.placeOrder(cfg, { side:'buy', code, qty, price, orderType:'00' });
     if (result?.rt_cd === '0') {
+      this.lastAction[code] = Date.now(); // 쿨다운 시작
+      // 낙관적 보유 반영 — 계좌 갱신 전에도 maxPerStock이 누적 매수에 적용되게
+      if (!this._lastHeld) this._lastHeld = {};
+      const prevPos = this._lastHeld[code];
+      this._lastHeld[code] = {
+        qty: (prevPos?.qty || 0) + qty,
+        avgPrice: price, curPrice: price, pnlPct: 0,
+        evalAmt: (prevPos?.evalAmt || 0) + qty * price
+      };
       const msg = `📈 <b>매수 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}\n사유: ${reason}`;
       this.log('buy', `✅ 매수주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()}`, { code, qty, price, reason });
       if (this.deps.sendTelegram) await this.deps.sendTelegram(cfg, msg);
@@ -448,6 +491,8 @@ class AutoTrader {
     this.log('signal', `📉 매도신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
     const result = await this.deps.placeOrder(cfg, { side:'sell', code, qty, price, orderType:'00' });
     if (result?.rt_cd === '0') {
+      this.lastAction[code] = Date.now(); // 쿨다운 시작
+      if (this._lastHeld && this._lastHeld[code]) delete this._lastHeld[code]; // 낙관적 제거 — 같은 주식 중복 매도 방지
       let realized = 0;
       if (pos?.avgPrice) realized = (price - pos.avgPrice) * qty;
       const pnlStr = (realized>=0?'+':'') + realized.toLocaleString();

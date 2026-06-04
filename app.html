@@ -562,6 +562,8 @@ td.mono,th.mono{font-family:var(--mono)}
         </div>
       </div>
     </div>
+  </div><!-- /.page-body -->
+</div><!-- /#page-dashboard — 이 닫힘이 없어서 모든 페이지가 대시보드 안에 갇혀 빈 화면이 됐었음 -->
 
 <!-- ─ 주문/거래 ─ -->
 <div class="page" id="page-trading">
@@ -1258,22 +1260,30 @@ const arrow = (sign) => (sign === '2' || sign === '1') ? '▲' : sign === '5' ? 
 // ── API 호출 ──
 let proxyOnline = false;
 async function api(path) {
+  // 12초 타임아웃 — 서버 무응답 시 연결을 회수해 브라우저 연결풀 고갈 방지
+  const ctl = new AbortController();
+  const tm = setTimeout(() => ctl.abort(), 12000);
   try {
-    const r = await fetch(PROXY + path, { credentials: 'include' });
+    const r = await fetch(PROXY + path, { credentials: 'include', signal: ctl.signal });
     const d = await r.json();
     return d;
   } catch(e) { return null; }
+  finally { clearTimeout(tm); }
 }
 async function apiPost(path, body) {
+  const ctl = new AbortController();
+  const tm = setTimeout(() => ctl.abort(), 12000);
   try {
     const r = await fetch(PROXY + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: ctl.signal
     });
     return await r.json();
   } catch(e) { return null; }
+  finally { clearTimeout(tm); }
 }
 async function checkProxy() {
   const r = await api('/api/config/status');
@@ -1431,13 +1441,13 @@ async function loadStock(code) {
       const d = r.data;
       const up = !(d.sign === '5' || d.sign === '4');
       const chgSign = up ? '+' : '';
-      $('dashPrice').textContent = '₩' + (d.price||0).toLocaleString();
+      $('dashPrice').textContent = d.price > 0 ? '₩' + d.price.toLocaleString() : '—';
       $('dashPrice').className = 'stock-price ' + (up?'up':'dn');
-      $('dashChg').textContent = `${arrow(d.sign)} ${Math.abs(d.change||0).toLocaleString()} (${chgSign}${d.changePct||0}%)`;
+      $('dashChg').textContent = `${arrow(d.sign)} ${Math.abs(d.change||0).toLocaleString()} (${chgSign}${d.changePct||0}%)` + (d.stale ? ' · 전일 종가 기준' : '');
       $('dashChg').className = 'stock-chg ' + (up?'up':'dn');
-      setText('metaO', '₩'+(d.open||0).toLocaleString());
-      setText('metaH', '₩'+(d.high||0).toLocaleString());
-      setText('metaL', '₩'+(d.low||0).toLocaleString());
+      setText('metaO', d.open>0 ? '₩'+d.open.toLocaleString() : '—');
+      setText('metaH', d.high>0 ? '₩'+d.high.toLocaleString() : '—');
+      setText('metaL', d.low>0 ? '₩'+d.low.toLocaleString() : '—');
       setText('metaV', fmtVol(d.vol));
       setText('metaA', fmtAmt(d.amount));
       setText('infoMktCap', fmtAmt((d.marketCap||0)*1e8));
@@ -1502,10 +1512,13 @@ function goTrade() {
   }, 100);
 }
 
+let _chartReqSeq = 0; // 늦게 도착한 이전 요청이 최신 차트를 덮어쓰는 것 방지
 async function loadChart() {
+  const reqId = ++_chartReqSeq;
   const code = currentCode;
   setText('chartCount', '불러오는 중...');
   if (!proxyOnline) await checkProxy();
+  if (reqId !== _chartReqSeq) return; // 이미 새 요청이 시작됨 (stale)
   let data = null;
   if (proxyOnline) {
     const isMin = dashPeriod.startsWith('m');
@@ -1513,6 +1526,7 @@ async function loadChart() {
       ? `/api/minchart?code=${code}&market=J&unit=${parseInt(dashPeriod.slice(1))}&days=${dashMinDays}`
       : `/api/chart?code=${code}&market=J&period=${dashPeriod}&years=${dashYears}`;
     const r = await api(url);
+    if (reqId !== _chartReqSeq) return; // 응답 도착 시점에 stale이면 렌더하지 않음
     if (r?.ok && r.data?.rt_cd === '0') {
       data = parseChart(r.data);
     }
@@ -1852,6 +1866,7 @@ async function loadOrderbook(code) {
   if (obTimer) clearInterval(obTimer);
   if (code !== obCode) _lastObSig = '';
   obCode = code;
+  if (typeof startStream === 'function') startStream(); // 실시간 호가 구독 전환
   setText('dashOrderStock', nameOf(code));
   await refreshOB();
   obTimer = setInterval(refreshOB, 4000);
@@ -1880,9 +1895,15 @@ async function dashOrder(side) {
 }
 async function refreshOB() {
   if (!obCode || !proxyOnline) return;
+  // 실시간 호가 수신 중엔 REST 폴링을 12초에 1번으로 감속 (스트림 끊기면 자동 복귀)
+  if (_streamConnected && Date.now() - _lastObTick < 10000 && Date.now() - _lastObPoll < 12000) return;
+  _lastObPoll = Date.now();
   const r = await api(`/api/orderbook?code=${obCode}`);
   if (!r?.ok || !r.data) return;
-  const d = r.data.output1 || {};
+  renderOB(r.data.output1 || {});
+}
+// 호가 렌더러 — REST(output1)와 실시간 스트림(SSE)이 공용 사용
+function renderOB(d) {
   const asks = [], bids = [];
   for (let i=10; i>=1; i--) asks.push({ price:parseInt(d[`askp${i}`]||0), qty:parseInt(d[`askp_rsqn${i}`]||0) });
   for (let i=1; i<=10; i++)  bids.push({ price:parseInt(d[`bidp${i}`]||0), qty:parseInt(d[`bidp_rsqn${i}`]||0) });
@@ -1973,11 +1994,15 @@ function renderDashWatchlist() {
   }).join('');
   // DOM 생성 직후 가격 갱신 (프록시 연결돼 있으면)
   if (proxyOnline) refreshWatchPrices();
+  if (typeof startStream === 'function') startStream(); // 관심종목 변경 → 실시간 구독 갱신
 }
 
 // ── 관심종목 가격 갱신 ──
 async function refreshWatchPrices() {
   if (!proxyOnline || !watchCodes.length) return;
+  // 실시간 시세 수신 중엔 REST 폴링을 20초에 1번으로 감속 (거래 없는 종목 보완용)
+  if (_streamConnected && Date.now() - _lastPriceTick < 15000 && Date.now() - _lastWatchPoll < 20000) return;
+  _lastWatchPoll = Date.now();
   const r = await api(`/api/prices?codes=${watchCodes.join(',')}`);
   if (!r) return;
   // 데이터 컨테이너가 r.data / r.prices / r 자체 중 어디에 있든 잡아냄
@@ -2851,9 +2876,10 @@ async function loadDashTick() {
   const ticks = r?.data?.output || [];
   const tbody = $('dashTickBody');
   if (!tbody) return;
-  if (!ticks.length) { tbody.innerHTML = '<tr><td colspan="3" class="empty" style="padding:14px;font-size:11px">체결 데이터 없음</td></tr>'; return; }
+  if (!ticks.length) { tbody.innerHTML = '<tr><td colspan="3" class="empty" style="padding:14px;font-size:11px">장 시작 전 — 체결 데이터 없음</td></tr>'; return; }
   let prev = 0;
-  tbody.innerHTML = ticks.slice(0,30).map(t => {
+  const cachedNote = r?.cached ? '<tr><td colspan="3" style="padding:4px 8px;font-size:9.5px;color:var(--text-3);background:var(--bg-3)">📋 마지막 거래일 체결 내역</td></tr>' : '';
+  tbody.innerHTML = cachedNote + ticks.slice(0,30).map(t => {
     const price = parseInt(t.stck_prpr||0), vol = parseInt(t.cntg_vol||0);
     const up = price >= prev; prev = price;
     const time = (t.stck_cntg_hour||'').replace(/(\d{2})(\d{2})(\d{2})/,'$1:$2');
@@ -2878,8 +2904,8 @@ async function loadDashNews() {
     const meta  = [n.source||'', date].filter(Boolean).join(' · ');
     const titleHtml = n.link ? `<a href="${n.link}" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:none">${title}</a>` : title;
     return `<div style="padding:10px 8px;border-bottom:1px solid var(--border);text-align:left">
-      <div style="font-size:12.5px;color:var(--text-0);line-height:1.45;font-weight:500;margin-bottom:4px">${titleHtml}</div>
-      ${meta?`<div style="font-size:10px;color:var(--text-3)">${meta}</div>`:''}
+      <div style="font-size:12.5px;color:var(--text-0);line-height:1.45;font-weight:500;margin-bottom:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${titleHtml}</div>
+      ${meta?`<div style="font-size:10px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${meta}</div>`:''}
     </div>`;
   }).join('');
 }
@@ -3562,6 +3588,88 @@ async function refreshLive(){
 }
 
 // ══════════════════════════════════════════════════════
+// Phase 2: 실시간 시세 스트림 (SSE ← 서버가 KIS WebSocket 중계)
+// 스트림이 살아있으면 가격/호가가 0.1초 단위로 갱신되고 REST 폴링은 자동 감속.
+// 끊기면(장마감·오류) 기존 폴링이 그대로 동작 — 안전한 폴백 구조.
+// ══════════════════════════════════════════════════════
+let _es = null, _streamConnected = false;
+let _lastPriceTick = 0, _lastObTick = 0, _lastWatchPoll = 0, _lastObPoll = 0;
+let _streamWant = '';
+function startStream() {
+  if (!proxyOnline || typeof EventSource === 'undefined') return;
+  const codes = watchCodes.slice(0, 15);
+  const want = codes.join(',') + '|' + (obCode || '');
+  if (_es && want === _streamWant) return; // 구독 대상 동일 — 재연결 불필요
+  _streamWant = want;
+  if (_es) { try { _es.close(); } catch(e) {} _es = null; }
+  if (!codes.length && !obCode) return;
+  const url = `/api/stream?codes=${codes.join(',')}` + (obCode ? `&ob=${obCode}` : '');
+  const es = new EventSource(url);
+  _es = es;
+  es.addEventListener('status', e => {
+    try { _streamConnected = !!JSON.parse(e.data).connected; } catch(_) {}
+  });
+  // ── 폭주 방지: 장중엔 틱이 초당 수십 건 — 모아서 일정 주기로만 DOM 반영 (렌더링 멈춤 방지) ──
+  const _pxQueue = {};
+  let _pxTimer = null;
+  es.addEventListener('price', e => {
+    try {
+      const d = JSON.parse(e.data);
+      _lastPriceTick = Date.now();
+      _pxQueue[d.code] = d; // 종목별 최신값만 유지
+      if (!_pxTimer) _pxTimer = setTimeout(() => {
+        _pxTimer = null;
+        const q = Object.values(_pxQueue);
+        for (const k in _pxQueue) delete _pxQueue[k];
+        q.forEach(applyLivePrice);
+      }, 200); // 가격 반영 최대 5회/초
+    } catch(_) {}
+  });
+  let _obQueue = null, _obFlushTimer = null;
+  es.addEventListener('orderbook', e => {
+    try {
+      const ob = JSON.parse(e.data);
+      if (ob.code !== obCode) return;
+      _lastObTick = Date.now();
+      _obQueue = ob; // 최신 호가만 유지
+      if (!_obFlushTimer) _obFlushTimer = setTimeout(() => {
+        _obFlushTimer = null;
+        const o = _obQueue; _obQueue = null;
+        if (!o) return;
+        // 스트림 데이터를 REST(output1) 형태로 변환해 기존 렌더러 재사용
+        const d = {};
+        o.asks.forEach((a, i) => { d['askp'+(i+1)] = a[0]; d['askp_rsqn'+(i+1)] = a[1]; });
+        o.bids.forEach((b, i) => { d['bidp'+(i+1)] = b[0]; d['bidp_rsqn'+(i+1)] = b[1]; });
+        renderOB(d);
+      }, 300); // 호가창 렌더링 최대 3.3회/초
+    } catch(_) {}
+  });
+  es.onerror = () => { _streamConnected = false; };
+}
+// 실시간 체결가 → 관심종목 행 즉시 갱신
+function applyLivePrice(d) {
+  if (!d || !d.code || !(d.price > 0)) return;
+  const up = d.sign !== '5' && d.sign !== '4';
+  const pEl = $(`wl-${d.code}-p`), cEl = $(`wl-${d.code}-c`);
+  if (pEl) {
+    pEl.textContent = '₩' + d.price.toLocaleString();
+    pEl.className = 'wprice ' + (up ? 'up' : 'dn');
+  }
+  if (cEl) {
+    cEl.textContent = (up ? '+' : '') + d.chgPct + '%';
+    cEl.className = 'wchg ' + (up ? 'up' : 'dn');
+    cEl.style.color = '';
+  }
+  // 대시보드 메인 가격(현재 보고 있는 종목)도 실시간 갱신
+  if (typeof currentCode !== 'undefined' && d.code === currentCode) {
+    const hp = $('dashPrice'), hc = $('dashChg');
+    const chg = d.prev > 0 ? Math.abs(d.price - d.prev) : 0;
+    if (hp) { hp.textContent = '₩' + d.price.toLocaleString(); hp.className = 'stock-price ' + (up ? 'up' : 'dn'); }
+    if (hc) { hc.textContent = `${arrow(d.sign)} ${chg.toLocaleString()} (${up ? '+' : ''}${d.chgPct}%)`; hc.className = 'stock-chg ' + (up ? 'up' : 'dn'); }
+  }
+}
+
+// ══════════════════════════════════════════════════════
 // 인증 (로그인/회원가입)
 // ══════════════════════════════════════════════════════
 let authMode = 'login';
@@ -3640,6 +3748,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   loadDashTick();
   api('/api/auto/status').then(r=>{if(r?.ok)setBotUI(r.status.running);});
   startLive();
+  startStream(); // Phase 2: 실시간 시세 스트림 시작
   setTimeout(loadVol100, 800);
 });
 </script>
