@@ -325,14 +325,73 @@ td.mono,th.mono{font-family:var(--mono)}
         </div>
         <div class="form-group">
           <div class="form-label">비밀번호</div>
-          <input class="form-input" type="password" id="authPassword" placeholder="비밀번호 (4자 이상)" onkeydown="if(event.key==='Enter')submitAuth()">
+          <input class="form-input" type="password" id="authPassword" placeholder="비밀번호 (8자 이상)" onkeydown="if(event.key==='Enter')submitAuth()">
+        </div>
+        <!-- 회원가입 시에만: 투자위험 고지 + 약관 동의 (필수) -->
+        <div id="authTerms" style="display:none;margin:8px 0 4px">
+          <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--text-2);cursor:pointer;line-height:1.5">
+            <input type="checkbox" id="agreeTerms" style="margin-top:2px;flex-shrink:0">
+            <span><b style="color:var(--text-1)">[필수]</b> 이용약관과 <b style="color:var(--red)">투자위험 고지</b>를 확인했으며 이에 동의합니다.
+            <a onclick="openTerms()" style="color:var(--blue);cursor:pointer;white-space:nowrap">전문 보기 →</a></span>
+          </label>
         </div>
         <button class="order-submit buy" id="authSubmit" onclick="submitAuth()" style="width:100%;margin-top:4px">로그인</button>
         <div class="kiss-msg" id="authMsg" style="display:none;margin-top:10px"></div>
       </div>
     </div>
     <div style="text-align:center;font-size:11px;color:var(--text-3);margin-top:16px;line-height:1.6">
-      가입 후 설정에서 본인의 KIS API 키를 등록하면<br>자동매매를 이용할 수 있습니다.
+      가입 후 설정에서 본인의 KIS API 키를 등록하면<br>자동매매를 이용할 수 있습니다.<br>
+      <a onclick="openTerms()" style="color:var(--text-2);cursor:pointer;text-decoration:underline">이용약관 · 투자위험 고지</a>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 약관 · 투자위험 고지 모달 ══ -->
+<div id="termsModal" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:20px">
+  <div class="panel" style="width:560px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column">
+    <div class="panel-head" style="flex-shrink:0">
+      <span class="panel-title">이용약관 및 투자위험 고지</span>
+      <button class="panel-btn" onclick="closeTerms()">닫기 ✕</button>
+    </div>
+    <div style="padding:16px 18px;overflow-y:auto;font-size:12.5px;line-height:1.75;color:var(--text-1)">
+      <div style="background:var(--red-dim);border:1px solid var(--red);border-radius:8px;padding:12px 14px;margin-bottom:16px;color:var(--text-0)">
+        ⚠️ <b>투자위험 고지</b><br>
+        본 서비스를 통한 주식 매매는 <b>원금 손실이 발생할 수 있으며</b>, 손실에 대한 책임은 전적으로 이용자 본인에게 있습니다.
+        과거의 수익이 미래의 수익을 보장하지 않습니다.
+      </div>
+
+      <p style="font-weight:700;color:var(--text-0);margin:14px 0 4px">제1조 (서비스의 성격)</p>
+      본 서비스(AutoTrade KR)는 한국투자증권 OpenAPI를 이용해 이용자가 직접 설정한 전략에 따라
+      주문을 보조하는 <b>도구</b>입니다. 본 서비스는 투자자문업·투자일임업이 아니며, 특정 종목의 매수·매도를
+      <b>권유하거나 수익을 보장하지 않습니다.</b> 모든 투자 판단과 그 결과의 책임은 이용자 본인에게 있습니다.
+
+      <p style="font-weight:700;color:var(--text-0);margin:14px 0 4px">제2조 (자동매매의 위험)</p>
+      자동매매 엔진은 시장 급변(급등락·거래정지·VI 발동), 체결 지연·미체결, 시스템·네트워크 오류,
+      한국투자증권 API 장애 등으로 인해 <b>이용자의 의도와 다르게 동작하거나 손실이 확대될 수 있습니다.</b>
+      이용자는 자동매매를 가동하기 전 전략·손절·한도 설정을 충분히 이해하고, 가급적 <b>모의투자(VTS)에서
+      충분히 검증한 뒤</b> 실전에 적용해야 합니다.
+
+      <p style="font-weight:700;color:var(--text-0);margin:14px 0 4px">제3조 (모의/실전 구분)</p>
+      '실전투자' 모드에서는 <b>실제 자금으로 주문이 전송</b>됩니다. 모드 표시(모의/실전)를 항상 확인하고,
+      실전 전환은 신중히 결정하시기 바랍니다.
+
+      <p style="font-weight:700;color:var(--text-0);margin:14px 0 4px">제4조 (API 키·개인정보)</p>
+      이용자의 KIS App Key/Secret은 서버에 암호화되어 저장되며, 본 서비스는 최소한의 정보(아이디·암호화 설정)만
+      보관합니다. 다만 이용자의 키 관리 소홀, 계정 정보 유출로 인한 손해에 대해서는 책임지지 않습니다.
+      키는 본인만 사용하고 타인과 공유하지 마십시오.
+
+      <p style="font-weight:700;color:var(--text-0);margin:14px 0 4px">제5조 (면책)</p>
+      천재지변, 한국투자증권 API·시세 제공 중단, 통신·전력 장애, 정부 정책·거래소 조치 등 운영자의 통제를
+      벗어난 사유로 인한 주문 실패·지연·손실에 대해 운영자는 책임을 지지 않습니다. 본 서비스는 무상으로 제공되며
+      <b>서비스의 연속성·정확성을 보증하지 않습니다.</b>
+
+      <p style="font-weight:700;color:var(--text-0);margin:14px 0 4px">제6조 (이용자의 책임)</p>
+      이용자는 관련 법령(자본시장법 등)을 준수할 책임이 있으며, 본 서비스 이용으로 발생하는 모든 거래·세금·손익은
+      이용자 본인에게 귀속됩니다.
+
+      <p style="color:var(--text-3);margin-top:16px;font-size:11px">
+        본 고지에 동의하지 않으시면 서비스를 이용하실 수 없습니다. 회원가입은 위 내용에 대한 동의로 간주됩니다.
+      </p>
     </div>
   </div>
 </div>
@@ -1247,7 +1306,10 @@ td.mono,th.mono{font-family:var(--mono)}
 <!-- ─ 설정 ─ -->
 <div class="page" id="page-settings">
   <div class="page-body" style="max-width:600px">
-    <h2 style="font-size:16px;font-weight:700;color:var(--text-0);margin-bottom:20px">설정</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h2 style="font-size:16px;font-weight:700;color:var(--text-0)">설정</h2>
+      <a onclick="openTerms()" style="font-size:12px;color:var(--text-2);cursor:pointer;text-decoration:underline">이용약관 · 투자위험 고지</a>
+    </div>
     <div class="panel" style="margin-bottom:14px">
       <div class="panel-head"><span class="panel-title">KIS API 연결</span></div>
       <div class="panel-body">
@@ -3417,7 +3479,13 @@ function _applySort(list, key, dir){
 }
 // 정렬 헤더 화살표 갱신 — prefix는 'mktTh_' 또는 'stTh_'
 function _updateSortArrows(prefix, activeKey, dir, labels){
-  for(const k in labels){ const el=$(prefix+k); if(el) el.textContent = labels[k] + (k===activeKey ? (dir==='asc'?' ▲':' ▼') : ''); }
+  for(const k in labels){
+    const el=$(prefix+k); if(!el) continue;
+    const active = k===activeKey;
+    // 정렬 안 한 컬럼에도 흐린 ↕를 보여 "클릭하면 정렬됨"을 알림(affordance). 활성은 파란 ▲/▼.
+    const arrow = active ? (dir==='asc'?'▲':'▼') : '↕';
+    el.innerHTML = labels[k] + ` <span style="font-size:9px;color:${active?'var(--blue)':'var(--text-3)'}">${arrow}</span>`;
+  }
 }
 const _sortLabels = { price:'현재가', chg:'등락률', vol:'거래량', amt:'거래대금' };
 
@@ -4154,8 +4222,11 @@ function switchAuthTab(mode) {
   $('authTabLogin').className = 'auth-tab' + (mode==='login'?' active':'');
   $('authTabRegister').className = 'auth-tab' + (mode==='register'?' active':'');
   $('authSubmit').textContent = mode==='login' ? '로그인' : '회원가입';
+  const terms = $('authTerms'); if (terms) terms.style.display = mode==='register' ? 'block' : 'none'; // 약관 동의는 가입 시에만
   $('authMsg').style.display = 'none';
 }
+function openTerms(){ const m=$('termsModal'); if(m) m.style.display='flex'; }
+function closeTerms(){ const m=$('termsModal'); if(m) m.style.display='none'; }
 function showAuthMsg(type, msg) {
   const el = $('authMsg');
   el.style.display = 'block';
@@ -4166,6 +4237,11 @@ async function submitAuth() {
   const username = $('authUsername').value.trim();
   const password = $('authPassword').value;
   if (!username || !password) { showAuthMsg('err','아이디와 비밀번호를 입력하세요'); return; }
+  // 가입 시 약관·투자위험 고지 동의 필수
+  if (authMode === 'register' && !$('agreeTerms')?.checked) {
+    showAuthMsg('err','약관 및 투자위험 고지에 동의해야 가입할 수 있습니다');
+    return;
+  }
   const ep = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
   showAuthMsg('info', authMode==='login' ? '로그인 중...' : '가입 중...');
   const r = await apiPost(ep, { username, password });
