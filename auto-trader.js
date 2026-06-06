@@ -318,6 +318,8 @@ class AutoTrader {
     this._logs = [];
     this._logFile = logFileFor(this.userId);
     try { if (fs.existsSync(this._logFile)) this._logs = JSON.parse(fs.readFileSync(this._logFile,'utf8')); } catch(e){ this._logs=[]; }
+    // 디스크에 저장된 옛 설정에 극단/NaN 값이 있어도 안전 범위로 — 부팅 자동재개는 updateSettings를 안 거치므로 여기서 보정
+    if (this.state.settings && this.state.settings.safety) this.state.settings.safety = this._clampSafety(this.state.settings.safety);
   }
 
   // 인스턴스 로그 (유저별)
@@ -367,6 +369,24 @@ class AutoTrader {
     };
   }
 
+  // ── 리스크 설정 검증·클램프 ──
+  // 외부 입력(API)이 비수치/극단값이면 사이징이 NaN("NaN"주문)·Infinity(풀베팅)·즉시손절로 폭주한다.
+  // 각 항목을 안전 범위로 강제. dailyLossLimitPct는 반드시 음수.
+  _clampSafety(sf) {
+    const num = (v, d, lo, hi) => { v = Number(v); if (!Number.isFinite(v)) v = d; return Math.min(hi, Math.max(lo, v)); };
+    sf.riskPerTradePct   = num(sf.riskPerTradePct, 0.7, 0.05, 5);
+    sf.maxPerStockPct    = num(sf.maxPerStockPct, 20, 1, 100);
+    sf.stopAtrMult       = num(sf.stopAtrMult, 1.5, 0.3, 6);
+    sf.takeProfitR       = num(sf.takeProfitR, 2.0, 0.5, 10);
+    sf.trailAfterR       = num(sf.trailAfterR, 1.0, 0.1, 10);
+    sf.dailyLossLimitPct = num(sf.dailyLossLimitPct, -2.0, -50, -0.1);
+    sf.maxPositions      = Math.round(num(sf.maxPositions, 5, 1, 30));
+    sf.maxExposurePct    = num(sf.maxExposurePct, 60, 1, 100);
+    sf.maxConsecLosses   = Math.round(num(sf.maxConsecLosses, 3, 1, 20));
+    sf.maxTradesPerDay   = Math.round(num(sf.maxTradesPerDay, 20, 1, 200));
+    return sf;
+  }
+
   updateSettings(newSettings) {
     // 프리셋 선택 시 해당 리스크 기본값을 safety에 먼저 깔고, 개별 safety 값이 있으면 그 위에 덮어씀
     const presetSafety = (newSettings.riskPreset && RISK_PRESETS[newSettings.riskPreset]) || {};
@@ -377,6 +397,7 @@ class AutoTrader {
       params: { ...this.state.settings.params, ...(newSettings.params||{}) },
       safety: { ...this.state.settings.safety, ...presetSafety, ...(newSettings.safety||{}) }
     };
+    this.state.settings.safety = this._clampSafety(this.state.settings.safety); // 극단값/NaN 방어
     this.save();
     this.log('config', '설정이 업데이트되었습니다.' + (newSettings.riskPreset ? ` (프리셋: ${newSettings.riskPreset})` : ''));
     if (this.state.settings.enabled && !this.running) this.start();
@@ -470,12 +491,22 @@ class AutoTrader {
       // 10분마다 스캔 목록 갱신
       await this.updateScanList(cfg);
 
+      // 미체결 주문 맵 — 잔고 캐시(5틱)와 실제 사이의 공백을 메움
+      // (미체결 매도 종목 재매도 = 공매도성 사고, 미체결 매수 누락 = 한도 초과 매수)
+      // 잔고 대조보다 먼저 계산 — 부분체결 중 봇 지분 오삭감을 막는 데 쓰인다.
+      const pending = this._pendingMap();
+
       // 계좌 잔고 (5틱마다 갱신, API 절약)
       let heldPositions = {};
       if (this.tickCount % 5 === 1) {
-        const account = await this.deps.getAccount(cfg);
-        if (account?.output1) {
+        let account = null;
+        try { account = await this.deps.getAccount(cfg); }
+        catch (e) { this.log('error', `계좌 조회 실패: ${e.message} (이전 잔고로 진행)`); }
+        // ★ rt_cd 정상 + output1 배열일 때만 반영. 오류 응답(빈 output1)이 봇 지분을 통째로 지워
+        //   전 포지션을 무관리 상태로 만드는 사고를 차단한다.
+        if (account && account.rt_cd === '0' && Array.isArray(account.output1)) {
           let holdingsEval = 0;
+          const holdMap = {};
           account.output1.forEach(p => {
             const qty = parseInt(p.hldg_qty||0);
             if (qty > 0) { heldPositions[p.pdno] = {
@@ -483,28 +514,46 @@ class AutoTrader {
               curPrice: parseInt(p.prpr||0),
               pnlPct: parseFloat(p.evlu_pfls_rt||0),
               evalAmt: parseInt(p.evlu_amt||0)
-            }; holdingsEval += parseInt(p.evlu_amt||0); }
+            }; holdingsEval += parseInt(p.evlu_amt||0); holdMap[p.pdno] = qty; }
           });
           this._lastHeld = heldPositions;
-          // 운용 자본 = 예수금 + 보유평가액 (총자산). 사이징·서킷브레이커의 % 기준.
-          const cash = parseInt(account.output2?.[0]?.dnca_tot_amt || account.output2?.[0]?.prvs_rcdl_excc_amt || 0);
-          const cap = cash + holdingsEval;
+          // 저널 체결 확정 — 브라우저(SSE) 미접속 헤드리스 운영에서도 미체결 가드/자동취소가 정상 동작
+          try { if (this.deps.reconcileOrders) this.deps.reconcileOrders(holdMap); } catch (_) {}
+          // 운용 자본 = 순자산(있으면) 또는 예수금+보유평가액. 미결제 매수분 이중계상 방지로 순자산 우선.
+          const o2 = account.output2?.[0] || {};
+          const cash = parseInt(o2.dnca_tot_amt || o2.prvs_rcdl_excc_amt || 0);
+          const cap = parseInt(o2.nass_amt || 0) || (cash + holdingsEval);
           if (cap > 0) this._capital = cap;
-          // 봇 지분을 실보유와 대조 — 수동으로 일부 팔았으면 봇 몫(qty)도 줄이고, 청산됐으면 제거
+          // ★ 봇 지분 ↔ 실보유 대조 + 실현손익 확정.
+          //   "체결되면 도달할 수량"(실보유 + 미체결 매수 잔량)보다 실제가 적으면 그만큼이
+          //   (봇/수동) 매도 체결된 것 → 그 수량만 실현손익 계상하고 봇 몫 축소.
+          //   매도는 '접수'가 아니라 여기(실제 체결)에서만 확정 → 미체결 자동취소 시 포지션 고아화 방지,
+          //   부분체결 중 매수분을 매도로 오인하는 오삭감도 방지한다.
           const bot = this.state.botPositions || (this.state.botPositions = {});
           for (const c of Object.keys(bot)) {
-            const realQty = heldPositions[c]?.qty || 0;
-            if (realQty <= 0) delete bot[c];
-            else if (bot[c].qty > realQty) bot[c].qty = realQty;
+            const realQty = holdMap[c] || 0;
+            const pendBuyQty = pending[c]?.buyQty || 0;
+            const expected = realQty + pendBuyQty;
+            if (expected < (bot[c].qty || 0)) {
+              const soldQty = bot[c].qty - expected;
+              const basis = bot[c].entry || 0;
+              const sellPx = bot[c].lastSellPrice || heldPositions[c]?.curPrice || basis;
+              if (basis > 0 && sellPx > 0) {
+                const realized = (sellPx - basis) * soldQty;
+                this.state.dailyRealizedPnl += realized;
+                if (realized < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
+                else if (realized > 0) this.state.consecLosses = 0;
+                this.log('sell', `🧾 체결 확정 ${this.deps.codeToName(c)||c} ${soldQty}주 (실현손익 ${(realized>=0?'+':'')+Math.round(realized).toLocaleString()}원, 연속손실 ${this.state.consecLosses||0})`, { code:c, soldQty, realized });
+              }
+              bot[c].qty = expected;
+            }
+            if ((bot[c].qty || 0) <= 0 && pendBuyQty <= 0) delete bot[c];
           }
+          this.save();
         }
       }
       heldPositions = this._lastHeld || {};
       const capital = this._capital || 0;
-
-      // 미체결 주문 맵 — 잔고 캐시(5틱)와 실제 사이의 공백을 메움
-      // (미체결 매도 종목 재매도 = 공매도성 사고, 미체결 매수 누락 = 한도 초과 매수)
-      const pending = this._pendingMap();
 
       // ── 1) 보유 포지션 관리: ATR 손절 / 트레일링 / R 익절 (항상 실행 — 리스크 축소는 정지와 무관) ──
       for (const code of Object.keys(heldPositions)) {
@@ -514,9 +563,13 @@ class AutoTrader {
         if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
         const sellable = this._sellableQty(code, pos.qty, s); // ★ 수동 보유 보호: 봇이 산 수량만
         if (sellable < 1) continue;
-        const cur = pos.curPrice || 0;
+        // ★ 실시간 현재가로 손절/트레일 판정. 잔고의 prpr은 최대 5분 묵어 급락장 손절이 늦거나
+        //   prpr 누락 시 cur=0으로 허위 손절(0≤stop)이 발동하던 문제를 막는다.
+        let cur = pos.curPrice || 0;
+        try { const live = await this.deps.getCurrentPrice(cfg, code); if (live > 0) cur = live; } catch (_) {}
+        if (cur <= 0) continue; // 가격 미상 → 허위 손절 방지
         const bp = (this.state.botPositions || {})[code];
-        let exit = null;
+        let exit = null, exitMarket = false;
         if (bp && bp.stop > 0) {
           // 트레일링: 고점 갱신 → +trailAfterR 도달 시 손절선을 본전 이상/ATR 추적으로 끌어올림
           bp.hw = Math.max(bp.hw || bp.entry || cur, cur);
@@ -525,14 +578,26 @@ class AutoTrader {
             if (bp.atr > 0) ns = Math.max(ns, bp.hw - s.safety.stopAtrMult * bp.atr); // ATR 트레일
             if (ns > bp.stop) bp.stop = ns;
           }
-          if (cur <= bp.stop) exit = `손절/트레일 (₩${cur.toLocaleString()} ≤ ₩${Math.round(bp.stop).toLocaleString()})`;
+          // 손절/트레일은 시장가로 — 묵은 지정가가 미체결→자동취소되며 포지션이 방치되는 사고 방지
+          if (cur <= bp.stop) { exit = `손절/트레일 (₩${cur.toLocaleString()} ≤ ₩${Math.round(bp.stop).toLocaleString()})`; exitMarket = true; }
           else if (bp.target > 0 && cur >= bp.target) exit = `익절 (₩${cur.toLocaleString()} ≥ ₩${Math.round(bp.target).toLocaleString()})`;
         } else {
           // 레거시/수동 보호분: 손절정보 없음 → 보수적 % 폴백
-          if (pos.pnlPct <= -3) exit = `손절 (${pos.pnlPct}% ≤ -3%)`;
+          if (pos.pnlPct <= -3) { exit = `손절 (${pos.pnlPct}% ≤ -3%)`; exitMarket = true; }
           else if (pos.pnlPct >= 6) exit = `익절 (+${pos.pnlPct}% ≥ +6%)`;
         }
-        if (exit) await this.sell(cfg, code, sellable, cur, exit, pos);
+        if (exit) await this.sell(cfg, code, sellable, cur, exit, pos, exitMarket);
+      }
+
+      // ── 15:20 미청산 봇 포지션 알림 (1일 1회) — 동시호가/오버나이트 방치 경고 ──
+      if (nowMin() >= timeToMin('15:20') && this.state.today !== this._eodNotifiedDay) {
+        const open = Object.keys(this.state.botPositions || {});
+        if (open.length) {
+          const names = open.map(c => this.deps.codeToName(c) || c).join(', ');
+          this.log('safety', `⚠️ 15:20 미청산 봇 포지션 ${open.length}종목: ${names} — 동시호가/오버나이트 주의`);
+          if (this.deps.sendTelegram) { try { await this.deps.sendTelegram(cfg, `⚠️ <b>미청산 알림</b>\n15:20 현재 봇 보유 ${open.length}종목: ${names}`); } catch (_) {} }
+        }
+        this._eodNotifiedDay = this.state.today;
       }
 
       // ── 서킷브레이커: 신규매수 정지 판정 (포지션 관리/리스크 매도는 계속됨) ──
@@ -598,10 +663,12 @@ class AutoTrader {
           // ── 변동성(ATR) 기반 손절거리 → 리스크 기반 수량 ──
           const atr = calcATR(chart, s.params.atrPeriod);
           const stopDist = (atr && atr > 0) ? s.safety.stopAtrMult * atr : price * 0.03; // ATR 없으면 3% 폴백
+          if (!(stopDist > 0)) continue;                                // stopAtrMult=0 등 → 0/Infinity 방지
           const stop = price - stopDist;
           if (stop <= 0) continue;
           const riskAmt = capital * (s.safety.riskPerTradePct / 100);   // 거래당 위험액
           let qty = Math.floor(riskAmt / stopDist);                     // 손절까지 거리로 수량 역산
+          if (!Number.isFinite(qty)) continue;                          // NaN/Infinity 가드 (qty<1 비교는 NaN을 통과시킴)
           // 종목당 한도(자본%) — 미체결·보유 합산 초과 방지
           const pendBuyAmt = pending[code]?.buyAmt || 0;
           const curHoldAmt = (held ? held.evalAmt : 0) + pendBuyAmt;
@@ -648,14 +715,15 @@ class AutoTrader {
     return Math.min(botQty, heldQty);
   }
 
-  // 미체결 주문 맵: { code: { buyAmt, hasBuy, hasSell } }
+  // 미체결 주문 맵: { code: { buyAmt, buyQty, hasBuy, hasSell } } — 잔량(qty-fillQty) 기준
   _pendingMap() {
     let list = [];
     try { list = (this.deps.getPendingOrders && this.deps.getPendingOrders()) || []; } catch (_) {}
     const m = {};
     for (const e of list) {
-      if (!m[e.code]) m[e.code] = { buyAmt: 0, hasBuy: false, hasSell: false };
-      if (e.side === 'buy') { m[e.code].hasBuy = true; m[e.code].buyAmt += (e.qty || 0) * (e.price || 0); }
+      if (!m[e.code]) m[e.code] = { buyAmt: 0, buyQty: 0, hasBuy: false, hasSell: false };
+      const remain = Math.max(0, (e.qty || 0) - (e.fillQty || 0)); // 미체결 잔량
+      if (e.side === 'buy') { m[e.code].hasBuy = true; m[e.code].buyQty += remain; m[e.code].buyAmt += remain * (e.price || 0); }
       else if (e.side === 'sell') m[e.code].hasSell = true;
     }
     return m;
@@ -708,12 +776,14 @@ class AutoTrader {
     }
   }
 
-  async sell(cfg, code, qty, price, reason, pos) {
+  async sell(cfg, code, qty, price, reason, pos, market) {
     const name = this.deps.codeToName(code) || code;
-    this.log('signal', `📉 매도신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
+    const orderType = market ? '01' : '00'; // 손절/트레일은 시장가(체결 보장), 그 외 지정가
+    const pxStr = market ? '(시장가)' : `@ ₩${price.toLocaleString()}`;
+    this.log('signal', `📉 매도신호 ${name}(${code}) ${qty}주 ${pxStr} — ${reason}`);
     let result;
     try {
-      result = await this.deps.placeOrder(cfg, { side:'sell', code, qty, price, orderType:'00' });
+      result = await this.deps.placeOrder(cfg, { side:'sell', code, qty, price, orderType });
     } catch (e) {
       // 한 종목 매도 예외가 다른 보유 종목의 손절을 막지 않도록 틱을 끊지 않음 + 보수적 쿨다운
       this.lastAction[code] = Date.now();
@@ -722,20 +792,13 @@ class AutoTrader {
     }
     if (result?.rt_cd === '0') {
       this.lastAction[code] = Date.now(); // 쿨다운 시작
-      // 실현손익 기준가: 봇 진입가(있으면) 우선, 없으면 계좌 평단 — 차감 전에 확보
+      // ★ 실현손익·봇 지분 차감은 '접수'가 아니라 잔고 대조(실제 체결) 시 확정한다.
+      //   접수 즉시 차감하면 미체결→자동취소 시 포지션이 봇 장부에서 사라져 손절 관리가
+      //   영구 중단되는 고아화 사고가 난다. 여기선 체결 확정용 기준가만 기록.
       const bp = this.state.botPositions && this.state.botPositions[code];
-      const basis = (bp && bp.entry) || pos?.avgPrice || 0;
-      // 봇 지분 차감 — 판 만큼 엔진 몫에서 제거
-      if (bp) { bp.qty -= qty; if (bp.qty <= 0) delete this.state.botPositions[code]; }
-      if (this._lastHeld && this._lastHeld[code]) delete this._lastHeld[code]; // 낙관적 제거 — 같은 주식 중복 매도 방지
-      const realized = basis ? (price - basis) * qty : 0;
-      this.state.dailyRealizedPnl += realized;
-      // 연속 손익 추적 — 서킷브레이커(연속 N패 정지)
-      if (realized < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
-      else if (realized > 0) this.state.consecLosses = 0;
-      const pnlStr = (realized>=0?'+':'') + realized.toLocaleString();
-      const msg = `📉 <b>매도 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}\n추정손익: ${pnlStr}원\n사유: ${reason}`;
-      this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()} (추정손익 ${pnlStr}원, 연속손실 ${this.state.consecLosses||0})`, { code, qty, price, reason, realized });
+      if (bp) bp.lastSellPrice = price;
+      const msg = `📉 <b>매도 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 ${pxStr}\n사유: ${reason}`;
+      this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 ${pxStr} — ${reason}`, { code, qty, price, reason, market });
       this.save();
       if (this.deps.sendTelegram) await this.deps.sendTelegram(cfg, msg);
     } else {

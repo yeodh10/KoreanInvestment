@@ -79,8 +79,18 @@ function hashToken(token) { return crypto.createHash('sha256').update(String(tok
 // temp에 다 쓴 뒤 rename(원자적)하면 절단된 파일이 절대 안 남는다.
 function _atomicWrite(file, text) {
   const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, file);
+  // fsync로 내용을 디스크에 확정한 뒤 rename — 정전 시 "rename은 됐는데 내용은 빈 파일"(전 계정 소실) 방지.
+  // mode 0600 — users.json/sessions.json/user-configs는 KIS 토큰 등 민감정보를 담으므로 소유자만 접근.
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'w', 0o600);
+    fs.writeSync(fd, text);
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  try { fs.renameSync(tmp, file); }
+  catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; } // 실패 시 tmp 잔류 제거
 }
 
 // ── 유저 저장소 ──
@@ -110,7 +120,7 @@ function register(username, password) {
   username = (username || '').trim().toLowerCase();
   if (!username || !password) return { ok:false, message:'아이디와 비밀번호를 입력하세요' };
   if (username.length < 3) return { ok:false, message:'아이디는 3자 이상이어야 합니다' };
-  if (password.length < 4) return { ok:false, message:'비밀번호는 4자 이상이어야 합니다' };
+  if (password.length < 8) return { ok:false, message:'비밀번호는 8자 이상이어야 합니다' }; // 실거래 서비스 — 무차별 대입 방어
   const users = loadUsers();
   if (users[username]) return { ok:false, message:'이미 존재하는 아이디입니다' };
   const userId = 'u_' + crypto.randomBytes(6).toString('hex');
@@ -144,7 +154,9 @@ function getUserBySession(token) {
   if (!token) return null;
   const sessions = loadSessions();
   const key = hashToken(token);
-  const s = sessions[key] || sessions[token]; // 해시 우선, 레거시(원본키) 하위호환
+  // 해시 키로만 조회한다. sessions[token](원본키) 폴백을 두면 sessions.json 유출 시
+  // 그 키(해시값)를 쿠키로 그대로 제출해 인증이 통과 → "토큰 해시 저장"의 보호 효과가 0이 된다.
+  const s = sessions[key];
   if (!s) return null;
   // 30일 만료
   if (Date.now() - s.createdAt > 30*24*60*60*1000) {
@@ -180,6 +192,7 @@ function loadUserConfig(userId) {
         appSecret: decrypt(raw.appSecret),
         accNo: raw.accNo || '',
         txMode: raw.txMode || 'vts',
+        htsId: raw.htsId || '',   // 체결통보 WS 구독용 — 누락 시 체결통보 기능 전체가 침묵 사망
         token: raw.token || '',
         tokenExpiry: raw.tokenExpiry || 0,
         telegramToken: decrypt(raw.telegramToken),
@@ -187,7 +200,7 @@ function loadUserConfig(userId) {
       };
     }
   } catch(e) {}
-  return { __userId: userId, appKey:'', appSecret:'', accNo:'', txMode:'vts', token:'', tokenExpiry:0, telegramToken:'', telegramChatId:'' };
+  return { __userId: userId, appKey:'', appSecret:'', accNo:'', txMode:'vts', htsId:'', token:'', tokenExpiry:0, telegramToken:'', telegramChatId:'' };
 }
 function saveUserConfig(userId, cfg) {
   const p = userConfigPath(userId);
@@ -199,6 +212,7 @@ function saveUserConfig(userId, cfg) {
     appSecret: encrypt(cfg.appSecret),
     accNo: cfg.accNo || '',
     txMode: cfg.txMode || 'vts',
+    htsId: cfg.htsId || '',   // 체결통보 WS 구독용 HTS ID (평문 — 민감정보 아님)
     token: cfg.token || '',
     tokenExpiry: cfg.tokenExpiry || 0,
     telegramToken: encrypt(cfg.telegramToken),

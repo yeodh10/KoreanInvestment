@@ -165,8 +165,36 @@ function startFakeKis(onClientMsg) {
   const msgs = fake.received.map(s => JSON.parse(s));
   ok('한도 초과 시 LRU 해제 발신', msgs.some(s => s.header.tr_type === '2'));
 
+  // 멀티탭 체결통보 중복 방지 — 피드당 '_journal' 훅 1개만, 클라이언트(탭) 수와 무관하게 1회만 확정
+  feed.execHooks.clear();
+  let execCalls = 0;
+  feed.execHooks.set('_journal', () => execCalls++);
+  const tab2 = { id: 777, res: { write() {} }, codes: new Set(['005930']), obCode: null };
+  feed.addClient(tab2); // 두 번째 탭 연결
+  const ef2 = Array(20).fill('0'); ef2[2]='0000088888'; ef2[8]='005930'; ef2[9]='3'; ef2[10]='71000'; ef2[13]='2';
+  const ciph2 = crypto.createCipheriv('aes-256-cbc', Buffer.from(aesKey), Buffer.from(aesIv));
+  const enc2 = Buffer.concat([ciph2.update(Buffer.from(ef2.join('^'), 'utf8')), ciph2.final()]).toString('base64');
+  fake.sendText('1|H0STCNI9|001|' + enc2);
+  await sleep(200);
+  ok('멀티탭(탭2개)에서도 체결통보 1회만 확정', execCalls === 1);
+
   feed._closed = true; try { feed.ws.close(); } catch (_) {}
   fake.server.close();
+
+  // ════════ 재연결 견고성 — 핸드셰이크 전 실패가 connecting을 영구 고착시키지 않음 ════════
+  console.log('== 재연결 견고성 ==');
+  const tmpSrv = await new Promise(r => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => r(s)); });
+  const deadPort = tmpSrv.address().port;
+  await new Promise(r => tmpSrv.close(r)); // 즉시 닫아 ECONNREFUSED 유발
+  rt._setEndpointOverride({ host: '127.0.0.1', port: deadPort, skipApproval: true });
+  const dead = rt.getFeed({ appKey: 'DEADKEY', appSecret: 'S', txMode: 'vts' });
+  const dc = { id: 901, res: { write() {} }, codes: new Set(['005930']), obCode: null };
+  dead.addClient(dc); // 연결 시도 → 핸드셰이크 전 실패
+  await sleep(400);
+  ok('핸드셰이크 전 실패 후 connecting 해제 (영구 고착 방지)', dead.connecting === false);
+  ok('연결 실패 상태로 남음 (connected=false)', dead.connected === false);
+  dead._closed = true; dead.removeClient(dc); try { dead.ws && dead.ws.close(); } catch (_) {}
+
   console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('테스트 오류:', e); process.exit(2); });

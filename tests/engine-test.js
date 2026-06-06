@@ -46,9 +46,9 @@ const incCloses = [...Array(30).keys()].map(i => 100000 + i*1000); // 상승 →
 const decChart = chartFrom(decCloses);
 const incChart = chartFrom(incCloses);
 // 보유: 평단 60000, 현재가 70000 (+16.6%)
-const heldAcct = { output1: [{ pdno:'005930', hldg_qty:'10', pchs_avg_pric:'60000', prpr:'70000', evlu_pfls_rt:'16.6', evlu_amt:'700000' }],
+const heldAcct = { rt_cd:'0', output1: [{ pdno:'005930', hldg_qty:'10', pchs_avg_pric:'60000', prpr:'70000', evlu_pfls_rt:'16.6', evlu_amt:'700000' }],
                    output2: [{ dnca_tot_amt:'10000000' }] };
-const cashAcct = (cash=10000000) => ({ output1: [], output2: [{ dnca_tot_amt:String(cash) }] });
+const cashAcct = (cash=10000000) => ({ rt_cd:'0', output1: [], output2: [{ dnca_tot_amt:String(cash) }] });
 
 function mkDeps(opts) {
   const { chart, account, slowChartMs, price } = opts;
@@ -174,7 +174,7 @@ function mkTrader(deps) {
   // (계좌가 5종목을 실제 보유해야 잔고대조에서 봇 포지션이 유지됨)
   orders.length = 0;
   const five = ['A','B','C','D','E'];
-  const acct5 = { output2:[{dnca_tot_amt:'10000000'}],
+  const acct5 = { rt_cd:'0', output2:[{dnca_tot_amt:'10000000'}],
     output1: five.map(c => ({ pdno:c, hldg_qty:'1', pchs_avg_pric:'1000', prpr:'1000', evlu_pfls_rt:'0', evlu_amt:'1000' })) };
   t = mkTrader(mkDeps({ chart: decChart, account: acct5, price: 270000 }));
   t.state.botPositions = { A:{qty:1},B:{qty:1},C:{qty:1},D:{qty:1},E:{qty:1} }; // 5종목
@@ -188,6 +188,57 @@ function mkTrader(deps) {
   t.state.stoppedByLoss = true; // 신규매수 정지 상태
   await t.tick();
   ok('정지 상태에서도 익절(목표 도달) 매도 실행', orders.filter(o => o.side === 'sell').length === 1);
+
+  realLog('== 체결 정합성 (접수≠체결, 고아화 방지) ==');
+  const flatChart = chartFrom([...Array(30)].map(() => 70000)); // 신호 없음 — 보유 관리만 격리 검증
+
+  // 12) 손절 트리거 → 시장가('01') 주문 + 접수만으로 봇지분/실현손익 불변 (고아화 방지)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:75000, target:120000, atr:1000, initRisk:1000, hw:70000 } };
+  await t.tick();
+  const stopSell = orders.find(o => o.side === 'sell');
+  ok('손절 트리거 시 시장가(01) 매도', !!stopSell && stopSell.orderType === '01');
+  ok('매도 접수만으로 봇 지분 차감 안 함', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
+  ok('매도 접수 시점 실현손익 미확정(0)', t.state.dailyRealizedPnl === 0);
+
+  // 13) 잔고 대조로 매도 체결 확정 → 실현손익 계상 + 봇 지분 제거
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000) })); // 실보유 0 = 전량 체결됨
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0, lastSellPrice:66000 } };
+  t.tickCount = 0; // 다음 틱에서 잔고 갱신(tickCount%5===1)
+  await t.tick();
+  ok('잔고 대조로 체결 확정 — 실현손익 +60,000 계상', t.state.dailyRealizedPnl === 60000);
+  ok('체결 확정 후 봇 지분 제거', !t.state.botPositions['005930']);
+
+  // 14) 부분체결: 미체결 매수 잔량이 있으면 봇 지분을 매도로 오삭감하지 않음
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 })); // 실보유 10
+  t.state.botPositions = { '005930': { qty:14, entry:60000, stop:50000, target:200000, atr:1000, initRisk:1000, hw:70000 } }; // 봇 14주 주문분
+  t.deps.getPendingOrders = () => [{ code:'005930', side:'buy', qty:4, fillQty:0, price:60000 }]; // 4주 미체결
+  t.tickCount = 0;
+  await t.tick();
+  ok('부분체결 중 봇 지분 오삭감 안 함 (실보유10+미체결4=14)', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 14);
+  ok('부분체결 중 실현손익 오계상 안 함(0)', t.state.dailyRealizedPnl === 0);
+
+  // 15) 잔고 오류 응답(rt_cd≠0)이 봇 지분을 지우지 않음
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: { rt_cd:'1', msg1:'오류', output1: [] } }));
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0 } };
+  t.tickCount = 0;
+  await t.tick();
+  ok('오류 응답 시 봇 지분 보존 (전 포지션 무관리화 방지)', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
+
+  // 16) 설정 검증·클램프 — 비수치/극단값이 "NaN"/Infinity 주문으로 이어지지 않음
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t.updateSettings({ safety: { riskPerTradePct: 'abc', stopAtrMult: 0, maxPerStockPct: NaN, dailyLossLimitPct: 5 } });
+  ok('riskPerTradePct 비수치 → 기본 0.7 클램프', t.state.settings.safety.riskPerTradePct === 0.7);
+  ok('stopAtrMult 0 → 하한(≥0.3) 클램프', t.state.settings.safety.stopAtrMult >= 0.3);
+  ok('maxPerStockPct NaN → 기본 20', t.state.settings.safety.maxPerStockPct === 20);
+  ok('dailyLossLimitPct 양수 입력 → 음수로 클램프', t.state.settings.safety.dailyLossLimitPct < 0);
+  await t.tick();
+  ok('극단 설정에도 유한·≥1 수량 주문만', orders.filter(o => o.side === 'buy').every(o => Number.isFinite(o.qty) && o.qty >= 1));
 
   realLog('== KST 시간대 ==');
   t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));

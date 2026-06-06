@@ -476,7 +476,7 @@ async function executeOrder(cfg, { side, code, qty, price, orderType }, userId) 
   const orderObj = {
     CANO: cano||'', ACNT_PRDT_CD: acntPrdtCd||'01',
     PDNO: code, ORD_DVSN: orderType||'00',
-    ORD_QTY: String(qty), ORD_UNPR: String(price||0)
+    ORD_QTY: String(qty), ORD_UNPR: (orderType === '01') ? '0' : String(price||0) // 시장가는 단가 0
   };
   // 큐를 통해 직렬화 + 초당 한도 거부 시 자동 재시도
   const r = await kisPost(cfg, '/uapi/domestic-stock/v1/trading/order-cash', trId, orderObj);
@@ -589,7 +589,9 @@ function getTrader(userId) {
     codeToName:      codeToNameLookup,
     sendTelegram:    sendTelegram,
     // 미체결(접수) 주문 목록 — 엔진의 중복매도 방지·매수한도 계산에 사용
-    getPendingOrders: () => orderJournal.pendingList(userId === '_global' ? null : userId)
+    getPendingOrders: () => orderJournal.pendingList(userId === '_global' ? null : userId),
+    // 잔고 대조로 저널 체결 확정 — 헤드리스(브라우저 미접속) 운영에서도 미체결 가드/자동취소 정상화
+    reconcileOrders: (holdings) => orderJournal.reconcile(userId === '_global' ? null : userId, holdings)
   });
   _traders[userId] = t;
   return t;
@@ -1130,7 +1132,7 @@ async function handleRequest(req, res, session) {
     const day = new Date().toISOString().slice(0, 10);
     if (g.regDay !== day) { g.regDay = day; g.regs = 0; }
     if (g.regs >= 10) { jsonRes(res, 429, { ok: false, message: '가입 시도 초과 — 내일 다시 시도하세요' }); return; } // 같은 IP 하루 10회 (NAT 공유 사용자 고려)
-    if ((body.password || '').length < 4) { jsonRes(res, 400, { ok: false, message: '비밀번호는 4자 이상이어야 합니다' }); return; }
+    if ((body.password || '').length < 8) { jsonRes(res, 400, { ok: false, message: '비밀번호는 8자 이상이어야 합니다' }); return; }
     g.regs++;
     const r = auth.register(body.username, body.password);
     if (r.ok) {

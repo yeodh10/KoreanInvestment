@@ -19,7 +19,7 @@
   --text-0: #F2F4F6;
   --text-1: #C3C6CC;
   --text-2: #8B95A1;
-  --text-3: #4E5968;
+  --text-3: #6B7684; /* 라벨 가독성 — 다크 배경 대비 ~2.5:1로 안 읽히던 #4E5968에서 상향 */
   --blue: #3182F6;           /* 토스블루 */
   --blue-dim: rgba(49,130,246,0.14);
   --red: #F04452;            /* 토스증권 상승 레드 */
@@ -276,7 +276,8 @@ td.mono,th.mono{font-family:var(--mono)}
 .auth-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
 .trading-tab{flex:1;padding:9px 6px;background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-size:13px;color:var(--text-2);font-family:var(--font);transition:all .15s;white-space:nowrap}
 .trading-tab:hover{color:var(--text-1)}
-.trading-tab.active{color:var(--text-0);border-bottom-color:var(--blue)};align-items:center;gap:6px;background:var(--bg-2);border:1px solid var(--border-2);border-radius:16px;padding:4px 10px;font-size:12px}
+.trading-tab.active{color:var(--text-0);border-bottom-color:var(--blue)}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg-2);border:1px solid var(--border-2);border-radius:16px;padding:4px 10px;font-size:12px}
 .chip .x{color:var(--text-3);cursor:pointer;font-weight:700;margin-left:2px}
 .chip .x:hover{color:var(--red)}
 .empty{text-align:center;padding:32px;color:var(--text-3);font-size:12px}
@@ -286,6 +287,18 @@ td.mono,th.mono{font-family:var(--mono)}
 .kiss-msg.ok{background:var(--green-dim);color:var(--green)}
 .kiss-msg.err{background:var(--red-dim);color:var(--red)}
 .kiss-msg.info{background:var(--blue-dim);color:var(--blue)}
+/* ── 모바일/좁은 창 대응 — 3컬럼이 짓눌려 차트·호가·주문이 사용 불능이던 문제 ── */
+@media (max-width:900px){
+  html,body{overflow:auto}
+  #app{grid-template-columns:1fr}
+  #sidebar{position:fixed;left:0;top:var(--header-h);bottom:0;width:200px;z-index:50;transform:translateX(-100%);transition:transform .2s;box-shadow:2px 0 16px rgba(0,0,0,.4)}
+  #sidebar.open{transform:translateX(0)}
+  #menuToggle{display:inline-flex !important}
+  .dash-grid{grid-template-columns:1fr;height:auto}
+  .page-body{padding:12px}
+}
+#menuToggle{display:none;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:none;color:var(--text-1);font-size:20px;cursor:pointer;border-radius:8px}
+#menuToggle:hover{background:var(--bg-2)}
 </style>
 </head>
 <body>
@@ -328,6 +341,7 @@ td.mono,th.mono{font-family:var(--mono)}
 
 <!-- ══ 헤더 ══ -->
 <header id="header">
+  <button id="menuToggle" onclick="toggleSidebar()" aria-label="메뉴">☰</button>
   <div class="logo" onclick="showPage('dashboard')" style="cursor:pointer"><div class="logo-dot"></div>AutoTrade KR</div>
   <div class="hdr-search">
     <span class="si">🔍</span>
@@ -1146,7 +1160,7 @@ td.mono,th.mono{font-family:var(--mono)}
       </div>
       <!-- 결과 -->
       <div style="display:flex;flex-direction:column;gap:12px">
-        <div class="pf-stats" style="grid-template-columns:repeat(5,1fr)" id="btStats" style="display:none">
+        <div class="pf-stats" style="grid-template-columns:repeat(5,1fr);display:none" id="btStats">
           <div class="pf-stat"><div class="lbl">총 수익률</div><div class="val" id="btReturn">—</div></div>
           <div class="pf-stat"><div class="lbl">최종 자산</div><div class="val" id="btFinal">—</div></div>
           <div class="pf-stat"><div class="lbl">총 거래</div><div class="val" id="btTrades">—</div></div>
@@ -1173,7 +1187,7 @@ td.mono,th.mono{font-family:var(--mono)}
       <button class="panel-btn" onclick="addAlertModal()">+ 알림 추가</button>
     </div>
     <!-- 알림 추가 폼 -->
-    <div class="panel" style="margin-bottom:12px" id="alertAddPanel" style="display:none">
+    <div class="panel" style="margin-bottom:12px;display:none" id="alertAddPanel">
       <div class="panel-head"><span class="panel-title">가격 도달 알림 설정</span></div>
       <div class="panel-body">
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;align-items:flex-end">
@@ -1302,6 +1316,12 @@ const setHtml = (id, v) => { const e=$(id); if(e) e.innerHTML = v; };
 // ── XSS 방어: 외부(API/RSS/서버) 유래 문자열은 innerHTML 삽입 전 반드시 esc() ──
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeUrl = u => /^https?:\/\//i.test(String(u||'')) ? String(u) : ''; // javascript: 등 차단
+// 인라인 onclick의 작은따옴표 JS 문자열 안에 외부값을 넣을 때 — esc만 쓰면 HTML 속성 디코드가 &#39;를
+// 도로 '로 풀어 JS 문자열을 탈출(코드 주입)할 수 있다. '와 \는 \u 이스케이프(HTML 디코드 대상 아님)로,
+// "·&·<는 엔티티로 막는다. 따옴표 컨텍스트에서도 절대 깨지지 않는 안전한 인자값을 만든다.
+const jsArg = s => String(s ?? '')
+  .replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+  .replace(/\\/g,'\\\\').replace(/'/g,'\\u0027').replace(/</g,'\\u003c');
 const fmtAmt = n => {
   if (!n || isNaN(n)) return '—';
   if (n >= 1e12) return (n/1e12).toFixed(1) + '조';
@@ -1315,7 +1335,8 @@ const fmtVol = n => {
   return n.toLocaleString();
 };
 const colorClass = (v) => v > 0 ? 'up' : v < 0 ? 'dn' : 'flat'; // 0 = 보합 → 흰색
-const arrow = (sign) => (sign === '2' || sign === '1') ? '▲' : sign === '5' ? '▼' : '—';
+// KIS 부호: 1=상한 2=상승 3=보합 4=하한 5=하락 — 4(하한)를 보합 '—'로 표시하던 버그 수정
+const arrow = (sign) => (sign === '5' || sign === '4') ? '▼' : sign === '3' ? '—' : '▲';
 
 // ── API 호출 ──
 let proxyOnline = false;
@@ -1342,7 +1363,10 @@ async function apiPost(path, body) {
       signal: ctl.signal
     });
     return await r.json();
-  } catch(e) { return null; }
+  } catch(e) {
+    // 타임아웃(abort)은 일반 실패와 구분 — 주문이 서버에서 접수됐을 수 있어 "실패"로 단정하면 안 된다.
+    return (e && e.name === 'AbortError') ? { _timeout: true } : null;
+  }
   finally { clearTimeout(tm); }
 }
 // ── 토스식 토스트 (alert 대체 — 화면을 멈추지 않는 피드백) ──
@@ -1360,6 +1384,9 @@ function showToast(msg, type) {
 async function checkProxy() {
   const r = await api('/api/config/status');
   proxyOnline = !!(r?.ok && r.connected);
+  // ★ 거래 페이지를 거치지 않고 대시보드 호가창에서 바로 주문해도 모드가 정확히 표시되도록
+  //   부팅 시점에 모드를 캐시한다. (이게 없으면 실전인데 확인창에 "모의투자"가 떠 실돈 오인)
+  if (r && r.txMode) _txModeCached = (r.txMode === 'live') ? 'live' : 'demo';
   updateConnStatus(proxyOnline, r);
   return r;
 }
@@ -1466,7 +1493,18 @@ document.addEventListener('click', e => {
 // 페이지 라우팅
 // ══════════════════════════════════════════════════════
 let currentPage = 'dashboard';
+function toggleSidebar(){ const s=$('sidebar'); if(s) s.classList.toggle('open'); }
+// 모드 배지 색 — 실전은 빨강(긴장), 모의는 파랑
+function applyModeBadge(el, mode){
+  if(!el) return;
+  const live = mode === 'live';
+  el.textContent = live ? '⚠️ 실전투자' : '모의투자';
+  el.style.background = live ? 'var(--red-dim)' : 'var(--blue-dim)';
+  el.style.color = live ? 'var(--red)' : 'var(--blue)';
+  el.style.fontWeight = live ? '700' : '';
+}
 function showPage(id) {
+  const sb=$('sidebar'); if(sb) sb.classList.remove('open'); // 모바일: 메뉴 선택 시 사이드바 닫기
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   const pg = $('page-'+id);
@@ -1493,11 +1531,13 @@ function showPage(id) {
 // ══════════════════════════════════════════════════════
 let currentCode = '005930';
 let currentName = '삼성전자';
+let _stockSeq = 0; // 종목 전환 시퀀스 — 빠른 연속 클릭 시 늦게 온 옛 응답이 새 종목 화면을 덮는 것 방지
 
 async function loadStock(code) {
   code = code || currentCode;
   const name = nameOf(code);
   currentCode = code; currentName = name;
+  const seq = ++_stockSeq;
   LS.set('lastStock', code); // 마지막 본 종목 기억 — 새로고침해도 차트 유지
   showPage('dashboard');
 
@@ -1510,6 +1550,8 @@ async function loadStock(code) {
   // 기업정보 + 현재가
   if (proxyOnline) {
     const r = await api(`/api/stockinfo?code=${code}`);
+    // 응답이 늦게 와도 그 사이 다른 종목으로 바뀌었으면 렌더 안 함 (등락률/전일종가 오염 방지)
+    if (seq !== _stockSeq || code !== currentCode) return;
     if (r?.ok && r.data) {
       const d = r.data;
       const up = !(d.sign === '5' || d.sign === '4');
@@ -2059,7 +2101,13 @@ function renderOB(d, opt) {
   const curPct = fmtPct(curPrice);
   const obNote = (d.synthetic || opt.synthetic) ? '<span style="font-size:9px;color:var(--text-3);margin-left:6px">합성호가</span>'
                : opt.cached ? '<span style="font-size:9px;color:var(--text-3);margin-left:6px">마감 호가</span>' : '';
-  const curHtml = `<span style="font-size:15px;font-weight:700;font-family:var(--mono);color:var(--red)">₩${curPrice.toLocaleString()}</span>${curPct!==null?`<span style="font-size:11px;font-family:var(--mono);margin-left:6px;color:${pctColor(curPct)}">${parseFloat(curPct)>=0?'+':''}${curPct}%</span>`:''}${obNote}`;
+  // 현재가 색·박스는 등락 방향에 따라 (항상 빨강이던 것 → 하락 시 파랑/보합 중립, "수익=빨강/손실=파랑" 문법 일치)
+  const curColor = curPct!==null ? pctColor(curPct) : 'var(--text-0)';
+  const curDir = (curPct===null || Math.abs(parseFloat(curPct))<0.005) ? 'flat' : parseFloat(curPct)>0 ? 'up' : 'down';
+  const curBox = curDir==='up' ? 'background:var(--red-dim);border-color:var(--red)'
+               : curDir==='down' ? 'background:rgba(52,133,250,0.12);border-color:var(--down)'
+               : 'background:var(--bg-2);border-color:var(--border-2)';
+  const curHtml = `<span style="font-size:15px;font-weight:700;font-family:var(--mono);color:${curColor}">₩${curPrice.toLocaleString()}</span>${curPct!==null?`<span style="font-size:11px;font-family:var(--mono);margin-left:6px;color:${curColor}">${parseFloat(curPct)>=0?'+':''}${curPct}%</span>`:''}${obNote}`;
 
   // 체결강도
   const totalAsk=asks.reduce((s,a)=>s+a.qty,0), totalBid=bids.reduce((s,b)=>s+b.qty,0);
@@ -2069,7 +2117,7 @@ function renderOB(d, opt) {
   const askEl=$('askRows'), bidEl=$('bidRows'), curEl=$('obCurrent');
   if (askEl) askEl.innerHTML = asks.map(mkAsk).join('');
   if (bidEl) bidEl.innerHTML = bids.map(mkBid).join('');
-  if (curEl)  curEl.innerHTML = curHtml;
+  if (curEl)  { curEl.innerHTML = curHtml; curEl.style.cssText = curBox; }
   // 현재가 박스를 스크롤 중앙에 — 종목이 바뀐 첫 렌더에만 (사용자 스크롤 방해 금지)
   if (window._obCenteredFor !== obCode) {
     window._obCenteredFor = obCode;
@@ -2086,7 +2134,7 @@ function renderOB(d, opt) {
   const tAsk=$('tradingAskRows'), tBid=$('tradingBidRows'), tCur=$('tradingObPrice');
   if (tAsk) tAsk.innerHTML = asks.map(mkAsk).join('');
   if (tBid) tBid.innerHTML = bids.map(mkBid).join('');
-  if (tCur)  tCur.innerHTML = curHtml;
+  if (tCur)  { tCur.innerHTML = curHtml; tCur.style.cssText = curBox; }
   const tStr=$('tradingStrength'); if(tStr) tStr.style.width=askPct+'%';
   setText('tradingBidPct', bidPct+'%'); setText('tradingAskPct', askPct+'%');
   setText('tradingTotalAsk', `총 매도 ${totalAsk.toLocaleString()}`);
@@ -2184,6 +2232,8 @@ function applyAccount(data) {
   // 총자산: 총평가금액 → 없으면 순자산 → 그래도 없으면 예수금(보유 없이 현금만 있을 때 시드머니)
   const totalAsset = parseInt(s.tot_evlu_amt||0) || parseInt(s.nass_amt||0) || cash;
   const holdings = (r.data.output1||[]).filter(p=>parseInt(p.hldg_qty)>0);
+  // 보유수량을 코드별로 캐시 — 매도 '비율' 버튼이 예수금이 아니라 보유수량 기준으로 동작하게
+  _holdingsByCode = {}; holdings.forEach(p=>{ _holdingsByCode[p.pdno]=parseInt(p.hldg_qty||0); });
   // 빈 잔고 응답으로 숫자를 0으로 덮어쓰지 않음 (깜빡임 방지) — 실데이터 있을 때만 갱신
   if (totalAsset===0 && cash===0 && principal===0 && !holdings.length) return r.data;
   const rate = principal>0 ? ((pnl/principal)*100).toFixed(2) : '0.00';
@@ -2238,7 +2288,7 @@ async function loadPortfolio() {
       <td class="mono ${cls}">${pl>0?'+':''}₩${pl.toLocaleString()}</td>
       <td class="mono ${cls}">${pl>0?'+':''}${plRt.toFixed(2)}%</td>
       <td><div class="progress" style="width:60px"><div class="progress-fill" style="width:${w}%"></div></div> <span style="font-size:10px">${w}%</span></td>
-      <td><button class="panel-btn" onclick="sellFromPf('${code}','${name}',${qty},${cur})">매도</button></td>
+      <td><button class="panel-btn" onclick="sellFromPf('${jsArg(code)}','${jsArg(name)}',${qty},${cur})">매도</button></td>
     </tr>`;
   }).join('');
 }
@@ -2302,7 +2352,14 @@ async function fetchPrice() {
   const p=parseInt(r?.data?.output?.stck_prpr||0);
   if(p>0){ $('orderPrice').value=p; updateTotal(); }
 }
+let _holdingsByCode = {}; // 코드→보유수량 (매도 비율 버튼용)
 function setRatio(ratio) {
+  if (orderSide === 'sell') {
+    // ★ 매도 비율은 보유수량 기준 — 예수금 기준으로 계산하면 보유보다 많은 수량으로 매도 시도하는 사고
+    const held = _holdingsByCode[$('orderCode').value] || 0;
+    if (held > 0) { $('orderQty').value = Math.max(1, Math.floor(held * ratio)); updateTotal(); }
+    return;
+  }
   const price=parseInt($('orderPrice').value||0), avail=parseInt($('orderAvail').textContent.replace(/[^\d]/g,'')||0);
   if(price>0 && avail>0) { $('orderQty').value=Math.floor(avail*ratio/price)||1; updateTotal(); }
 }
@@ -2321,7 +2378,9 @@ function validateOrder(code, qty, price, type) {
   return { q, p };
 }
 function confirmOrder(side, code, q, p, type) {
-  const mode = _txModeCached === 'live' ? '⚠️ 실전투자 ⚠️' : '모의투자';
+  const mode = _txModeCached === 'live' ? '⚠️ 실전투자 ⚠️'
+             : _txModeCached === 'demo' ? '모의투자'
+             : '⚠️ 모드 미확인(실전일 수 있음)'; // 캐시 전엔 안전하게 경고
   const pTxt = type === '01' ? '시장가' : '₩' + p.toLocaleString();
   return confirm(`[${mode}] ${nameOf(code)} (${code})\n${side === 'buy' ? '매수' : '매도'} ${q}주 @ ${pTxt}\n\n주문을 전송할까요?`);
 }
@@ -2342,6 +2401,11 @@ async function submitOrder() {
       msgEl.className='kiss-msg ok'; msgEl.textContent=`✅ ${side==='buy'?'매수':'매도'} 주문 접수: ${v.q}주`;
       showToast(`${side==='buy'?'매수':'매도'} ${v.q}주 주문이 접수됐어요`);
       setTimeout(refreshOrders,1000);
+    } else if (r?._timeout) {
+      // 응답 지연 — 서버엔 접수됐을 수 있으니 "실패"로 단정하지 말고 상태를 확인하게 한다 (중복 주문 방지)
+      msgEl.className='kiss-msg info'; msgEl.textContent='⏳ 응답이 지연됩니다 — 주문내역에서 접수 여부를 확인하세요';
+      showToast('응답 지연 — 주문내역을 확인하세요','info');
+      setTimeout(refreshOrders,800); setTimeout(refreshOrders,2500);
     } else {
       msgEl.className='kiss-msg err'; msgEl.textContent='❌ '+(r?.data?.msg1||r?.message||'주문 실패');
     }
@@ -2386,7 +2450,7 @@ async function refreshOrders() {
       <td class="mono">${qty}</td>
       <td class="mono">${filled}</td>
       <td>${status}</td>
-      <td>${canCancel ? `<button class="panel-btn" onclick="cancelOrder('${o.odno}','${o.ord_gno_brno}',${qty-filled})">취소</button>` : '—'}</td>
+      <td>${canCancel ? `<button class="panel-btn" onclick="cancelOrder('${jsArg(o.odno)}','${jsArg(o.ord_gno_brno)}',${qty-filled})">취소</button>` : '—'}</td>
     </tr>`;
   }).join('');
 }
@@ -2431,10 +2495,10 @@ async function loadTradingStock(code) {
   if (!proxyOnline) return;
   const seq = ++tradingLoadSeq;
 
-  // 모드 — 캐시 사용, 없으면 백그라운드 1회 조회(대기 안 함)
+  // 모드 — 캐시 사용, 없으면 백그라운드 1회 조회(대기 안 함). 실전은 빨갛게(긴장감)
   const modeEl = $('tradingMode');
-  if (_txModeCached !== null) { if (modeEl) modeEl.textContent = _txModeCached === 'live' ? '⚠️ 실전투자' : '모의투자'; }
-  else api('/api/config/status').then(st => { _txModeCached = st?.txMode || 'demo'; if (modeEl) modeEl.textContent = _txModeCached === 'live' ? '⚠️ 실전투자' : '모의투자'; });
+  if (_txModeCached !== null) { applyModeBadge(modeEl, _txModeCached); }
+  else api('/api/config/status').then(st => { _txModeCached = (st?.txMode==='live')?'live':'demo'; applyModeBadge(modeEl, _txModeCached); });
 
   // ① 보이는 것 먼저 — 호가창 + '활성 탭'만 즉시 (나머지는 ④에서 백그라운드)
   const activeId = document.querySelector('.trading-tab.active')?.id;
@@ -2618,10 +2682,10 @@ async function loadNews(code) {
   const r = await api(`/api/news?code=${code}`);
   const list = r?.data?.output || [];
   if (!list.length) {
-    const url = r?.fallbackUrl || `https://finance.naver.com/item/news.naver?code=${code}`;
+    const url = safeUrl(r?.fallbackUrl) || `https://finance.naver.com/item/news.naver?code=${code}`;
     el.innerHTML = `<div class="empty" style="padding:20px;line-height:1.8">
       KIS 뉴스 권한이 없거나 뉴스가 없습니다.<br>
-      <a href="${url}" target="_blank" style="color:var(--blue)">📰 네이버 금융에서 ${nameOf(code)} 뉴스 보기 →</a>
+      <a href="${esc(url)}" target="_blank" rel="noopener" style="color:var(--blue)">📰 네이버 금융에서 ${esc(nameOf(code))} 뉴스 보기 →</a>
     </div>`;
     return;
   }
@@ -2821,7 +2885,8 @@ async function runBacktest() {
     ? (wins / trades.filter(t=>t.side==='sell').length * 100).toFixed(1) : '0';
   const up = parseFloat(returnPct) >= 0;
 
-  // 결과 표시
+  // 결과 표시 (실행 전엔 숨김 — 실행 후 노출)
+  { const bs=$('btStats'); if(bs) bs.style.display='grid'; }
   $('btReturn').textContent = (up?'+':'') + returnPct + '%';
   $('btReturn').className = 'val ' + (up?'up':'dn');
   setText('btFinal', '₩'+finalAsset.toLocaleString());
@@ -2962,12 +3027,11 @@ async function checkAlerts() {
       // 알림 뱃지
       const badge = $('alertBadge');
       if (badge) { badge.style.display='inline'; badge.textContent = alertHistory.length; }
-      // 브라우저 알림
-      if (Notification.permission === 'granted') {
+      // 브라우저 알림 — 미지원 환경(iOS Safari 등)에서 ReferenceError로 알림 처리가 끊기지 않게 가드
+      if ('Notification' in window && Notification.permission === 'granted') {
         new Notification(`📊 ${a.name} 알림`, { body: `₩${price.toLocaleString()} ${a.cond==='above'?'이상':'이하'} 도달!` });
       }
     }
-    await new Promise(r => setTimeout(r, 300));
   }
 }
 let splitOrderRunning = false;
@@ -2978,34 +3042,45 @@ function requestNotifPermission() {
 }
 
 async function submitSplitOrder() {
-  if (splitOrderRunning) { alert('이미 분할 주문이 진행 중입니다.'); return; }
+  if (splitOrderRunning || _orderInflight) { alert('이미 주문이 진행 중입니다.'); return; }
   const count = parseInt($('splitCount').value || 2);
   const interval = parseInt($('splitInterval').value || 5) * 1000;
   const code = $('orderCode').value;
   const type = $('orderType').value;
-  const price = parseInt($('orderPrice').value || 0);
   const totalQty = parseInt($('orderQty').value || 0);
   const qtyPerOrder = Math.floor(totalQty / count);
   if (qtyPerOrder < 1) { alert('수량이 부족합니다. 분할 횟수를 줄이거나 수량을 늘리세요.'); return; }
   const side = orderSide;
-  if (!confirm(`${nameOf(code)} ${side === 'buy' ? '매수' : '매도'} ${qtyPerOrder}주 × ${count}회\n총 ${qtyPerOrder * count}주를 ${interval/1000}초 간격으로 주문합니다.`)) return;
-  splitOrderRunning = true;
+  // ★ 일반 주문과 동일한 검증·모드표시·중복가드를 거친다 (분할이 오히려 안전장치가 약하던 문제)
+  const v = validateOrder(code, qtyPerOrder, $('orderPrice').value || '0', type);
+  if (v.err) { const m=$('orderMsg'); m.style.display='block'; m.className='kiss-msg err'; m.textContent='❌ '+v.err; return; }
+  if (!confirmOrder(side, code, qtyPerOrder, v.p, type)) return;
+  if (!confirm(`위 주문을 ${count}회 반복(총 ${qtyPerOrder * count}주, ${interval/1000}초 간격)합니다. 계속할까요?`)) return;
+  splitOrderRunning = true; _orderInflight = true;
   const msgEl = $('orderMsg');
   msgEl.style.display = 'block'; msgEl.className = 'kiss-msg info';
-  for (let i = 0; i < count; i++) {
-    msgEl.textContent = `분할 주문 ${i+1}/${count} 진행 중...`;
-    const r = await apiPost('/api/order', { side, code, qty: qtyPerOrder, price, orderType: type });
-    if (!r?.ok || r.data?.rt_cd !== '0') {
-      msgEl.className = 'kiss-msg err';
-      msgEl.textContent = `❌ ${i+1}번째 주문 실패: ${r?.data?.msg1 || ''}`;
-      splitOrderRunning = false; return;
+  try {
+    for (let i = 0; i < count; i++) {
+      msgEl.textContent = `분할 주문 ${i+1}/${count} 진행 중...`;
+      const r = await apiPost('/api/order', { side, code, qty: qtyPerOrder, price: v.p, orderType: type });
+      if (r?._timeout) {
+        msgEl.className = 'kiss-msg info';
+        msgEl.textContent = `⏳ ${i+1}번째 응답 지연 — 주문내역에서 접수 여부 확인 후 재개하세요`;
+        setTimeout(refreshOrders, 800); return;
+      }
+      if (!r?.ok || r.data?.rt_cd !== '0') {
+        msgEl.className = 'kiss-msg err';
+        msgEl.textContent = `❌ ${i+1}번째 주문 실패: ${r?.data?.msg1 || r?.message || ''}`;
+        return;
+      }
+      if (i < count - 1) await new Promise(res => setTimeout(res, interval));
     }
-    if (i < count - 1) await new Promise(res => setTimeout(res, interval));
+    msgEl.className = 'kiss-msg ok';
+    msgEl.textContent = `✅ 분할 주문 완료 (${count}회 × ${qtyPerOrder}주)`;
+    setTimeout(refreshOrders, 1000);
+  } finally {
+    splitOrderRunning = false; _orderInflight = false;
   }
-  msgEl.className = 'kiss-msg ok';
-  msgEl.textContent = `✅ 분할 주문 완료 (${count}회 × ${qtyPerOrder}주)`;
-  splitOrderRunning = false;
-  setTimeout(refreshOrders, 1000);
 }
 
 // ── 수수료 계산 (대략) ──
@@ -3039,7 +3114,9 @@ function switchDashTab(tab) {
 }
 async function loadDashTick() {
   if (!proxyOnline) return;
-  const r = await api(`/api/tick?code=${currentCode}`);
+  const code = currentCode;
+  const r = await api(`/api/tick?code=${code}`);
+  if (code !== currentCode) return; // 응답 도착 전 종목 전환됨 → 옛 데이터 렌더 금지
   const ticks = r?.data?.output || [];
   const tbody = $('dashTickBody');
   if (!tbody) return;
@@ -3071,14 +3148,16 @@ function fmtNewsDate(raw) {
 }
 async function loadDashNews() {
   if (!proxyOnline) return;
-  const r = await api(`/api/news?code=${currentCode}`);
+  const code = currentCode;
+  const r = await api(`/api/news?code=${code}`);
+  if (code !== currentCode) return; // 종목 전환됨 → 옛 뉴스 렌더 금지
   const list = r?.data?.output || [];
   const el = $('dashNewsBody');
   if (!el) return;
   el.style.textAlign = 'left';
   if (!list.length) {
-    const url = r?.fallbackUrl || `https://finance.naver.com/item/news.naver?code=${currentCode}`;
-    el.innerHTML = `<div class="empty" style="font-size:11px;line-height:1.6;padding:12px">뉴스 권한 없음<br><a href="${url}" target="_blank" style="color:var(--blue)">네이버 뉴스 →</a></div>`;
+    const url = safeUrl(r?.fallbackUrl) || `https://finance.naver.com/item/news.naver?code=${code}`;
+    el.innerHTML = `<div class="empty" style="font-size:11px;line-height:1.6;padding:12px">뉴스 권한 없음<br><a href="${esc(url)}" target="_blank" rel="noopener" style="color:var(--blue)">네이버 뉴스 →</a></div>`;
     return;
   }
   // ★ 'empty' 클래스(가운데 정렬+32px 패딩) 제거 — 기사가 패널 좌상단에 딱 붙게
@@ -3114,7 +3193,9 @@ function fmtShares(n) {
 }
 async function loadDashInvestor() {
   if (!proxyOnline) return;
-  const r = await api(`/api/investor?code=${currentCode}`);
+  const code = currentCode;
+  const r = await api(`/api/investor?code=${code}`);
+  if (code !== currentCode) return; // 종목 전환됨 → 옛 수급 렌더 금지
   const list = r?.data?.output || [];
   const tbody = $('dashInvestorBody');
   if (!tbody) return;
@@ -3680,12 +3761,17 @@ async function saveAutoSettings() {
   const s=collectAutoSettings(), msg=$('autoSaveMsg');
   msg.textContent='저장 중...';
   const r=await apiPost('/api/auto/settings',s);
-  msg.textContent=r?.ok?'✅ 저장됨 '+new Date().toLocaleTimeString('ko-KR'):'❌ 실패';
+  msg.textContent=r?.ok?'✅ 저장됨 '+new Date().toLocaleTimeString('ko-KR'):'❌ 저장 실패';
   if(r?.ok) applyAutoUI(r.status);
+  return !!r?.ok; // 성공 여부 반환 — 호출부가 실패 시 엔진을 켜지 않도록
 }
 async function startAuto() {
-  if(!confirm('자동매매를 시작합니다. 실제 주문이 나갑니다.\n계속하시겠습니까?')) return;
-  await saveAutoSettings();
+  const mode = _txModeCached === 'live' ? '⚠️ 실전투자 ⚠️ — 실제 돈으로 주문이 나갑니다'
+             : _txModeCached === 'demo' ? '모의투자 — 가상 주문입니다'
+             : '⚠️ 모드 미확인(실전일 수 있음)';
+  if(!confirm(`[${mode}]\n자동매매를 시작합니다.\n계속하시겠습니까?`)) return;
+  // ★ 설정 저장이 실패하면 엔진을 켜지 않는다 (화면 값과 다른 옛 설정으로 실주문 도는 사고 방지)
+  if(!await saveAutoSettings()){ alert('설정 저장 실패 — 자동매매를 시작하지 않았습니다.'); return; }
   const r=await apiPost('/api/auto/start',{});
   if(r?.ok)applyAutoUI(r.status); else alert('시작 실패: '+(r?.message||''));
 }
@@ -3695,7 +3781,7 @@ async function stopAuto() {
 }
 function renderWatchChips() {
   const el=$('watchChips');
-  el.innerHTML=autoWatchList.length?autoWatchList.map(c=>`<div class="chip">${nameOf(c)} <span style="color:var(--text-3);font-size:10px">${c}</span><span class="x" onclick="removeWatch('${c}')">×</span></div>`).join(''):'<span style="color:var(--text-3);font-size:12px">종목을 추가하세요</span>';
+  el.innerHTML=autoWatchList.length?autoWatchList.map(c=>`<div class="chip">${esc(nameOf(c))} <span style="color:var(--text-3);font-size:10px">${esc(c)}</span><span class="x" onclick="removeWatch('${jsArg(c)}')">×</span></div>`).join(''):'<span style="color:var(--text-3);font-size:12px">종목을 추가하세요</span>';
 }
 function removeWatch(c){autoWatchList=autoWatchList.filter(x=>x!==c);renderWatchChips();}
 function onWatchSearch(){
@@ -3848,28 +3934,35 @@ async function testTelegram(){
 // 실시간 갱신
 // ══════════════════════════════════════════════════════
 function isMarketOpen(){
-  const now=new Date(), d=now.getDay();
+  // KST 기준 — getHours()는 브라우저 로컬 타임존이라 해외 접속 사용자에게 틀린다 (epoch+9h로 통일)
+  const k=new Date(Date.now()+9*3600*1000), d=k.getUTCDay();
   if(d===0||d===6) return false;
-  const t=now.getHours()*60+now.getMinutes();
+  const t=k.getUTCHours()*60+k.getUTCMinutes();
   return t>=9*60&&t<=15*60+30;
 }
 let liveInterval=null;
 let autoLogFastTimer=null;
+let _liveMarketOpen=false;
 function startLive(){
   if(liveInterval)clearInterval(liveInterval);
-  const interval=isMarketOpen()?4000:10000;
+  _liveMarketOpen=isMarketOpen();
+  const interval=_liveMarketOpen?4000:10000;
   liveInterval=setInterval(refreshLive,interval);
   refreshLive(); // 첫 페인트를 타이머까지 기다리지 않고 즉시 (토스: 기다리게 하지 않는다)
   // 자동매매 로그/상태는 장 마감과 무관하게 빠르게(3초) 갱신
   if(autoLogFastTimer)clearInterval(autoLogFastTimer);
   autoLogFastTimer=setInterval(()=>{
-    if(!proxyOnline) return;
+    if(!proxyOnline||document.hidden) return;
     refreshDashAutoLog();
     if(currentPage==='strategy'){ refreshAutoLogs(); api('/api/auto/status').then(r=>{if(r?.ok)applyAutoUI(r.status);}); }
   },3000);
 }
+// 백그라운드 탭 복귀 시 즉시 1회 갱신 (숨겨진 동안엔 refreshLive가 스스로 멈춰 서버 부담을 줄임)
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ startLive(); } });
 async function refreshLive(){
   if(!proxyOnline) return;
+  if(document.hidden) return; // 백그라운드 탭 — 폴링 중단(요청 폭주·배터리 방지). SSE 푸시는 유지.
+  if(isMarketOpen()!==_liveMarketOpen){ startLive(); return; } // 장중/장외 전환 시 폴링 주기 재조정
   // 전부 동시에 — 서로 기다리지 않게 (체감 속도↑)
   refreshWatchPrices();
   loadAccount();
@@ -3882,7 +3975,7 @@ async function refreshLive(){
   checkAlerts();
   loadMarketIndices();
   if (currentPage === 'dashboard') { refreshDashMid(); loadDashVolTop(); }
-  refreshDashAutoLog();
+  // refreshDashAutoLog()는 위 3초 타이머가 전담 — 여기서 중복 호출하던 것 제거 (자동매매 상태 2중 폴링 방지)
 }
 
 // ══════════════════════════════════════════════════════
@@ -3897,7 +3990,8 @@ function startStream() {
   if (!proxyOnline || typeof EventSource === 'undefined') return;
   const codes = watchCodes.slice(0, 33); // 시총30 시세표 전체 실시간 (서버 한도 40 내)
   const want = codes.join(',') + '|' + (obCode || '');
-  if (_es && want === _streamWant) return; // 구독 대상 동일 — 재연결 불필요
+  // CLOSED(2) 상태면 같은 대상이라도 재생성해야 한다 — 안 그러면 영구 폴링 강등 후 복구 불능
+  if (_es && _es.readyState !== 2 && want === _streamWant) return;
   _streamWant = want;
   if (_es) { try { _es.close(); } catch(e) {} _es = null; }
   if (!codes.length && !obCode) return;
@@ -3942,7 +4036,12 @@ function startStream() {
       }, 300); // 호가창 렌더링 최대 3.3회/초
     } catch(_) {}
   });
-  es.onerror = () => { _streamConnected = false; };
+  es.onerror = () => {
+    _streamConnected = false;
+    // EventSource가 CLOSED(2)로 영구 종료(세션 만료·서버 재시작 등)되면 자동 재접속을 안 한다 →
+    // 5초 후 능동 재생성. 안 그러면 "실시간"이 조용히 폴링으로 강등된 채 세션 내내 복구 안 됨.
+    if (es.readyState === 2) setTimeout(() => { if (_es === es) { _streamWant = ''; startStream(); } }, 5000);
+  };
 }
 // 실시간 체결가 → 관심종목 행 즉시 갱신
 function applyLivePrice(d) {

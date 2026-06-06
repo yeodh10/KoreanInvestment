@@ -59,6 +59,8 @@ function getApprovalKey(cfg) {
       });
     });
     req.on('error', reject);
+    // 타임아웃 — KIS REST 게이트웨이가 응답 없이 소켓을 잡고 있으면 connecting이 영구 고착됨
+    req.setTimeout(10000, () => req.destroy(new Error('approval_key 요청 타임아웃(10초)')));
     req.write(body);
     req.end();
   });
@@ -81,6 +83,13 @@ class MiniWS {
     const key = crypto.randomBytes(16).toString('base64');
     const expectAccept = crypto.createHash('sha1')
       .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+
+    // ★ 연결/핸드셰이크 타임아웃 — SYN 무응답·핸드셰이크 무응답으로 매달려
+    //   connecting 플래그가 영구 고착(실시간 전체 정지)되는 것을 막는다.
+    this._connectTimer = setTimeout(() => {
+      if (!this.open) this._fail(new Error('WS 연결/핸드셰이크 타임아웃(12초)'));
+    }, 12000);
+    if (this._connectTimer.unref) this._connectTimer.unref();
 
     this.sock = net.connect(this.port, this.host, () => {
       this.sock.write(
@@ -107,21 +116,30 @@ class MiniWS {
         if (m && m[1] !== expectAccept) console.log('[실시간] ⚠️ Accept 키 불일치 (무시하고 진행)');
         handshook = true;
         this.open = true;
+        clearTimeout(this._connectTimer);
         if (this.onopen) this.onopen();
       }
       this._drain();
     });
     this.sock.on('error', e => this._fail(e));
-    this.sock.on('close', () => {
-      const was = this.open;
-      this.open = false;
-      if (was && this.onclose) this.onclose();
-    });
+    // ★ close는 open 여부와 무관하게 항상 종료 콜백을 1회 보장한다.
+    //   핸드셰이크 전 실패(ECONNREFUSED·거부·타임아웃)에서 onclose가 안 불려
+    //   재연결이 영원히 트리거되지 않던 버그를 차단.
+    this.sock.on('close', () => { this.open = false; this._terminate(); });
+  }
+
+  // 종료 콜백 1회 보장 (open 여부 무관)
+  _terminate() {
+    if (this._done) return;
+    this._done = true;
+    clearTimeout(this._connectTimer);
+    if (this.onclose) this.onclose();
   }
 
   _fail(e) {
     if (this.onerror) this.onerror(e);
     try { this.sock.destroy(); } catch (_) {}
+    this._terminate(); // 소켓이 'close'를 안 낼 수도 있으니 직접 보장(중복은 _done로 무시)
   }
 
   // 수신 버퍼에서 완성된 프레임을 모두 꺼내 처리
@@ -415,11 +433,18 @@ class KisFeed {
     if (!this.clients.size) return;
     const code = obj.code;
     const line = `event: ${event}\ndata: ${JSON.stringify(obj)}\n\n`;
+    let dead = null;
     for (const c of this.clients) {
       if (event === 'status' || !code || c.codes.has(code) || c.obCode === code) {
-        try { c.res.write(line); } catch (_) {}
+        try {
+          // write()가 false면 소켓 버퍼 적체(half-open 모바일 단선 등) — 누적되면 좀비로 보고 정리.
+          // 안 그러면 장중 틱이 Node 메모리에 무한 버퍼링돼 전체 응답이 느려진다.
+          if (c.res.write(line) === false) { c._lag = (c._lag || 0) + 1; if (c._lag > 300) (dead || (dead = [])).push(c); }
+          else c._lag = 0;
+        } catch (_) { (dead || (dead = [])).push(c); }
       }
     }
+    if (dead) for (const c of dead) { try { c.res.destroy(); } catch (_) {} this.removeClient(c); }
   }
 
   addClient(client) {
@@ -489,9 +514,12 @@ function handleStream(req, res, { cfg, query, onPrice, onExecution }) {
 
   const feed = getFeed(cfg);
   const client = { id: ++_clientSeq, res, codes: new Set(codes), obCode };
-  // 클라이언트별로 콜백 등록 — 종료 시 자기 것만 해제 (덮어쓰기·죽은 클로저 호출 없음)
+  // 시세 콜백은 클라이언트별 (종료 시 자기 것만 해제).
   if (onPrice) feed.priceHooks.set(client.id, onPrice);
-  if (onExecution) feed.execHooks.set(client.id, onExecution);
+  // ★ 체결통보→저널 확정은 피드(=앱키=유저)당 단 1개만 등록한다.
+  //   클라이언트(탭)마다 등록하면 멀티탭에서 markFilled가 N배 호출돼 부분체결이 조기 '체결' 확정된다.
+  //   '_journal' 키로 고정 → 탭이 모두 닫혀도(클라이언트 0) 피드가 살아있는 한 체결통보를 계속 확정(유실 방지).
+  if (onExecution && !feed.execHooks.has('_journal')) feed.execHooks.set('_journal', onExecution);
   feed.addClient(client);
   res.write(`event: status\ndata: ${JSON.stringify({ connected: feed.connected })}\n\n`);
 
