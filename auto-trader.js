@@ -343,10 +343,13 @@ class AutoTrader {
     const cap = this._capital || 0;
     const pnl = this.state.dailyRealizedPnl || 0;
     const bp = this.state.botPositions || {};
+    const priceCache = (typeof global !== 'undefined' && global._priceCache) || {};
     const positions = Object.keys(bp).map(code => ({
       code, name: (this.deps.codeToName && this.deps.codeToName(code)) || code,
       qty: bp[code].qty, entry: bp[code].entry || 0, stop: Math.round(bp[code].stop || 0),
-      target: Math.round(bp[code].target || 0), cur: (this._lastHeld?.[code]?.curPrice) || 0
+      // 현재가: 잔고 캐시(_lastHeld) 우선, 없으면 시세 캐시 폴백 — 잔고 갱신(5틱) 전에도 현재가가 뜨게
+      target: Math.round(bp[code].target || 0),
+      cur: (this._lastHeld?.[code]?.curPrice) || (priceCache[code]?.data?.price) || 0
     }));
     const exposure = this._botExposure(this._lastHeld || {});
     return {
