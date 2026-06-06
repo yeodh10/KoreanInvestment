@@ -54,6 +54,32 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl enable --now autotrade
 ```
+**운영 명령**: `systemctl restart autotrade`(코드 수정 반영) · `systemctl status autotrade` · `tail -f /var/log/autotrade.log`
+⚠️ 서버를 systemd로 띄운 뒤엔 `./go-live.sh`를 다시 실행하지 말 것(포트 3000 충돌).
+
+### 장중 자동 점검 (선택)
+사람·CLI 없이 평일 09:05·10:00 KST에 서버·터널·실시간·응답속도·자동매매 상태를 점검해
+`장중점검-YYYYMMDD.md`로 남기고(텔레그램 설정 시 요약 발송) — `market-check.js` + systemd 타이머.
+```ini
+# /etc/systemd/system/autotrade-check.service
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ydh/KoreanInvestment
+Environment=TZ=Asia/Seoul
+ExecStart=/usr/bin/node market-check.js
+```
+```ini
+# /etc/systemd/system/autotrade-check.timer
+[Timer]
+OnCalendar=Mon-Fri *-*-* 09:05:00
+OnCalendar=Mon-Fri *-*-* 10:00:00
+[Install]
+WantedBy=timers.target
+```
+```bash
+sudo systemctl enable --now autotrade-check.timer   # 확인: systemctl list-timers autotrade-check.timer
+node market-check.js                                # 수동 즉시 점검
+```
 
 ## (참고) Cloudflare 터널로 운영할 경우
 

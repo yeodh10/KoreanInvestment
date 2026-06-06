@@ -35,3 +35,5 @@ Importamos las librerias necesarias.txt
 
 # 터널 임시 주소(재시작마다 바뀜)
 CURRENT-URL.txt
+# 장중 자동 점검 리포트 (런타임 산출물)
+장중점검-*.md
