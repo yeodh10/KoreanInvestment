@@ -1,36 +1,61 @@
 /**
- * 멀티유저 인증 모듈
- * - 회원가입/로그인 (비밀번호 해시)
- * - 세션 토큰 관리
- * - 유저별 KIS 설정 분리 + 간단 암호화
- * Node.js 빌트인 crypto만 사용
+ * 멀티유저 인증 모듈 (SQLite 백엔드)
+ * - 회원가입/로그인 (scrypt 해시)
+ * - 세션 토큰 관리 (토큰은 SHA-256 해시로만 저장)
+ * - 유저별 KIS 설정 분리 + AES-256-GCM 암호화 (파일 유지 — 유저별 개별 파일이라 교차 위험 없음)
+ *
+ * 왜 users/sessions를 JSON에서 SQLite로 — 멀티유저 동시성.
+ *  - 기존: 전역 users.json/sessions.json을 통째로 읽고 수정 후 통째 저장(read-modify-write).
+ *    N명 동시 로그인/가입 시 한쪽 기록이 덮여 세션·계정이 사라질 수 있었다.
+ *  - 지금: INSERT/DELETE/UPDATE가 단일 SQL(또는 트랜잭션)로 DB 락 하에 원자적. 유실 없음.
+ *  - node 내장 node:sqlite — npm 의존성 0 유지. getUserBySession은 매 요청 PK 조회라 빠르다.
+ * Node.js 빌트인만 사용.
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { DatabaseSync } = require('node:sqlite');
 
-const USERS_FILE = path.join(__dirname, 'users.json');
-const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const USER_CONFIG_DIR = path.join(__dirname, 'user-configs');
+const AUTH_DB = process.env.AUTH_DB || path.join(__dirname, 'auth.db');
+const LEGACY_USERS = path.join(__dirname, 'users.json');
+const LEGACY_SESSIONS = path.join(__dirname, 'sessions.json');
+const SESSION_TTL = 30 * 24 * 60 * 60 * 1000; // 30일
 
 // 유저 설정 폴더 생성
 if (!fs.existsSync(USER_CONFIG_DIR)) {
   try { fs.mkdirSync(USER_CONFIG_DIR); } catch(e) {}
 }
 
-// ── 서버 고유 암호화 키 (최초 1회 생성, 파일 저장) ──
+// ── DB 초기화 ──
+const db = new DatabaseSync(AUTH_DB);
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA synchronous = NORMAL');
+db.exec(`CREATE TABLE IF NOT EXISTS users (
+  userId TEXT PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  passwordHash TEXT NOT NULL,
+  createdAt TEXT,
+  role TEXT
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS sessions (
+  tokenHash TEXT PRIMARY KEY,
+  userId TEXT NOT NULL,
+  username TEXT,
+  createdAt INTEGER NOT NULL
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(createdAt)');
+
+// ── 서버 고유 암호화 키 (최초 1회 생성) ──
 const KEY_FILE = path.join(__dirname, '.enckey');
 let ENC_KEY;
 function getEncKey() {
   if (ENC_KEY) return ENC_KEY;
   try {
-    if (fs.existsSync(KEY_FILE)) {
-      ENC_KEY = Buffer.from(fs.readFileSync(KEY_FILE, 'utf8'), 'hex');
-      return ENC_KEY;
-    }
+    if (fs.existsSync(KEY_FILE)) { ENC_KEY = Buffer.from(fs.readFileSync(KEY_FILE, 'utf8'), 'hex'); return ENC_KEY; }
   } catch(e) {}
   ENC_KEY = crypto.randomBytes(32);
-  try { fs.writeFileSync(KEY_FILE, ENC_KEY.toString('hex'), { mode: 0o600 }); } catch(e) {} // 소유자만 읽기 — 키 유출 방지
+  try { fs.writeFileSync(KEY_FILE, ENC_KEY.toString('hex'), { mode: 0o600 }); } catch(e) {}
   return ENC_KEY;
 }
 
@@ -64,135 +89,142 @@ function verifyPassword(password, stored) {
   const [salt, hash] = stored.split(':');
   const test = crypto.scryptSync(password, salt, 64).toString('hex');
   const a = Buffer.from(hash), b = Buffer.from(test);
-  if (a.length !== b.length) return false; // 길이 다르면 timingSafeEqual이 throw → 방어
+  if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
-// 더미 검증 — 존재하지 않는 아이디에도 scrypt를 돌려 응답시간을 맞춤 (유저 존재 여부 누설 차단)
+// 더미 검증 — 없는 아이디에도 scrypt를 돌려 응답시간을 맞춤 (유저 존재 여부 누설 차단)
 const _DUMMY_HASH = hashPassword('::dummy::');
 function dummyVerify(password) { try { verifyPassword(password || '', _DUMMY_HASH); } catch (_) {} }
 
-// 세션 토큰은 SHA-256 해시로 저장 — sessions.json 유출 시에도 원본 토큰 복원 불가
+// 세션 토큰은 SHA-256 해시로 저장 — DB 유출 시에도 원본 토큰 복원 불가
 function hashToken(token) { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
 
-// ── 원자적 파일 쓰기 (temp → rename) ──
-// 쓰기 도중 크래시로 파일이 절단되면 loadUsers가 {}를 반환 → 전 계정 소실 + 다음 가입자가 admin.
-// temp에 다 쓴 뒤 rename(원자적)하면 절단된 파일이 절대 안 남는다.
+// ── 원자적 파일 쓰기 (user-config용 — fsync + 0600) ──
 function _atomicWrite(file, text) {
   const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
-  // fsync로 내용을 디스크에 확정한 뒤 rename — 정전 시 "rename은 됐는데 내용은 빈 파일"(전 계정 소실) 방지.
-  // mode 0600 — users.json/sessions.json/user-configs는 KIS 토큰 등 민감정보를 담으므로 소유자만 접근.
   let fd;
-  try {
-    fd = fs.openSync(tmp, 'w', 0o600);
-    fs.writeSync(fd, text);
-    fs.fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
+  try { fd = fs.openSync(tmp, 'w', 0o600); fs.writeSync(fd, text); fs.fsyncSync(fd); }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
   try { fs.renameSync(tmp, file); }
-  catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; } // 실패 시 tmp 잔류 제거
+  catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; }
 }
 
-// ── 유저 저장소 ──
+// ── 레거시 JSON 1회 이관 (DB가 비어 있을 때만) ──
+(function migrateLegacy() {
+  if (process.env.AUTH_DB) return; // 테스트 등 DB 경로 지정 시 루트 레거시 JSON을 끌어오지 않음
+  try {
+    const uCount = db.prepare('SELECT COUNT(*) c FROM users').get().c;
+    if (uCount === 0 && fs.existsSync(LEGACY_USERS)) {
+      const users = JSON.parse(fs.readFileSync(LEGACY_USERS, 'utf8'));
+      const ins = db.prepare('INSERT OR IGNORE INTO users (userId,username,passwordHash,createdAt,role) VALUES (?,?,?,?,?)');
+      db.exec('BEGIN');
+      for (const k of Object.keys(users)) { const u = users[k];
+        ins.run(u.userId, u.username || k, u.passwordHash, u.createdAt || '', u.role || 'user'); }
+      db.exec('COMMIT');
+      try { fs.renameSync(LEGACY_USERS, LEGACY_USERS + '.migrated'); } catch (_) {}
+      console.log('[auth] 레거시 users.json 이관 완료');
+    }
+    const sCount = db.prepare('SELECT COUNT(*) c FROM sessions').get().c;
+    if (sCount === 0 && fs.existsSync(LEGACY_SESSIONS)) {
+      const sess = JSON.parse(fs.readFileSync(LEGACY_SESSIONS, 'utf8'));
+      const ins = db.prepare('INSERT OR IGNORE INTO sessions (tokenHash,userId,username,createdAt) VALUES (?,?,?,?)');
+      db.exec('BEGIN');
+      for (const k of Object.keys(sess)) { const s = sess[k];
+        // 해시 키로 저장된 것만 이관 (원본키 레거시는 보안상 폐기 — 재로그인 요구)
+        if (/^[a-f0-9]{64}$/.test(k)) ins.run(k, s.userId, s.username || '', s.createdAt || Date.now()); }
+      db.exec('COMMIT');
+      try { fs.renameSync(LEGACY_SESSIONS, LEGACY_SESSIONS + '.migrated'); } catch (_) {}
+      console.log('[auth] 레거시 sessions.json 이관 완료');
+    }
+  } catch (e) { try { db.exec('ROLLBACK'); } catch (_) {} console.log('[auth] 레거시 이관 보류:', e.message); }
+})();
+
+// ── 유저 저장소 ── (하위호환: {username: {userId, username, role, ...}} 형태 반환)
 function loadUsers() {
-  try {
-    if (fs.existsSync(USERS_FILE)) return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-  } catch(e) {}
-  return {};
-}
-function saveUsers(users) {
-  _atomicWrite(USERS_FILE, JSON.stringify(users, null, 2)); // 원자적 — 절단으로 인한 전 계정 소실 방지
+  const rows = db.prepare('SELECT userId,username,passwordHash,createdAt,role FROM users').all();
+  const out = {};
+  for (const u of rows) out[u.username] = u;
+  return out;
 }
 
-// ── 세션 저장소 ──
-function loadSessions() {
-  try {
-    if (fs.existsSync(SESSIONS_FILE)) return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-  } catch(e) {}
-  return {};
-}
-function saveSessions(s) {
-  _atomicWrite(SESSIONS_FILE, JSON.stringify(s));
-}
-
-// ── 회원가입 ──
+// ── 회원가입 ── (첫 가입자 = admin). UNIQUE + 트랜잭션으로 동시 가입 레이스 방어.
 function register(username, password) {
   username = (username || '').trim().toLowerCase();
   if (!username || !password) return { ok:false, message:'아이디와 비밀번호를 입력하세요' };
   if (username.length < 3) return { ok:false, message:'아이디는 3자 이상이어야 합니다' };
   if (password.length < 8) return { ok:false, message:'비밀번호는 8자 이상이어야 합니다' }; // 실거래 서비스 — 무차별 대입 방어
-  const users = loadUsers();
-  if (users[username]) return { ok:false, message:'이미 존재하는 아이디입니다' };
   const userId = 'u_' + crypto.randomBytes(6).toString('hex');
-  users[username] = {
-    userId, username,
-    passwordHash: hashPassword(password),
-    createdAt: new Date().toISOString(),
-    role: Object.keys(users).length === 0 ? 'admin' : 'user' // 첫 가입자가 관리자
-  };
-  saveUsers(users);
-  return { ok:true, userId, username, role: users[username].role };
+  const createdAt = new Date().toISOString();
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) {
+      db.exec('ROLLBACK'); return { ok:false, message:'이미 존재하는 아이디입니다' };
+    }
+    const count = db.prepare('SELECT COUNT(*) c FROM users').get().c;
+    const role = count === 0 ? 'admin' : 'user'; // 첫 가입자가 관리자
+    db.prepare('INSERT INTO users (userId,username,passwordHash,createdAt,role) VALUES (?,?,?,?,?)')
+      .run(userId, username, hashPassword(password), createdAt, role);
+    db.exec('COMMIT');
+    return { ok:true, userId, username, role };
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch (_) {}
+    if (/UNIQUE/i.test(e.message)) return { ok:false, message:'이미 존재하는 아이디입니다' };
+    return { ok:false, message:'가입 처리 오류' };
+  }
 }
 
 // ── 로그인 ──
 function login(username, password) {
   username = (username || '').trim().toLowerCase();
-  const users = loadUsers();
-  const user = users[username];
-  if (!user) { dummyVerify(password); return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' }; } // 더미 검증 — 타이밍 누설 차단
+  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  if (!user) { dummyVerify(password); return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' }; }
   if (!verifyPassword(password, user.passwordHash)) return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' };
-  // 세션 발급 — 원본 토큰은 쿠키로만 주고, 서버엔 해시만 저장
+  // 세션 발급 — 원본 토큰은 쿠키로만, DB엔 해시만 저장
   const token = crypto.randomBytes(32).toString('hex');
-  const sessions = loadSessions();
-  sessions[hashToken(token)] = { userId: user.userId, username, createdAt: Date.now() };
-  saveSessions(sessions);
+  db.prepare('INSERT INTO sessions (tokenHash,userId,username,createdAt) VALUES (?,?,?,?)')
+    .run(hashToken(token), user.userId, username, Date.now());
   return { ok:true, token, userId: user.userId, username, role: user.role };
 }
 
-// ── 세션 → userId 조회 ──
+// ── 세션 → userId 조회 ── (해시 키로만 조회 — 원본키 폴백 없음)
 function getUserBySession(token) {
   if (!token) return null;
-  const sessions = loadSessions();
   const key = hashToken(token);
-  // 해시 키로만 조회한다. sessions[token](원본키) 폴백을 두면 sessions.json 유출 시
-  // 그 키(해시값)를 쿠키로 그대로 제출해 인증이 통과 → "토큰 해시 저장"의 보호 효과가 0이 된다.
-  const s = sessions[key];
+  const s = db.prepare('SELECT userId,username,createdAt FROM sessions WHERE tokenHash = ?').get(key);
   if (!s) return null;
-  // 30일 만료
-  if (Date.now() - s.createdAt > 30*24*60*60*1000) {
-    delete sessions[key]; delete sessions[token]; saveSessions(sessions); return null;
+  if (Date.now() - s.createdAt > SESSION_TTL) { // 30일 만료
+    db.prepare('DELETE FROM sessions WHERE tokenHash = ?').run(key);
+    return null;
   }
-  return s; // { userId, username }
+  return { userId: s.userId, username: s.username };
 }
 
 // ── 로그아웃 ──
 function logout(token) {
-  const sessions = loadSessions();
-  const key = hashToken(token);
-  let changed = false;
-  if (sessions[key]) { delete sessions[key]; changed = true; }
-  if (sessions[token]) { delete sessions[token]; changed = true; } // 레거시 키
-  if (changed) saveSessions(sessions);
+  if (token) db.prepare('DELETE FROM sessions WHERE tokenHash = ?').run(hashToken(token));
   return { ok:true };
 }
 
-// ── 유저별 KIS 설정 (API 키는 암호화 저장) ──
-function userConfigPath(userId) {
-  return path.join(USER_CONFIG_DIR, `${userId}.json`);
+// ── 만료 세션 일괄 정리 (기동 시 1회) ──
+function purgeExpiredSessions() {
+  try { db.prepare('DELETE FROM sessions WHERE createdAt < ?').run(Date.now() - SESSION_TTL); } catch (_) {}
 }
+purgeExpiredSessions();
+
+// ── 유저별 KIS 설정 (API 키는 암호화 저장, 유저별 개별 파일) ──
+function userConfigPath(userId) { return path.join(USER_CONFIG_DIR, `${userId}.json`); }
 function loadUserConfig(userId) {
   try {
     const p = userConfigPath(userId);
     if (fs.existsSync(p)) {
       const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-      // 복호화해서 반환
       return {
-        __userId: userId, // 소유자 각인 — 어떤 컨텍스트에서 저장하든 올바른 유저 파일로 가게
+        __userId: userId,
         appKey: decrypt(raw.appKey),
         appSecret: decrypt(raw.appSecret),
         accNo: raw.accNo || '',
         txMode: raw.txMode || 'vts',
-        htsId: raw.htsId || '',   // 체결통보 WS 구독용 — 누락 시 체결통보 기능 전체가 침묵 사망
+        htsId: raw.htsId || '',   // 체결통보 WS 구독용
         token: raw.token || '',
         tokenExpiry: raw.tokenExpiry || 0,
         telegramToken: decrypt(raw.telegramToken),
@@ -204,21 +236,19 @@ function loadUserConfig(userId) {
 }
 function saveUserConfig(userId, cfg) {
   const p = userConfigPath(userId);
-  // 디렉터리가 (외부 정리/백업 등으로) 사라졌어도 저장이 깨지지 않게 방어적 생성
   try { if (!fs.existsSync(USER_CONFIG_DIR)) fs.mkdirSync(USER_CONFIG_DIR, { recursive: true }); } catch (e) {}
-  // API 키는 암호화해서 저장
   const toSave = {
     appKey: encrypt(cfg.appKey),
     appSecret: encrypt(cfg.appSecret),
     accNo: cfg.accNo || '',
     txMode: cfg.txMode || 'vts',
-    htsId: cfg.htsId || '',   // 체결통보 WS 구독용 HTS ID (평문 — 민감정보 아님)
+    htsId: cfg.htsId || '',
     token: cfg.token || '',
     tokenExpiry: cfg.tokenExpiry || 0,
     telegramToken: encrypt(cfg.telegramToken),
     telegramChatId: cfg.telegramChatId || ''
   };
-  _atomicWrite(p, JSON.stringify(toSave, null, 2)); // 원자적 — 설정 파일 절단 방지
+  _atomicWrite(p, JSON.stringify(toSave, null, 2));
 }
 
 // ── 쿠키 파싱 ──

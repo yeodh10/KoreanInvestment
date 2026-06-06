@@ -1,7 +1,14 @@
 # API 키 / 민감 정보 - 절대 올리면 안 됨
 kis-config.json
 users.json
+users.json.migrated
 sessions.json
+sessions.json.migrated
+# 인증 SQLite DB (+ WAL 사이드카) · 테스트 임시 DB
+auth.db
+auth.db-wal
+auth.db-shm
+auth.test.db*
 .enckey
 user-configs/
 autotrade-state.json

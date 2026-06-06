@@ -45,6 +45,7 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(userId)');
 
 // ── 레거시 JSON 1회 이관 (DB가 비어 있을 때만) ──
 (function migrateLegacy() {
+  if (process.env.JOURNAL_DB) return; // 테스트 등 DB 경로 지정 시 루트 레거시 JSON을 끌어오지 않음
   try {
     const count = db.prepare('SELECT COUNT(*) c FROM orders').get().c;
     if (count > 0 || !fs.existsSync(LEGACY_JSON)) return;
