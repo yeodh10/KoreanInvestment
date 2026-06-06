@@ -3,8 +3,10 @@
  */
 const path = require('path');
 const fs = require('fs');
-const J_FILE = path.join(__dirname, '..', 'order-journal.json');
-try { fs.unlinkSync(J_FILE); } catch (e) {}
+// 격리된 임시 DB로 테스트 (운영 order-journal.db 오염 방지)
+const DB = path.join(__dirname, '..', 'order-journal.test.db');
+process.env.JOURNAL_DB = DB;
+[DB, DB + '-wal', DB + '-shm'].forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 const J = require(path.join(__dirname, '..', 'order-journal.js'));
 
 let pass = 0, fail = 0;
@@ -41,6 +43,16 @@ ok('체결수량 반영', kk.tot_ccld_qty === '2' && kk.rmn_qty === '0');
 const sold = rows.find(r => r.pdno === '005490');
 ok('취소 표시', sold.cncl_yn === 'Y' && sold._status === '취소');
 
-try { fs.unlinkSync(J_FILE); } catch (e) {}
+// 멀티유저 동시 기록 — 한 유저 기록이 다른 유저 것에 덮여 사라지지 않음(SQLite 원자성)
+const NU = 200;
+for (let i = 0; i < NU; i++) {
+  J.add({ userId: 'mu_a', side: 'buy', code: '000001', qty: 1, price: 100, orderType: '00', odno: 'MA' + i, orgNo: '1', qtyBefore: 0 });
+  J.add({ userId: 'mu_b', side: 'buy', code: '000002', qty: 1, price: 100, orderType: '00', odno: 'MB' + i, orgNo: '1', qtyBefore: 0 });
+}
+ok('멀티유저 대량 기록 무손실 A', J.todayList('mu_a').length === NU);
+ok('멀티유저 대량 기록 무손실 B', J.todayList('mu_b').length === NU);
+ok('유저 격리 — A는 B 주문 안 보임', J.todayList('mu_a').every(e => e.userId === 'mu_a'));
+
+[DB, DB + '-wal', DB + '-shm'].forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
 process.exit(fail ? 1 : 0);

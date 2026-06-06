@@ -10,6 +10,12 @@ autotrade-state-*.json
 autotrade-log-*.json
 data-cache.json
 order-journal.json
+order-journal.json.migrated
+# 주문 저널 SQLite DB (+ WAL 사이드카) · 테스트 임시 DB
+order-journal.db
+order-journal.db-wal
+order-journal.db-shm
+order-journal.test.db*
 
 # Node
 node_modules/

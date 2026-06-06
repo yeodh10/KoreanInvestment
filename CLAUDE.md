@@ -15,7 +15,9 @@ kis-realtime.js   KIS WebSocket 클라이언트 (RFC6455 직접 구현) → SSE 
                   무수신 watchdog(90초), LRU 구독 한도(40), 체결통보 AES 복호화, 유휴 피드 정리
 auth.js           멀티유저 인증. scrypt 해시, AES-256-GCM 설정 암호화, 세션 토큰 SHA-256 저장,
                   원자적 파일 쓰기, 유저별 KIS 설정(user-configs/)
-order-journal.js  주문 저널. 접수/부분체결/체결/취소 추적, 잔고 대조 reconcile, userId 격리
+order-journal.js  주문 저널 (SQLite/node:sqlite, WAL). 접수/부분체결/체결/취소, 잔고 대조 reconcile,
+                  userId 격리. 각 연산이 단일 SQL/트랜잭션 → 멀티유저 동시 쓰기에도 기록 유실 없음.
+                  DB=order-journal.db (env JOURNAL_DB로 재정의, 테스트는 임시 DB). 레거시 JSON 자동 1회 이관.
 data-fallback.js  "빈 화면 금지" 폴백. lastGood 영속 캐시(data-cache.json), 합성 호가 사다리, 환율 폴백
 app.html          단일 파일 프론트 (~3,900줄). 토스 모티브 다크 UI, Pretendard+tabular-nums
 tests/            engine(17)·realtime(20)·fallback(21)·journal(13) = 71개. node tests/xxx-test.js
@@ -34,7 +36,7 @@ node tests/engine-test.js && node tests/realtime-test.js && node tests/fallback-
 
 **⚠️ git에 없는 민감 파일 — 옛 PC에서 수동 복사 필요 (.gitignore 목록):**
 `users.json`(계정) · `sessions.json`(세션) · `.enckey`(암호화 키 — **이거 없으면 user-configs 복호화 불가**) ·
-`user-configs/`(유저별 KIS 키·자동매매 상태·**botPositions**) · `order-journal.json`(주문 기록) ·
+`user-configs/`(유저별 KIS 키·자동매매 상태·**botPositions**) · `order-journal.db`(주문 기록 SQLite) ·
 `data-cache.json`(캐시 워밍). 안 가져오면: 재가입(첫 가입자=admin) + KIS 키 재입력 + botPositions 재등록 필요.
 
 서버 타임존 무관하게 동작하도록 설계됨(KST는 epoch+9h 계산). 단 콘솔 로그의 `toLocaleTimeString`은
