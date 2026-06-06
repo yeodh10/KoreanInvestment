@@ -401,7 +401,7 @@ td.mono,th.mono{font-family:var(--mono)}
 <!-- ══ 헤더 ══ -->
 <header id="header">
   <button id="menuToggle" onclick="toggleSidebar()" aria-label="메뉴">☰</button>
-  <div class="logo" onclick="showPage('dashboard')" style="cursor:pointer"><div class="logo-dot"></div>AutoTrade KR</div>
+  <div class="logo" onclick="goHome()" style="cursor:pointer"><div class="logo-dot"></div>AutoTrade KR</div>
   <div class="hdr-search">
     <span class="si">🔍</span>
     <input type="text" id="globalSearch" name="stock-search-nofill" placeholder="종목명 또는 코드 검색" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="onGlobalSearch()" onkeydown="onGlobalSearchKey(event)">
@@ -1571,6 +1571,17 @@ document.addEventListener('click', e => {
 // ══════════════════════════════════════════════════════
 let currentPage = 'dashboard';
 function toggleSidebar(){ const s=$('sidebar'); if(s) s.classList.toggle('open'); }
+// 로고 클릭 — 대시보드로 이동하면서 데이터 새로고침 (현재 종목·계좌·관심종목·실시간 즉시 재조회)
+function goHome(){
+  showPage('dashboard');
+  if(proxyOnline){
+    loadStock(currentCode);   // 차트·현재가·호가·체결/뉴스/수급 재조회
+    loadAccount();            // 총자산·매수가능금액
+    renderDashWatchlist();    // 관심종목 가격
+    refreshLive();            // 실시간/지수/자동매매 로그
+  }
+  showToast('새로고침했어요','info');
+}
 // 모드 배지 색 — 실전은 빨강(긴장), 모의는 파랑
 function applyModeBadge(el, mode){
   if(!el) return;
