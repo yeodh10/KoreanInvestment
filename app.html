@@ -296,6 +296,7 @@ td.mono,th.mono{font-family:var(--mono)}
   #menuToggle{display:inline-flex !important}
   .dash-grid{grid-template-columns:1fr;height:auto}
   .page-body{padding:12px}
+  #acctSummary{grid-template-columns:repeat(2,1fr) !important}
 }
 #menuToggle{display:none;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:none;color:var(--text-1);font-size:20px;cursor:pointer;border-radius:8px}
 #menuToggle:hover{background:var(--bg-2)}
@@ -468,16 +469,18 @@ td.mono,th.mono{font-family:var(--mono)}
   <div class="page-body" style="height:100%">
     <div class="dash-grid">
       <div class="dash-main">
-        <!-- 계좌 요약 (최상단) -->
-        <div class="pf-stats" style="grid-template-columns:1.4fr 1fr 1fr">
+        <!-- 계좌 종합 (최상단) -->
+        <div class="pf-stats" id="acctSummary" style="grid-template-columns:1.7fr 1fr 1fr 1fr 0.8fr">
           <div class="pf-stat"><!-- 토스식: 총 자산 + 평가손익(수익률)을 같은 줄 오른쪽에 -->
             <div class="lbl">총 자산</div>
-            <div style="display:flex;align-items:baseline;gap:8px">
+            <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
               <div class="val" id="pfTotal" style="font-size:20px">—</div>
               <div class="sub" id="pfPnl" style="font-size:12.5px;font-weight:600;font-family:var(--mono)">—</div>
             </div>
           </div>
-          <div class="pf-stat"><div class="lbl">매입금액</div><div class="val" id="pfPrincipal2">—</div></div>
+          <div class="pf-stat"><div class="lbl">예수금</div><div class="val" id="acCash" style="font-size:16px">—</div><div class="sub" id="acD2" style="font-size:10px;color:var(--text-3)">—</div></div>
+          <div class="pf-stat"><div class="lbl">매수가능 금액</div><div class="val" id="acBuyable" style="font-size:16px">—</div></div>
+          <div class="pf-stat"><div class="lbl">매입원금</div><div class="val" id="pfPrincipal2" style="font-size:16px">—</div></div>
           <div class="pf-stat"><div class="lbl">보유종목</div><div class="val" id="pfHold">—</div></div>
         </div>
         <div class="panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
@@ -652,7 +655,7 @@ td.mono,th.mono{font-family:var(--mono)}
               <span class="mono" id="dashBuyAvail" style="color:var(--text-0);font-weight:700">—</span>
             </div>
             <div style="display:flex;gap:6px">
-              <input class="form-input" id="dashOrderPrice" type="number" placeholder="가격(빈칸=시장가)" style="flex:1;font-size:12px" oninput="updateDashAffordable()">
+              <input class="form-input" id="dashOrderPrice" type="number" placeholder="가격(빈칸=시장가)" style="flex:1;font-size:12px" oninput="updateDashAffordable();refreshBuyableSoon()">
               <input class="form-input" id="dashOrderQty" type="number" placeholder="수량" style="width:78px;font-size:12px">
             </div>
             <div id="dashAffordable" style="font-size:10px;color:var(--text-3)"></div>
@@ -1617,6 +1620,7 @@ async function loadStock(code) {
   const name = nameOf(code);
   currentCode = code; currentName = name;
   const seq = ++_stockSeq;
+  _buyMaxQty = 0; // 종목 바뀌면 이전 종목 최대수량 초기화(새 조회 전까지 오표시 방지)
   LS.set('lastStock', code); // 마지막 본 종목 기억 — 새로고침해도 차트 유지
   showPage('dashboard');
 
@@ -1659,6 +1663,7 @@ async function loadStock(code) {
       setText('infoHi', d.hi52 ? '₩'+d.hi52.toLocaleString() : '—');
       currentPrevClose = Math.round((d.price||0) - (d.change||0));
       _dashCurPrice = d.price||0; updateDashAffordable(); // 매수가능 수량 안내 갱신
+      refreshBuyable(); // 이 종목 기준 정확한 매수가능 금액·수량 조회
       setText('infoLo', d.lo52 ? '₩'+d.lo52.toLocaleString() : '—');
     }
   }
@@ -2117,7 +2122,7 @@ async function dashOrder(side) {
     const r = await apiPost('/api/order', { side, code, qty:v.q, price:v.p, orderType:type });
     if (r?.ok && r.data?.rt_cd==='0') {
       show('var(--blue-dim)','var(--blue)',`✅ ${side==='buy'?'매수':'매도'} ${v.q}주 접수`);
-      loadAccount();
+      loadAccount(); setTimeout(refreshBuyable, 1200); // 주문 후 매수가능 금액 갱신
     } else {
       show('var(--red-dim)','var(--red)','❌ '+(r?.data?.msg1||r?.message||'주문 실패'));
     }
@@ -2307,10 +2312,12 @@ function applyAccount(data) {
   const s = (r.data.output2 && r.data.output2[0]) || {};
   const principal = parseInt(s.pchs_amt_smtl_amt||0);
   const cash = parseInt(s.dnca_tot_amt||s.prvs_rcdl_excc_amt||0);
+  const d2 = parseInt(s.prvs_rcdl_excc_amt||0); // D+2 가수도정산금액(실제 출금/결제 기준)
   const pnl = parseInt(s.evlu_pfls_smtl_amt||0);
-  // 매수가능 금액(주문가능현금) — 주문가능현금 필드 우선, 없으면 예수금
-  _buyAvailCash = parseInt(s.nrcvb_buy_amt||s.ord_psbl_cash||0) || cash;
-  setText('dashBuyAvail', '₩'+_buyAvailCash.toLocaleString());
+  // 예수금/ D+2 정산금 표시 (잔고조회 기준). 매수가능 금액은 별도 매수가능조회 API(refreshBuyable)가 정확히 채움.
+  setText('acCash', '₩'+cash.toLocaleString());
+  setText('acD2', d2 ? 'D+2 ₩'+d2.toLocaleString() : '');
+  if (!_buyAvailCash) { _buyAvailCash = cash; setText('dashBuyAvail','₩'+cash.toLocaleString()); setText('acBuyable','₩'+cash.toLocaleString()); } // 첫 페인트 폴백(정확값 도착 전)
   updateDashAffordable();
   // 총자산: 총평가금액 → 없으면 순자산 → 그래도 없으면 예수금(보유 없이 현금만 있을 때 시드머니)
   const totalAsset = parseInt(s.tot_evlu_amt||0) || parseInt(s.nass_amt||0) || cash;
@@ -2436,15 +2443,31 @@ async function fetchPrice() {
   if(p>0){ $('orderPrice').value=p; updateTotal(); }
 }
 let _holdingsByCode = {}; // 코드→보유수량 (매도 비율 버튼용)
-let _buyAvailCash = 0;    // 매수가능 금액(주문가능현금)
+let _buyAvailCash = 0;    // 매수가능 금액(주문가능현금) — 매수가능조회 API 기준
+let _buyMaxQty = 0;       // 매수가능조회가 알려준 최대 매수 수량(증거금 반영)
 let _dashCurPrice = 0;    // 현재 보고 있는 종목의 현재가
+// ★ 정확한 매수가능 금액·수량 — 매수가능조회(inquire-psbl-order) 기준 (예수금과 다름)
+let _buyableTimer = null;
+function refreshBuyableSoon(){ clearTimeout(_buyableTimer); _buyableTimer = setTimeout(refreshBuyable, 350); } // 가격 입력 디바운스
+async function refreshBuyable(){
+  if(!proxyOnline || !currentCode) return;
+  const price = parseInt($('dashOrderPrice')?.value||0) || _dashCurPrice || 0;
+  const r = await api(`/api/buyable?code=${currentCode}${price>0?'&price='+price:''}`);
+  if(r?.ok && r.data && (r.data.cash>0 || r.data.maxQty>0)){
+    _buyAvailCash = r.data.cash||0;
+    _buyMaxQty = r.data.maxQty||0;
+    setText('dashBuyAvail', _buyAvailCash>0?'₩'+_buyAvailCash.toLocaleString():'—');
+    setText('acBuyable', _buyAvailCash>0?'₩'+_buyAvailCash.toLocaleString():'—');
+  }
+  updateDashAffordable();
+}
 // 대시보드: 매수가능 금액 + 현재 가격으로 살 수 있는 최대 수량 안내
 function updateDashAffordable(){
   const el=$('dashAffordable'); if(!el) return;
   const price = parseInt($('dashOrderPrice')?.value||0) || _dashCurPrice || currentPrevClose || 0;
-  if(_buyAvailCash>0 && price>0){
-    el.textContent = `최대 약 ${Math.floor(_buyAvailCash/price).toLocaleString()}주 매수 가능 (₩${price.toLocaleString()} 기준)`;
-  } else { el.textContent=''; }
+  // 매수가능조회가 준 maxQty 우선(증거금 반영), 없으면 현금÷가격 근사
+  const maxQty = _buyMaxQty>0 ? _buyMaxQty : (_buyAvailCash>0 && price>0 ? Math.floor(_buyAvailCash/price) : 0);
+  el.textContent = maxQty>0 ? `최대 ${maxQty.toLocaleString()}주 매수 가능${price>0?` (₩${price.toLocaleString()} 기준)`:''}` : '';
 }
 function setRatio(ratio) {
   if (orderSide === 'sell') {

@@ -1833,6 +1833,28 @@ async function handleRequest(req, res, session) {
       return;
     }
 
+    // GET /api/buyable?code=005930&price=70000 — 매수가능조회 (정확한 주문가능현금·최대수량)
+    // inquire-balance의 예수금과 달리 미수·증거금·미결제를 반영한 실제 주문가능액.
+    if (pathname === '/api/buyable') {
+      const code = query.code || '005930';
+      const price = parseInt(query.price || 0);
+      const trId = cfg.txMode === 'vts' ? 'VTTC8908R' : 'TTTC8908R';
+      const [cano, prd] = (cfg.accNo || '').split('-');
+      try {
+        const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-psbl-order', trId, {
+          CANO: cano || '', ACNT_PRDT_CD: prd || '01', PDNO: code,
+          ORD_UNPR: String(price || 0), ORD_DVSN: price > 0 ? '00' : '01', // 가격 있으면 지정가, 없으면 시장가 기준
+          CMA_EVLU_AMT_ICLD_YN: 'N', OVRS_ICLD_YN: 'N'
+        }, 'high');
+        const o = r.body?.output || {};
+        jsonRes(res, 200, { ok: r.body?.rt_cd === '0', data: {
+          cash: parseInt(o.ord_psbl_cash || o.nrcvb_buy_amt || 0),  // 주문가능현금
+          maxQty: parseInt(o.max_buy_qty || o.nrcvb_buy_qty || 0)    // 최대 매수 가능 수량
+        }, msg: r.body?.msg1 });
+      } catch (e) { jsonRes(res, 200, { ok: false, message: e.message }); }
+      return;
+    }
+
     // POST /api/order — 주문
     if (pathname === '/api/order' && req.method === 'POST') {
       const body = await parseBody(req);
