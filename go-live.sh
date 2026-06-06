@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# go-live.sh — 서버 + Cloudflare 터널을 함께 띄워 공개 URL을 만든다.
-#  - 서버는 127.0.0.1에만 바인딩(직접 노출 차단), 외부 접속은 HTTPS 터널로만.
-#  - 무계정 quick tunnel: 실행할 때마다 랜덤 *.trycloudflare.com 주소가 새로 발급된다.
-# 중지: Ctrl+C  (서버·터널 모두 종료)
+# go-live.sh — 서버를 띄우고 Tailscale Funnel 고정 주소로 공개한다.
+#  - 서버는 127.0.0.1에만 바인딩(직접 노출 차단), 외부 접속은 HTTPS Funnel로만.
+#  - 주소는 고정: https://kis.tail8eca6a.ts.net (재시작·재부팅해도 동일)
+#  - 사전 1회 설정(이미 완료됨): tailscale up 로그인 + tailscale funnel --bg 3000
+#  - 클라이언트 IP는 X-Forwarded-For 신뢰(TRUSTED_PROXY=tailscale 기본).
+#    Cloudflare 터널로 되돌리면 TRUSTED_PROXY=cloudflare 로 실행할 것.
+# 중지: Ctrl+C (서버만 종료 — Funnel 설정은 tailscaled에 남아 있어 무해)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 PORT="${PORT:-3000}"
 SRV_LOG="/tmp/kis-server.log"
-TUN_LOG="/tmp/kis-tunnel.log"
 
-cleanup() { echo; echo "🛑 종료 중..."; kill "${SRV_PID:-0}" "${TUN_PID:-0}" 2>/dev/null || true; }
+cleanup() { echo; echo "🛑 종료 중..."; kill "${SRV_PID:-0}" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 echo "▶ 서버 시작 (127.0.0.1:$PORT, KST)"
@@ -26,25 +28,22 @@ for i in $(seq 1 30); do
   if [ "$i" = "30" ]; then echo "❌ 서버가 뜨지 않음 — $SRV_LOG 확인"; cat "$SRV_LOG"; exit 1; fi
 done
 
-echo "▶ Cloudflare 터널 시작..."
-cloudflared tunnel --url "http://127.0.0.1:$PORT" >"$TUN_LOG" 2>&1 &
-TUN_PID=$!
+# Tailscale Funnel 점검 (꺼져 있으면 자동 활성화)
+if ! tailscale funnel status 2>/dev/null | grep -q "Funnel on"; then
+  echo "▶ Funnel 비활성 — 활성화 시도..."
+  tailscale funnel --bg "$PORT" \
+    || { echo "❌ Funnel 활성화 실패 — 'tailscale up' 로그인 상태 확인"; exit 1; }
+fi
 
-# 공개 URL 추출 (최대 30초 대기)
-URL=""
-for i in $(seq 1 60); do
-  URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$TUN_LOG" | head -1 || true)
-  [ -n "$URL" ] && break
-  sleep 0.5
-done
+URL=$(tailscale funnel status 2>/dev/null | grep -Eo 'https://[a-z0-9.-]+\.ts\.net' | head -1 || true)
+[ -n "$URL" ] && echo "$URL" > CURRENT-URL.txt
 
 echo
 echo "════════════════════════════════════════════════════"
 if [ -n "$URL" ]; then
-  echo "  🌐 공개 주소:  $URL"
-  echo "  ⚠️  첫 가입자가 admin이 됩니다 — 접속 즉시 본인 계정부터 가입하세요!"
+  echo "  🌐 고정 공개 주소:  $URL"
 else
-  echo "  ❌ URL 추출 실패 — $TUN_LOG 확인"
+  echo "  ❌ Funnel 주소 확인 실패 — 'tailscale funnel status' 확인"
 fi
 echo "  중지: Ctrl+C"
 echo "════════════════════════════════════════════════════"

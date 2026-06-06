@@ -753,13 +753,19 @@ function isAdminSession(session) {
 }
 
 // ── 실제 클라이언트 IP ──
-// 터널/리버스 프록시(Cloudflare) 뒤에서는 socket.remoteAddress가 항상 127.0.0.1이라
+// 터널/리버스 프록시 뒤에서는 socket.remoteAddress가 항상 127.0.0.1이라
 // 모든 사용자가 한 IP로 합쳐진다 → 가입/로그인 제한이 전체에 걸리는 사고.
-// Cloudflare가 넣어주는 CF-Connecting-IP(없으면 X-Forwarded-For 첫 IP)를 우선 사용.
-// 서버는 127.0.0.1 바인딩이라 이 헤더의 출처는 신뢰된 터널뿐(외부 위조 불가).
+// 어떤 헤더를 신뢰할지는 앞단 프록시 종류에 따라 다르다 (TRUSTED_PROXY env):
+//  - tailscale(기본): Funnel이 X-Forwarded-For를 진짜 IP로 "덮어씀" → XFF만 신뢰.
+//    CF-Connecting-IP는 방문자가 그대로 위조 가능하므로 절대 보면 안 됨(실측 확인, 2026-06-06).
+//  - cloudflare: CF가 CF-Connecting-IP를 덮어씀 → 그걸 우선 신뢰.
+// 서버는 127.0.0.1 바인딩이라 헤더 출처는 신뢰된 터널뿐.
+const TRUSTED_PROXY = (process.env.TRUSTED_PROXY || 'tailscale').toLowerCase();
 function clientIp(req) {
-  const cf = req.headers['cf-connecting-ip'];
-  if (cf) return cf.trim();
+  if (TRUSTED_PROXY === 'cloudflare') {
+    const cf = req.headers['cf-connecting-ip'];
+    if (cf) return cf.trim();
+  }
   const xff = req.headers['x-forwarded-for'];
   if (xff) return xff.split(',')[0].trim();
   return (req.socket && req.socket.remoteAddress) || 'unknown';

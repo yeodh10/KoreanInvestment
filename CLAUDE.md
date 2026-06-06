@@ -69,6 +69,9 @@ node tests/engine-test.js && node tests/realtime-test.js && node tests/fallback-
    (매입금액 메인)·호가창 현재가 중앙·뉴스 균일 행+시장뉴스 7:3 혼합·Pretendard 폰트·캐시 첫 페인트
 6. **포지션 소유권 분리** (위 3절)
 7. **멀티유저 하드닝 M1~M5** (위 3절) + 리눅스 호환(KST 자정)
+8. **고정 주소 전환 (06-06)**: Cloudflare quick tunnel → **Tailscale Funnel** `https://kis.tail8eca6a.ts.net`.
+   `clientIp()` 신뢰 헤더를 `TRUSTED_PROXY` env로 분기(기본 tailscale=XFF) — Tailscale 뒤에서
+   CF-Connecting-IP는 방문자 위조가 그대로 통과함을 실측 확인하고 수정. DEPLOY.md 참고.
 
 ## 5. 백로그 (우선순위순)
 
