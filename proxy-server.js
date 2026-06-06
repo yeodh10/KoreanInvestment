@@ -837,9 +837,9 @@ function serveStatic(res, filepath) {
 // 원칙: 캐시값이 있으면 신선/만료 상관없이 "즉시" 반환하고, 만료됐으면 백그라운드(low)로
 //       갱신만 트리거한다(응답을 기다리지 않음). 캐시가 비어 있을 때만 동기 fetch(high).
 //       → 사용자를 절대 기다리게 하지 않는다.
-const SWR_TTL = { price: 5000, acct: 2000, market: 30000, vol: 90000 };
+const SWR_TTL = { price: 5000, acct: 2000, market: 30000, vol: 90000, stockinfo: 2500, ob: 1500, tick: 2500 };
 // 진행 중 백그라운드 갱신 중복 방지 (low 우선순위 갱신에만 적용; high는 항상 즉시 실행)
-const _bgRefreshing = { price: {}, acct: {}, market: false, vol: false };
+const _bgRefreshing = { price: {}, acct: {}, market: false, vol: false, stockinfo: {}, ob: {}, tick: {} };
 
 // ── 단일 종목 현재가 → global._priceCache 갱신 ──
 async function refreshPrice(cfg, code, priority = 'low') {
@@ -886,6 +886,101 @@ async function refreshPrice(cfg, code, priority = 'low') {
     return data;
   } catch (e) { return global._priceCache[code]?.data || null; }
   finally { if (priority === 'low') _bgRefreshing.price[code] = false; }
+}
+
+// ── 종목 기본정보 → global._stockinfoCache[code] 갱신 (SWR) ──
+async function refreshStockinfo(cfg, code, priority = 'low') {
+  if (priority === 'low') { if (_bgRefreshing.stockinfo[code]) return global._stockinfoCache?.[code]?.resp || null; _bgRefreshing.stockinfo[code] = true; }
+  if (!global._stockinfoCache) global._stockinfoCache = {};
+  try {
+    const priceR = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+      FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+    }, priority);
+    const p = priceR.body?.output || {};
+    let data = {
+      code, name: p.hts_kor_isnm || codeToNameLookup(code) || code,
+      price: parseInt(p.stck_prpr||0), change: parseInt(p.prdy_vrss||0), changePct: parseFloat(p.prdy_ctrt||0),
+      sign: p.prdy_vrss_sign, open: parseInt(p.stck_oprc||0), high: parseInt(p.stck_hgpr||0), low: parseInt(p.stck_lwpr||0),
+      vol: parseInt(p.acml_vol||0), amount: parseInt(p.acml_tr_pbmn||0), marketCap: parseInt(p.hts_avls||0),
+      per: parseFloat(p.per||0), pbr: parseFloat(p.pbr||0), eps: parseFloat(p.eps||0),
+      hi52: parseInt(p.w52_hgpr||p.stck_mxpr||0), lo52: parseInt(p.w52_lwpr||p.stck_llam||0), rt_cd: priceR.body?.rt_cd
+    };
+    if (data.price > 0) { fb.save('stockinfo:' + code, data); }
+    else {
+      const last = fb.get('stockinfo:' + code);
+      if (last && last.price > 0) data = { ...last, stale: true };
+      else { try { const candles = await fetchChart(cfg, code, 'D'); const n = candles?.length||0;
+        if (n) { const c1=candles[n-1].close, c0=n>1?candles[n-2].close:c1; data.price=c1; data.change=c1-c0;
+          data.changePct=c0?Math.round((c1-c0)/c0*10000)/100:0; data.sign=c1>=c0?'2':'5'; data.stale=true; } } catch(_){} }
+    }
+    const resp = { data };
+    global._stockinfoCache[code] = { t: Date.now(), resp };
+    return resp;
+  } catch (e) { return global._stockinfoCache?.[code]?.resp || null; }
+  finally { if (priority === 'low') _bgRefreshing.stockinfo[code] = false; }
+}
+
+// ── 호가 → global._obCache[code] 갱신 (SWR, 빈 호가 폴백 포함) ──
+async function refreshOrderbook(cfg, code, priority = 'low') {
+  if (priority === 'low') { if (_bgRefreshing.ob[code]) return global._obCache?.[code]?.resp || null; _bgRefreshing.ob[code] = true; }
+  if (!global._obCache) global._obCache = {};
+  try {
+    const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn', 'FHKST01010200', {
+      FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+    }, priority);
+    let resp;
+    if (!fb.isOrderbookEmpty(result.body?.output1)) {
+      fb.save('ob:' + code, result.body); resp = { data: result.body };
+    } else {
+      const lastOb = fb.get('ob:' + code);
+      if (lastOb) resp = { data: lastOb, cached: true };
+      else {
+        let basePrice = global._priceCache?.[code]?.data?.price || global._priceCache?.[code]?.data?.prev || 0;
+        if (!basePrice) basePrice = (fb.get('stockinfo:' + code) || {}).price || 0;
+        if (!basePrice) { try { const cs = await fetchChart(cfg, code, 'D'); basePrice = cs?.[cs.length-1]?.close || 0; } catch(_){} }
+        const ladder = fb.buildLadder(basePrice);
+        resp = ladder ? { data: { output1: ladder, rt_cd: '0' }, synthetic: true } : { data: result.body };
+      }
+    }
+    global._obCache[code] = { t: Date.now(), resp };
+    return resp;
+  } catch (e) { return global._obCache?.[code]?.resp || null; }
+  finally { if (priority === 'low') _bgRefreshing.ob[code] = false; }
+}
+
+// ── 당일 체결 → global._tickCache[code] 갱신 (SWR). cached=이전 거래일 데이터 표시용 ──
+async function refreshTick(cfg, code, priority = 'low') {
+  if (priority === 'low') { if (_bgRefreshing.tick[code]) return global._tickCache?.[code]?.resp || null; _bgRefreshing.tick[code] = true; }
+  if (!global._tickCache) global._tickCache = {};
+  try {
+    const r = await withRetry(() => kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-ccnl', 'FHKST01010300', {
+      FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+    }, priority), `체결:${code}`);
+    const rows = r.body?.output || [];
+    let resp;
+    if (rows.length) { fb.save('tick:' + code, r.body); resp = { data: r.body }; }
+    else {
+      const last = fb.get('tick:' + code);
+      if (last) resp = { data: last, cached: true };
+      else {
+        try {
+          const mc = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', 'FHKST03010200', {
+            FID_ETC_CLS_CODE: '', FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code, FID_INPUT_HOUR_1: '153000', FID_PW_DATA_INCU_YN: 'Y'
+          }, priority);
+          const bars = mc.body?.output2 || [];
+          if (bars.length) {
+            const synth = bars.slice(0, 50).map(b => ({ stck_cntg_hour: b.stck_cntg_hour||'', stck_prpr: b.stck_prpr, cntg_vol: b.cntg_vol, acml_vol: b.acml_vol||'0' }));
+            const payload = { output: synth, rt_cd: '0' };
+            fb.save('tick:' + code, payload); resp = { data: payload, cached: true, synthetic: true };
+          }
+        } catch (_) {}
+        if (!resp) resp = { data: r.body, cached: false };
+      }
+    }
+    global._tickCache[code] = { t: Date.now(), resp };
+    return resp;
+  } catch (e) { return global._tickCache?.[code]?.resp || null; }
+  finally { if (priority === 'low') _bgRefreshing.tick[code] = false; }
 }
 
 // ── 계좌 잔고 → global._acctCache[userKey] 갱신 ──
@@ -1677,64 +1772,19 @@ async function handleRequest(req, res, session) {
       return;
     }
 
-    // GET /api/stockinfo?code=005930 — 종목 기본 정보 (증권사 상세 화면용)
+    // GET /api/stockinfo?code=005930 — 종목 기본 정보 (SWR: 캐시 즉시 + 백그라운드 갱신)
     if (pathname === '/api/stockinfo') {
       const code = query.code || '005930';
-      try {
-        // 현재가는 필수. 종목상세(CTPF1002R)는 모의투자에서 자주 실패 → 실패해도 현재가는 살림
-        const priceR = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
-          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
-        }, 'high');
-        // 종목상세(CTPF1002R)는 모의투자에서 무응답이 잦아 호출당 10초씩 낭비 → 제거.
-        // 이름은 현재가 응답(hts_kor_isnm) 또는 로컬 종목 마스터에서 가져온다.
-        const p = priceR.body?.output || {};
-        const i = { prdt_name: codeToNameLookup(code) };
-        let data = {
-          code,
-          name: p.hts_kor_isnm || i.prdt_name || code,
-          price: parseInt(p.stck_prpr||0),
-          change: parseInt(p.prdy_vrss||0),
-          changePct: parseFloat(p.prdy_ctrt||0),
-          sign: p.prdy_vrss_sign,
-          open: parseInt(p.stck_oprc||0),
-          high: parseInt(p.stck_hgpr||0),
-          low: parseInt(p.stck_lwpr||0),
-          vol: parseInt(p.acml_vol||0),
-          amount: parseInt(p.acml_tr_pbmn||0),
-          marketCap: parseInt(p.hts_avls||0),
-          per: parseFloat(p.per||0),
-          pbr: parseFloat(p.pbr||0),
-          eps: parseFloat(p.eps||0),
-          hi52: parseInt(p.w52_hgpr||p.stck_mxpr||0),
-          lo52: parseInt(p.w52_lwpr||p.stck_llam||0),
-          rt_cd: priceR.body?.rt_cd
-        };
-        if (data.price > 0) {
-          fb.save('stockinfo:' + code, data); // 마지막 정상 데이터 보관
-        } else {
-          // 가격 0 (장전/빈 응답) — ① 마지막 정상 데이터 ② 일봉 종가 순으로 폴백 (₩0 표시 금지)
-          const last = fb.get('stockinfo:' + code);
-          if (last && last.price > 0) {
-            data = { ...last, stale: true };
-          } else {
-            try {
-              const candles = await fetchChart(cfg, code, 'D');
-              const n = candles?.length || 0;
-              if (n) {
-                const c1 = candles[n-1].close, c0 = n > 1 ? candles[n-2].close : c1;
-                data.price = c1;
-                data.change = c1 - c0;
-                data.changePct = c0 ? Math.round((c1-c0)/c0*10000)/100 : 0;
-                data.sign = c1 >= c0 ? '2' : '5';
-                data.stale = true;
-              }
-            } catch(_) {}
-          }
-        }
-        jsonRes(res, 200, { ok: true, data });
-      } catch(e) {
-        jsonRes(res, 500, { ok: false, message: e.message });
+      if (!global._stockinfoCache) global._stockinfoCache = {};
+      const c = global._stockinfoCache[code];
+      if (c) { // 캐시 있으면 0ms 응답, 만료면 백그라운드만 갱신
+        jsonRes(res, 200, { ok: true, ...c.resp });
+        if (Date.now() - c.t >= SWR_TTL.stockinfo) refreshStockinfo(cfg, code, 'low');
+        return;
       }
+      const resp = await refreshStockinfo(cfg, code, 'high'); // 캐시 없을 때만 동기
+      if (resp) jsonRes(res, 200, { ok: true, ...resp });
+      else jsonRes(res, 500, { ok: false, message: '조회 실패' });
       return;
     }
 
@@ -1751,26 +1801,19 @@ async function handleRequest(req, res, session) {
       return;
     }
 
-    // GET /api/orderbook?code=005930 — 호가창 (빈 호가 시 폴백)
+    // GET /api/orderbook?code=005930 — 호가창 (SWR: 캐시 즉시 + 백그라운드 갱신, 빈 호가 폴백)
     if (pathname === '/api/orderbook') {
       const obc = query.code || '005930';
-      const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn', 'FHKST01010200', {
-        FID_COND_MRKT_DIV_CODE: 'J',
-        FID_INPUT_ISCD: obc
-      }, 'high');
-      if (!fb.isOrderbookEmpty(result.body?.output1)) {
-        fb.save('ob:' + obc, result.body); // 마지막 정상 호가 보관
-        jsonRes(res, 200, { ok: true, data: result.body });
+      if (!global._obCache) global._obCache = {};
+      const c = global._obCache[obc];
+      if (c) {
+        jsonRes(res, 200, { ok: true, ...c.resp });
+        if (Date.now() - c.t >= SWR_TTL.ob) refreshOrderbook(cfg, obc, 'low');
         return;
       }
-      // 빈 호가 — ① 마지막 정상 호가 ② 마지막 가격 기준 호가 사다리 (빈 화면 금지)
-      const lastOb = fb.get('ob:' + obc);
-      if (lastOb) { jsonRes(res, 200, { ok: true, data: lastOb, cached: true }); return; }
-      let basePrice = global._priceCache?.[obc]?.data?.price || global._priceCache?.[obc]?.data?.prev || 0;
-      if (!basePrice) basePrice = (fb.get('stockinfo:' + obc) || {}).price || 0;
-      if (!basePrice) { try { const cs = await fetchChart(cfg, obc, 'D'); basePrice = cs?.[cs.length-1]?.close || 0; } catch(_) {} }
-      const ladder = fb.buildLadder(basePrice);
-      jsonRes(res, 200, { ok: true, data: ladder ? { output1: ladder, rt_cd: '0' } : result.body, synthetic: !!ladder });
+      const resp = await refreshOrderbook(cfg, obc, 'high');
+      if (resp) jsonRes(res, 200, { ok: true, ...resp });
+      else jsonRes(res, 200, { ok: true, data: { rt_cd: '1' } });
       return;
     }
 
@@ -1866,42 +1909,19 @@ async function handleRequest(req, res, session) {
       return;
     }
 
-    // GET /api/tick?code=005930 — 당일 체결 내역
+    // GET /api/tick?code=005930 — 당일 체결 내역 (SWR: 캐시 즉시 + 백그라운드 갱신)
     if (pathname === '/api/tick') {
       const code = query.code || '005930';
-      const r = await withRetry(() =>
-        kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-ccnl', 'FHKST01010300', {
-          FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
-        }, 'high')
-      , `체결:${code}`);
-      const tickRows = r.body?.output || [];
-      if (tickRows.length) {
-        fb.save('tick:' + code, r.body); // 마지막 체결 내역 보관 (재시작에도 유지)
-        jsonRes(res, 200, { ok: true, data: r.body });
-      } else {
-        // 장전/장마감 — 빈 화면 대신 마지막 거래 내역 표시
-        const last = fb.get('tick:' + code);
-        if (last) { jsonRes(res, 200, { ok: true, data: last, cached: true }); return; }
-        // lastGood조차 없으면(새 PC 등) 당일 분봉으로 체결 형태 합성 — 장마감에도 데이터 표시
-        try {
-          const mc = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', 'FHKST03010200', {
-            FID_ETC_CLS_CODE: '', FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code,
-            FID_INPUT_HOUR_1: '153000', FID_PW_DATA_INCU_YN: 'Y'
-          }, 'high');
-          const bars = mc.body?.output2 || [];
-          if (bars.length) {
-            const synth = bars.slice(0, 50).map(b => ({
-              stck_cntg_hour: b.stck_cntg_hour || '', stck_prpr: b.stck_prpr,
-              cntg_vol: b.cntg_vol, acml_vol: b.acml_vol || '0'
-            }));
-            const payload = { output: synth, rt_cd: '0' };
-            fb.save('tick:' + code, payload);
-            jsonRes(res, 200, { ok: true, data: payload, cached: true, synthetic: true });
-            return;
-          }
-        } catch (_) {}
-        jsonRes(res, 200, { ok: true, data: r.body, cached: false });
+      if (!global._tickCache) global._tickCache = {};
+      const c = global._tickCache[code];
+      if (c) {
+        jsonRes(res, 200, { ok: true, ...c.resp });
+        if (Date.now() - c.t >= SWR_TTL.tick) refreshTick(cfg, code, 'low');
+        return;
       }
+      const resp = await refreshTick(cfg, code, 'high');
+      if (resp) jsonRes(res, 200, { ok: true, ...resp });
+      else jsonRes(res, 200, { ok: true, data: { rt_cd: '1' }, cached: false });
       return;
     }
 

@@ -1571,17 +1571,8 @@ document.addEventListener('click', e => {
 // ══════════════════════════════════════════════════════
 let currentPage = 'dashboard';
 function toggleSidebar(){ const s=$('sidebar'); if(s) s.classList.toggle('open'); }
-// 로고 클릭 — 대시보드로 이동하면서 데이터 새로고침 (현재 종목·계좌·관심종목·실시간 즉시 재조회)
-function goHome(){
-  showPage('dashboard');
-  if(proxyOnline){
-    loadStock(currentCode);   // 차트·현재가·호가·체결/뉴스/수급 재조회
-    loadAccount();            // 총자산·매수가능금액
-    renderDashWatchlist();    // 관심종목 가격
-    refreshLive();            // 실시간/지수/자동매매 로그
-  }
-  showToast('새로고침했어요','info');
-}
+// 로고 클릭 — 완전 새로고침 (F5와 동일). 세션 쿠키로 대시보드부터 다시 로드된다.
+function goHome(){ location.reload(); }
 // 모드 배지 색 — 실전은 빨강(긴장), 모의는 파랑
 function applyModeBadge(el, mode){
   if(!el) return;
@@ -1635,8 +1626,13 @@ async function loadStock(code) {
   // 차트 로드
   loadChart();
 
-  // 기업정보 + 현재가
   if (proxyOnline) {
+    // ★ 호가·체결·뉴스·수급은 stockinfo를 기다리지 않고 즉시 동시 발사 (직렬 대기 제거 → 체감 속도↑)
+    loadOrderbook(code);
+    loadDashTick();
+    loadDashNews();
+    loadDashInvestor();
+    // 기업정보 + 현재가 (위 호출들과 병렬로 진행)
     const r = await api(`/api/stockinfo?code=${code}`);
     // 응답이 늦게 와도 그 사이 다른 종목으로 바뀌었으면 렌더 안 함 (등락률/전일종가 오염 방지)
     if (seq !== _stockSeq || code !== currentCode) return;
@@ -1665,12 +1661,6 @@ async function loadStock(code) {
       _dashCurPrice = d.price||0; updateDashAffordable(); // 매수가능 수량 안내 갱신
       setText('infoLo', d.lo52 ? '₩'+d.lo52.toLocaleString() : '—');
     }
-    // 호가창 갱신
-    loadOrderbook(code);
-    // 가운데 탭 (체결/뉴스/수급) — 셋 다 미리 받아둔다 (홈 진입/종목 변경 시 자동 로드)
-    loadDashTick();
-    loadDashNews();
-    loadDashInvestor();
   }
 }
 
@@ -3223,6 +3213,7 @@ async function loadDashTick() {
   const ticks = r?.data?.output || [];
   const tbody = $('dashTickBody');
   if (!tbody) return;
+  let html;
   if (!ticks.length) {
     // 시간대 인지 문구 (토스 톤)
     const k = new Date(Date.now()+9*3600*1000), mins = k.getUTCHours()*60+k.getUTCMinutes(), wd = k.getUTCDay();
@@ -3230,17 +3221,24 @@ async function loadDashTick() {
       : mins < 9*60 ? '장 시작 전이에요 (09:00 개장)'
       : mins > 15*60+30 ? '오늘 장이 마감됐어요'
       : '아직 체결이 없어요';
-    tbody.innerHTML = `<tr><td colspan="3" class="empty" style="padding:14px;font-size:11px">${msg}</td></tr>`; return;
+    html = `<tr><td colspan="3" class="empty" style="padding:14px;font-size:11px">${msg}</td></tr>`;
+  } else {
+    let prev = 0;
+    const cachedNote = r?.cached ? '<tr><td colspan="3" style="padding:4px 8px;font-size:9.5px;color:var(--text-3);background:var(--bg-3)">📋 마지막 거래일 체결 내역</td></tr>' : '';
+    html = cachedNote + ticks.slice(0,30).map(t => {
+      const price = parseInt(t.stck_prpr||0), vol = parseInt(t.cntg_vol||0);
+      const up = price >= prev; prev = price;
+      const time = (t.stck_cntg_hour||'').replace(/(\d{2})(\d{2})(\d{2})/,'$1:$2');
+      return `<tr><td class="mono" style="font-size:10px">${time}</td><td class="mono ${up?'up':'dn'}" style="font-size:11px">${price.toLocaleString()}</td><td class="mono" style="font-size:10px">${vol}</td></tr>`;
+    }).join('');
   }
-  let prev = 0;
-  const cachedNote = r?.cached ? '<tr><td colspan="3" style="padding:4px 8px;font-size:9.5px;color:var(--text-3);background:var(--bg-3)">📋 마지막 거래일 체결 내역</td></tr>' : '';
-  tbody.innerHTML = cachedNote + ticks.slice(0,30).map(t => {
-    const price = parseInt(t.stck_prpr||0), vol = parseInt(t.cntg_vol||0);
-    const up = price >= prev; prev = price;
-    const time = (t.stck_cntg_hour||'').replace(/(\d{2})(\d{2})(\d{2})/,'$1:$2');
-    return `<tr><td class="mono" style="font-size:10px">${time}</td><td class="mono ${up?'up':'dn'}" style="font-size:11px">${price.toLocaleString()}</td><td class="mono" style="font-size:10px">${vol}</td></tr>`;
-  }).join('');
+  // ★ 내용이 같으면 다시 그리지 않는다 — 4초 폴링마다 통째로 재렌더돼 "떴다 사라졌다" 깜빡이던 문제 제거
+  const sig = code + '' + html;
+  if (sig === _dashTickLast) return;
+  _dashTickLast = sig;
+  tbody.innerHTML = html;
 }
+let _dashTickLast = '';
 // 뉴스 날짜 → KST 짧은 포맷 (M/D HH:mm) — GMT 원문 노출 방지
 function fmtNewsDate(raw) {
   if (!raw) return '';
