@@ -114,7 +114,7 @@ button:active{transform:scale(.96)}            /* 토스 특유의 눌림감 */
 .page-body{padding:16px;max-width:100%}
 
 /* ── 대시보드 레이아웃 ── */
-.dash-grid{display:grid;grid-template-columns:1.4fr 1.1fr 290px;gap:12px;height:calc(100vh - var(--header-h) - 32px)} /* 가운데(체결/뉴스/수급) 비율 확대 — 뉴스 제목 잘림 완화 */
+.dash-grid{display:grid;grid-template-columns:1.4fr 290px 1.1fr;gap:12px;height:calc(100vh - var(--header-h) - 32px)} /* 차트 | 보유+호가+주문(290px) | 시세+로그(1.1fr) — 자리 swap */
 .dash-main{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0}
 .dash-mid{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0}
 .dash-side{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0}
@@ -219,6 +219,7 @@ tbody tr:last-child td{border-bottom:none}
 td.mono,th.mono{font-family:var(--mono)}
 .up{color:var(--red)}
 .dn{color:var(--down)}
+.flat{color:var(--text-0)} /* 등락률 0.00% = 보합 → 흰색(중립) */
 .badge{display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700}
 .badge.buy{background:var(--red-dim);color:var(--red)}
 .badge.sell{background:var(--blue-dim);color:var(--down)}
@@ -502,8 +503,8 @@ td.mono,th.mono{font-family:var(--mono)}
         </div>
       </div>
 
-      <!-- 가운데 컬럼: 뉴스/수급 (위) + 자동매매 로그 (아래, 체결이 빠진 자리) -->
-      <div style="display:flex;flex-direction:column;gap:12px;overflow:hidden;min-height:0">
+      <!-- 시세탭 + 로그탭 컬럼 (자리 swap: 오른쪽으로 이동, order:2) -->
+      <div style="order:2;display:flex;flex-direction:column;gap:12px;overflow:hidden;min-height:0">
         <div class="panel" style="flex:3;display:flex;flex-direction:column;overflow:hidden;min-height:0"><!-- 시세탭 3 : 로그 1 -->
           <div style="display:flex;border-bottom:1px solid var(--border);flex-shrink:0">
             <button class="trading-tab active" id="dtab1" onclick="switchDashTab('watch')" style="font-size:11px;padding:8px 4px">시총 TOP30 시세</button>
@@ -538,8 +539,8 @@ td.mono,th.mono{font-family:var(--mono)}
         </div>
       </div>
 
-      <div class="dash-side" style="display:flex;flex-direction:column;gap:12px;overflow:hidden;min-height:0">
-        <!-- 보유종목 (위) -->
+      <div class="dash-side" style="order:1;display:flex;flex-direction:column;gap:12px;overflow:hidden;min-height:0">
+        <!-- 보유종목 (위) — 자리 swap: 가운데로 이동 (order:1) -->
         <div class="panel" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
           <div class="panel-head" style="flex-shrink:0">
             <span class="panel-title">보유종목</span>
@@ -1002,6 +1003,26 @@ td.mono,th.mono{font-family:var(--mono)}
         </div>
       </div>
     </div>
+    <!-- 현황 + 리스크 프리셋 -->
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-head"><span class="panel-title">📊 현황 · 리스크 프리셋</span>
+        <div style="display:flex;gap:4px">
+          <button class="panel-btn" id="presetCon" onclick="applyPreset('conservative')">보수</button>
+          <button class="panel-btn" id="presetBal" onclick="applyPreset('balanced')">균형</button>
+          <button class="panel-btn" id="presetAgg" onclick="applyPreset('aggressive')">공격</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px">
+          <div><div class="form-label">운용 자본</div><div class="mono" id="stCapital" style="font-size:14px;font-weight:600">—</div></div>
+          <div><div class="form-label">일일 실현손익</div><div class="mono" id="stDayPnl" style="font-size:14px;font-weight:600">—</div></div>
+          <div><div class="form-label">연속손실 / 당일거래</div><div class="mono" id="stStreak" style="font-size:14px;font-weight:600">—</div></div>
+          <div><div class="form-label">보유 / 노출</div><div class="mono" id="stExpo" style="font-size:14px;font-weight:600">—</div></div>
+        </div>
+        <div id="stBreaker" style="font-size:11px;color:var(--text-3);margin-bottom:8px"></div>
+        <div id="stPositions"></div>
+      </div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
       <!-- 전략 -->
       <div class="panel">
@@ -1018,28 +1039,37 @@ td.mono,th.mono{font-family:var(--mono)}
               <div class="form-group"><div class="form-label">RSI 기간</div><input class="form-input" type="number" id="pRsiP" value="14"></div>
               <div class="form-group"><div class="form-label">과매도 / 과매수</div><div style="display:flex;gap:4px"><input class="form-input" type="number" id="pRsiOs" value="30" style="flex:1"><input class="form-input" type="number" id="pRsiOb" value="70" style="flex:1"></div></div>
             </div>
+            <div class="form-group"><div class="form-label">ATR 기간 (변동성 손절 계산)</div><input class="form-input" type="number" id="pAtr" value="14"></div>
           </div>
         </div>
       </div>
-      <!-- 안전장치 -->
+      <!-- 리스크 관리 -->
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">🛡 안전장치</span></div>
+        <div class="panel-head"><span class="panel-title">🛡 리스크 관리</span></div>
         <div class="panel-body">
           <div class="form-row">
-            <div class="form-group"><div class="form-label">1회 최대 매수(원)</div><input class="form-input" type="number" id="sMaxOrd" value="1000000"></div>
-            <div class="form-group"><div class="form-label">종목당 한도(원)</div><input class="form-input" type="number" id="sMaxStk" value="5000000"></div>
+            <div class="form-group"><div class="form-label">거래당 위험 (자본%)</div><input class="form-input" type="number" step="0.1" id="sRisk" value="0.7"></div>
+            <div class="form-group"><div class="form-label">종목당 한도 (자본%)</div><input class="form-input" type="number" id="sPerStk" value="20"></div>
           </div>
           <div class="form-row">
-            <div class="form-group"><div class="form-label">익절 (%)</div><input class="form-input" type="number" id="sTp" value="5"></div>
-            <div class="form-group"><div class="form-label">손절 (%)</div><input class="form-input" type="number" id="sSl" value="-3"></div>
+            <div class="form-group"><div class="form-label">손절 (ATR배수)</div><input class="form-input" type="number" step="0.1" id="sStopAtr" value="1.5"></div>
+            <div class="form-group"><div class="form-label">익절 (R배수, 손익비)</div><input class="form-input" type="number" step="0.1" id="sTpR" value="2"></div>
           </div>
-          <div class="form-group"><div class="form-label">하루 손실 한도(원)</div><input class="form-input" type="number" id="sDailyL" value="-300000"></div>
+          <div class="form-row">
+            <div class="form-group"><div class="form-label">일일 손실한도 (자본%)</div><input class="form-input" type="number" step="0.1" id="sDayLossPct" value="-2"></div>
+            <div class="form-group"><div class="form-label">총 노출 상한 (자본%)</div><input class="form-input" type="number" id="sMaxExpo" value="60"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><div class="form-label">동시 보유 (종목)</div><input class="form-input" type="number" id="sMaxPos" value="5"></div>
+            <div class="form-group"><div class="form-label">연속패 정지 / 일일 최대거래</div><div style="display:flex;gap:4px"><input class="form-input" type="number" id="sConsec" value="3" style="flex:1"><input class="form-input" type="number" id="sMaxTrades" value="20" style="flex:1"></div></div>
+          </div>
           <div class="form-row">
             <div class="form-group"><div class="form-label">매수 시작</div><input class="form-input" type="time" id="sStart" value="09:05"></div>
             <div class="form-group"><div class="form-label">매수 종료</div><input class="form-input" type="time" id="sEnd" value="15:00"></div>
           </div>
+          <div class="toggle-row"><div><div class="toggle-name">추세 필터 (가격 &gt; 20MA)</div><div class="toggle-desc">하락추세 '떨어지는 칼' 회피 — 상승추세에서만 매수</div></div><div class="tog on" id="togTrend" onclick="this.classList.toggle('on')"></div></div>
           <div class="toggle-row"><div><div class="toggle-name">장 시작 30분 매수 금지</div><div class="toggle-desc">09:00~09:30 변동성 회피</div></div><div class="tog on" id="togAvoid" onclick="this.classList.toggle('on')"></div></div>
-          <div class="toggle-row"><div><div class="toggle-name">수동 보유 보호</div><div class="toggle-desc">자동매매가 직접 매수한 수량만 매도 — 내가 손으로 산 주식은 절대 건드리지 않음</div></div><div class="tog on" id="togProtect" onclick="this.classList.toggle('on')"></div></div>
+          <div class="toggle-row"><div><div class="toggle-name">수동 보유 보호</div><div class="toggle-desc">엔진이 직접 매수한 수량만 매도 — 손으로 산 주식 불가침</div></div><div class="tog on" id="togProtect" onclick="this.classList.toggle('on')"></div></div>
         </div>
       </div>
     </div>
@@ -1253,7 +1283,8 @@ td.mono,th.mono{font-family:var(--mono)}
 // ══════════════════════════════════════════════════════
 // 설정
 // ══════════════════════════════════════════════════════
-const PROXY = 'http://localhost:3000';
+const PROXY = ''; // same-origin(상대경로) — app.html을 서빙하는 서버로 그대로 요청.
+                  // 하드코딩 http://localhost:3000은 원격/터널 접속 시 사용자 본인 PC를 가리켜 모든 API가 실패했음(+HTTPS 혼합콘텐츠 차단).
 const STOCK_DB={"삼성전자":"005930","SK하이닉스":"000660","LG에너지솔루션":"373220","삼성바이오로직스":"207940","현대차":"005380","기아":"000270","셀트리온":"068270","POSCO홀딩스":"005490","KB금융":"105560","삼성물산":"028260","LG화학":"051910","현대모비스":"012330","신한지주":"055550","하나금융지주":"086790","카카오뱅크":"323410","삼성SDI":"006400","LG전자":"066570","카카오":"035720","NAVER":"035420","한국전력":"015760","두산에너빌리티":"034020","SK이노베이션":"096770","롯데케미칼":"011170","현대건설":"000720","포스코퓨처엠":"003670","고려아연":"010130","KT&G":"033780","CJ대한통운":"000120","S-Oil":"010950","대한항공":"003490","삼성생명":"032830","삼성화재":"000810","우리금융지주":"316140","기업은행":"024110","메리츠금융지주":"138040","HD현대중공업":"329180","한화에어로스페이스":"012450","LG":"003550","SK":"034730","SK텔레콤":"017670","KT":"030200","LG유플러스":"032640","삼성전기":"009150","SK스퀘어":"402340","크래프톤":"259960","엔씨소프트":"036570","넷마블":"251270","한미반도체":"042700","HMM":"011200","포스코인터내셔널":"047050","두산밥캣":"241560","현대글로비스":"086280","현대제철":"004020","코웨이":"021240","아모레퍼시픽":"090430","LG생활건강":"051900","오리온":"271560","하이브":"352820","JYP Ent.":"035900","에스엠":"041510","한온시스템":"018880","한국타이어앤테크놀로지":"161390","금호석유":"011780","DB손해보험":"005830","미래에셋증권":"006800","한국금융지주":"071050","NH투자증권":"005940","삼성증권":"016360","키움증권":"039490","대우건설":"047040","GS건설":"006360","DL이앤씨":"375500","HD한국조선해양":"009540","삼성중공업":"010140","한화오션":"042660","효성첨단소재":"298050","코오롱인더":"120110","한솔케미칼":"014680","롯데지주":"004990","CJ제일제당":"097950","농심":"004370","빙그레":"005180","롯데칠성":"005300","하이트진로":"000080","BGF리테일":"282330","이마트":"139480","롯데쇼핑":"023530","GS리테일":"007070","현대백화점":"069960","신세계":"004170","강원랜드":"035250","파라다이스":"034230","호텔신라":"008770","만도":"204320","현대위아":"011210","SNT모티브":"064960","일진머티리얼즈":"020150","엘앤에프":"066970","천보":"278280","SKC":"011790","솔루스첨단소재":"336370","대주전자재료":"078600","에코프로비엠":"247540","에코프로":"086520","HLB":"028300","알테오젠":"196170","엔켐":"348370","리가켐바이오":"141080","펄어비스":"263750","카카오게임즈":"293490","셀트리온헬스케어":"091990","SK바이오팜":"326030","케이엠더블유":"032500","CJ ENM":"035760","휴젤":"145020","씨젠":"096530","에스에프에이":"036530","이오테크닉스":"039030","레인보우로보틱스":"277810","클래시스":"214150","코스모신소재":"005070","원익IPS":"240810","제이엘케이":"322510","나노신소재":"121600","HPSP":"403870","파마리서치":"214450","성일하이텍":"365340","이수페타시스":"007660","심텍":"222800","주성엔지니어링":"036930","테크윙":"089030","리노공업":"058470","동진쎄미켐":"005290","솔브레인":"357780","덕산네오룩스":"213420","JYP":"035900","에스티팜":"237690","메디톡스":"086900","루닛":"328130","뷰노":"338220","셀바스AI":"108860","바이오니아":"064550","오스코텍":"039200","에이비엘바이오":"298380","네이처셀":"007390","엔지켐생명과학":"183490","압타바이오":"293780","젬백스":"082270","박셀바이오":"323990","지놈앤컴퍼니":"314130","하나마이크론":"067310","테스나":"131970","넥스틴":"348210","아이티엠반도체":"084850","월덱스":"101160","티씨케이":"064760","코미코":"183300","하나머티리얼즈":"166090","DB하이텍":"000990","LX세미콘":"108320","가온칩스":"399720","파두":"440110","오픈엣지테크놀로지":"394280","퀄리타스반도체":"432720"};
 const STOCK_CODE_TO_NAME = {};
 for (const [n,c] of Object.entries(STOCK_DB)) STOCK_CODE_TO_NAME[c] = n;
@@ -1283,7 +1314,7 @@ const fmtVol = n => {
   if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
   return n.toLocaleString();
 };
-const colorClass = (v) => v > 0 ? 'up' : v < 0 ? 'dn' : '';
+const colorClass = (v) => v > 0 ? 'up' : v < 0 ? 'dn' : 'flat'; // 0 = 보합 → 흰색
 const arrow = (sign) => (sign === '2' || sign === '1') ? '▲' : sign === '5' ? '▼' : '—';
 
 // ── API 호출 ──
@@ -1482,11 +1513,14 @@ async function loadStock(code) {
     if (r?.ok && r.data) {
       const d = r.data;
       const up = !(d.sign === '5' || d.sign === '4');
-      const chgSign = up ? '+' : '';
+      const chgN = parseFloat(d.changePct)||0;
+      const flat = Math.abs(chgN)<0.005; // 0.00% 보합
+      const cls = flat?'flat':(up?'up':'dn');
+      const chgSign = flat?'':(up ? '+' : '');
       $('dashPrice').textContent = d.price > 0 ? '₩' + d.price.toLocaleString() : '—';
-      $('dashPrice').className = 'stock-price ' + (up?'up':'dn');
-      $('dashChg').textContent = `${arrow(d.sign)} ${Math.abs(d.change||0).toLocaleString()} (${chgSign}${d.changePct||0}%)` + (d.stale ? ' · 전일 종가 기준' : '');
-      $('dashChg').className = 'stock-chg ' + (up?'up':'dn');
+      $('dashPrice').className = 'stock-price ' + cls;
+      $('dashChg').textContent = `${flat?'—':arrow(d.sign)} ${Math.abs(d.change||0).toLocaleString()} (${chgSign}${chgN.toFixed(2)}%)` + (d.stale ? ' · 전일 종가 기준' : '');
+      $('dashChg').className = 'stock-chg ' + cls;
       setText('metaO', d.open>0 ? '₩'+d.open.toLocaleString() : '—');
       setText('metaH', d.high>0 ? '₩'+d.high.toLocaleString() : '—');
       setText('metaL', d.low>0 ? '₩'+d.low.toLocaleString() : '—');
@@ -1581,7 +1615,10 @@ async function loadChart() {
     setText('chartCount', `${data.length}봉 · ${isMin ? dashMinDays+'일' : dashYears+'년'}`);
   }
   dashData = data;
-  dashZoom = 1; dashPan = 0;
+  // 기본은 최근 약 70봉만 보이게 → 오른쪽으로 끌면 과거로 패닝 가능(토스식). 데이터 적으면 전체.
+  const DEFAULT_BARS = 70;
+  dashZoom = data.length > DEFAULT_BARS ? data.length / DEFAULT_BARS : 1;
+  dashPan = 0;
   renderChart();
   setupChartEvents();
 }
@@ -1736,6 +1773,23 @@ function renderChart() {
     const yT=pY(Math.max(d.open,d.close)), yB=pY(Math.min(d.open,d.close)), bH=Math.max(1,yB-yT);
     up ? ctx.fillRect(x-candleW/2,yT,candleW,bH) : ctx.strokeRect(x-candleW/2,yT,candleW,bH);
   });
+
+  // 현재가(마지막 종가) 라인 + 우측 가격 태그 — 토스식 (차트에서 현재가 항상 표시)
+  const lastBar = data[n-1];
+  if (lastBar) {
+    const ly = Math.max(pad.t+8, Math.min(H-pad.b-8, pY(lastBar.close)));
+    const lup = lastBar.close >= lastBar.open, lcol = lup ? '#f85149' : '#388bfd';
+    ctx.save();
+    ctx.strokeStyle=lcol; ctx.globalAlpha=0.55; ctx.lineWidth=1; ctx.setLineDash([4,3]);
+    ctx.beginPath(); ctx.moveTo(pad.l, ly); ctx.lineTo(W-pad.r, ly); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha=1;
+    const txt='₩'+Math.round(lastBar.close).toLocaleString();
+    ctx.font='11px JetBrains Mono,monospace'; ctx.textAlign='right';
+    const tw=ctx.measureText(txt).width+10;
+    ctx.fillStyle=lcol; ctx.fillRect(W-pad.r-tw, ly-8, tw, 16);
+    ctx.fillStyle='#fff'; ctx.fillText(txt, W-pad.r-5, ly+3.5);
+    ctx.restore();
+  }
 
   // Y 라벨
   ctx.fillStyle='rgba(100,116,139,0.9)'; ctx.font='11px JetBrains Mono,monospace'; ctx.textAlign='right';
@@ -1977,7 +2031,7 @@ function renderOB(d, opt) {
   // 전일 종가: API 응답 stck_sdpr 우선, 없으면 stockinfo 로드 시 저장한 값
   const base = parseInt(d.stck_sdpr||0) || currentPrevClose;
   const fmtPct = p => base>0 ? ((p-base)/base*100).toFixed(2) : null;
-  const pctColor = p => parseFloat(p)>=0 ? 'var(--red)' : 'var(--down)';
+  const pctColor = p => { const x=parseFloat(p); return Math.abs(x)<0.005 ? 'var(--text-0)' : x>0 ? 'var(--red)' : 'var(--down)'; }; // 0.00% = 흰색
 
   // 한국식 3단 행: [매도수량 | 가격+등락률 | 매수수량]
   const mkAsk = row => {
@@ -2096,14 +2150,15 @@ async function refreshWatchPrices() {
     const price = cur > 0 ? cur : prev;
     if (price <= 0) continue;
     const chg = Number(d.chgPct) || 0;
-    const up = chg > 0 || (chg === 0 && d.sign !== '5' && d.sign !== '4');
+    const flat = Math.abs(chg) < 0.005; // 0.00%로 표시되는 보합 → 흰색
+    const cls = flat ? 'flat' : ((chg > 0 || (chg === 0 && d.sign !== '5' && d.sign !== '4')) ? 'up' : 'dn');
     if (pEl) {
       pEl.textContent = '₩' + price.toLocaleString();
-      pEl.className = 'wprice ' + (up?'up':'dn');
+      pEl.className = 'wprice ' + cls;
     }
     if (cEl) {
       cEl.textContent = (chg>0?'+':'') + chg.toFixed(2) + '%';
-      cEl.className = 'wchg ' + (up?'up':'dn');
+      cEl.className = 'wchg ' + cls;
       cEl.style.color = '';
     }
   }
@@ -2171,16 +2226,17 @@ async function loadPortfolio() {
     const qty=parseInt(p.hldg_qty||0), avg=parseInt(p.pchs_avg_pric||0), cur=parseInt(p.prpr||0);
     const ev=parseInt(p.evlu_amt||0), buy=parseInt(p.pchs_amt||0), pl=parseInt(p.evlu_pfls_amt||0);
     const plRt=parseFloat(p.evlu_pfls_rt||0), u=pl>=0, w=((ev/evalSum)*100).toFixed(1);
+    const cls = pl>0?'up':pl<0?'dn':'flat'; // 손익 0 = 흰색
     return `<tr>
       <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}</td>
       <td class="mono" style="color:var(--text-3)">${code}</td>
       <td class="mono">${qty}</td>
       <td class="mono">₩${avg.toLocaleString()}</td>
-      <td class="mono ${u?'up':'dn'}">₩${cur.toLocaleString()}</td>
+      <td class="mono ${cls}">₩${cur.toLocaleString()}</td>
       <td class="mono">₩${ev.toLocaleString()}</td>
       <td class="mono">₩${buy.toLocaleString()}</td>
-      <td class="mono ${u?'up':'dn'}">${u?'+':''}₩${pl.toLocaleString()}</td>
-      <td class="mono ${u?'up':'dn'}">${u?'+':''}${plRt}%</td>
+      <td class="mono ${cls}">${pl>0?'+':''}₩${pl.toLocaleString()}</td>
+      <td class="mono ${cls}">${pl>0?'+':''}${plRt.toFixed(2)}%</td>
       <td><div class="progress" style="width:60px"><div class="progress-fill" style="width:${w}%"></div></div> <span style="font-size:10px">${w}%</span></td>
       <td><button class="panel-btn" onclick="sellFromPf('${code}','${name}',${qty},${cur})">매도</button></td>
     </tr>`;
@@ -3089,12 +3145,13 @@ async function loadDashVolTop() {
     const raw = d.stck_shrn_iscd||d.mksc_shrn_iscd||'';
     const code = esc(raw), name = esc(d.hts_kor_isnm||nameOf(raw));
     const price = parseInt(d.stck_prpr||0), chg = parseFloat(d.prdy_ctrt||0), up = chg>=0;
+    const flat = Math.abs(chg)<0.005; const cls = flat?'flat':(up?'up':'dn'); // 0.00% 보합 → 흰색
     return `<div class="watch-item" onclick="loadStock('${code}')" style="padding:7px 10px">
       <div style="display:flex;align-items:center;gap:7px;min-width:0">
         <span class="mono" style="font-size:10px;color:var(--text-3);width:16px;flex-shrink:0">${i+1}</span>
         <div class="wname" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</div>
       </div>
-      <div style="text-align:right;flex-shrink:0"><div class="wprice ${up?'up':'dn'}" style="font-size:11px">₩${price.toLocaleString()}</div><div class="wchg ${up?'up':'dn'}" style="font-size:10px">${up?'+':''}${chg}%</div></div>
+      <div style="text-align:right;flex-shrink:0"><div class="wprice ${cls}" style="font-size:11px">₩${price.toLocaleString()}</div><div class="wchg ${cls}" style="font-size:10px">${flat?'':(up?'+':'')}${chg}%</div></div>
     </div>`;
   }).join('');
 }
@@ -3323,12 +3380,13 @@ function renderStocksList() {
     const code = esc(raw);
     const name = esc(d.hts_kor_isnm||nameOf(raw));
     const price = parseInt(d.stck_prpr||0), chg = parseFloat(d.prdy_ctrt||0), up = chg>=0;
+    const flat = Math.abs(chg)<0.005, cls = flat?'flat':(up?'up':'dn'); // 0.00% = 흰색
     const inWatch = watchCodes.includes(raw);
     return `<tr>
       <td class="mono" style="color:var(--text-3)">${i+1}</td>
       <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}<span style="color:var(--text-3);font-size:10px;margin-left:4px">${code}</span></td>
-      <td class="mono ${up?'up':'dn'}">₩${price.toLocaleString()}</td>
-      <td class="mono ${up?'up':'dn'}">${up?'+':''}${chg}%</td>
+      <td class="mono ${cls}">₩${price.toLocaleString()}</td>
+      <td class="mono ${cls}">${flat?'':(up?'+':'')}${chg.toFixed(2)}%</td>
       <td class="mono">${fmtVol(parseInt(d.acml_vol||0))}</td>
       <td class="mono">${fmtAmt(parseInt(d.acml_tr_pbmn||0))}</td>
       <td><button class="panel-btn" onclick="toggleWatchFromList('${code}',this)" style="color:${inWatch?'var(--amber)':'var(--text-3)'}">${inWatch?'★':'☆'}</button></td>
@@ -3514,8 +3572,9 @@ async function loadPerformance() {
   const total=parseInt(s.tot_evlu_amt||0), principal=parseInt(s.pchs_amt_smtl_amt||0);
   const cash=parseInt(s.dnca_tot_amt||0), pnl=parseInt(s.evlu_pfls_smtl_amt||0);
   const rate=principal>0?((pnl/principal)*100).toFixed(2):'0.00', up=pnl>=0;
+  const cls = pnl>0?'up':pnl<0?'dn':'flat'; // 손익 0 = 흰색
   const hold=(r.data?.output1||[]).filter(p=>parseInt(p.hldg_qty)>0).length;
-  $('perfReturn').textContent=(up?'+':'')+rate+'%'; $('perfReturn').className='val '+(up?'up':'dn');
+  $('perfReturn').textContent=(pnl>0?'+':'')+rate+'%'; $('perfReturn').className='val '+cls;
   setText('perfEval','₩'+total.toLocaleString());
   setText('perfCash','₩'+cash.toLocaleString());
   setText('perfHold',hold+'종목');
@@ -3527,7 +3586,7 @@ async function loadPerformance() {
   }).catch(()=>setText('perfTrades','—'));
   $('perfDetail').innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:12px">
-      <div><div style="color:var(--text-3);margin-bottom:4px">평가 손익</div><div class="mono ${up?'up':'dn'}">${up?'+':''}₩${pnl.toLocaleString()}</div></div>
+      <div><div style="color:var(--text-3);margin-bottom:4px">평가 손익</div><div class="mono ${cls}">${pnl>0?'+':''}₩${pnl.toLocaleString()}</div></div>
       <div><div style="color:var(--text-3);margin-bottom:4px">매입 원금</div><div class="mono">₩${principal.toLocaleString()}</div></div>
       <div><div style="color:var(--text-3);margin-bottom:4px">총 자산</div><div class="mono">₩${total.toLocaleString()}</div></div>
     </div>`;
@@ -3550,15 +3609,47 @@ async function loadAutoStatus() {
   $('togRSI').classList.toggle('on',s.strategies.rsi);
   $('pMaS').value=s.params.maShort; $('pMaL').value=s.params.maLong;
   $('pRsiP').value=s.params.rsiPeriod; $('pRsiOs').value=s.params.rsiOversold; $('pRsiOb').value=s.params.rsiOverbought;
-  $('sMaxOrd').value=s.safety.maxPerOrder; $('sMaxStk').value=s.safety.maxPerStock;
-  $('sTp').value=s.safety.takeProfitPct; $('sSl').value=s.safety.stopLossPct;
-  $('sDailyL').value=s.safety.dailyLossLimit;
-  $('sStart').value=s.safety.tradeStartTime; $('sEnd').value=s.safety.tradeEndTime;
-  $('togAvoid').classList.toggle('on',s.safety.avoidFirst30min);
-  $('togProtect').classList.toggle('on',s.safety.protectManual!==false); // 기본 ON
+  $('pAtr').value=s.params.atrPeriod||14;
+  const sf=s.safety;
+  $('sRisk').value=sf.riskPerTradePct; $('sPerStk').value=sf.maxPerStockPct;
+  $('sStopAtr').value=sf.stopAtrMult; $('sTpR').value=sf.takeProfitR;
+  $('sDayLossPct').value=sf.dailyLossLimitPct; $('sMaxExpo').value=sf.maxExposurePct;
+  $('sMaxPos').value=sf.maxPositions; $('sConsec').value=sf.maxConsecLosses; $('sMaxTrades').value=sf.maxTradesPerDay;
+  $('sStart').value=sf.tradeStartTime; $('sEnd').value=sf.tradeEndTime;
+  $('togTrend').classList.toggle('on',sf.trendFilter!==false);
+  $('togAvoid').classList.toggle('on',sf.avoidFirst30min);
+  $('togProtect').classList.toggle('on',sf.protectManual!==false); // 기본 ON
   $('sInterval').value=s.intervalSec;
+  // 프리셋 하이라이트
+  ['Con','Bal','Agg'].forEach(k=>{const b=$('preset'+k);if(b)b.style.color='';});
+  const pk={conservative:'Con',balanced:'Bal',aggressive:'Agg'}[s.riskPreset];
+  if(pk&&$('preset'+pk))$('preset'+pk).style.color='var(--blue)';
+  renderAutoStatus(st);
   autoWatchList=s.watchList||[];
   renderWatchChips();
+}
+function renderAutoStatus(st){
+  const cap=st.capital||0, pnl=st.dailyRealizedPnl||0;
+  setText('stCapital', cap?('₩'+cap.toLocaleString()):'장 시작 후 표시');
+  const pnlEl=$('stDayPnl'); pnlEl.className='mono '+(pnl>0?'up':pnl<0?'dn':'flat');
+  pnlEl.textContent=(pnl>0?'+':'')+'₩'+pnl.toLocaleString()+(st.dailyPnlPct?` (${st.dailyPnlPct>0?'+':''}${st.dailyPnlPct}%)`:'');
+  setText('stStreak', `${st.consecLosses||0}연패 / ${st.tradesToday||0}건`);
+  setText('stExpo', `${st.openPositions||0}종목 / ${st.exposurePct||0}%`);
+  const sfx=st.settings.safety; const br=[];
+  if(st.stoppedByLoss) br.push('<span style="color:var(--red)">🛑 일일손실 한도 — 신규매수 정지</span>');
+  if((st.consecLosses||0)>=sfx.maxConsecLosses) br.push('<span style="color:var(--red)">🛑 연속패 한도 — 정지</span>');
+  if((st.tradesToday||0)>=sfx.maxTradesPerDay) br.push('<span style="color:var(--amber)">⚠ 일일 거래수 한도</span>');
+  $('stBreaker').innerHTML = br.length?br.join(' · '):`일일 손실한도 ₩${(st.dailyLossLimitAmt||0).toLocaleString()} · 정상 범위`;
+  const ps=st.positions||[];
+  $('stPositions').innerHTML = ps.length ?
+    ('<table style="width:100%;font-size:11px"><thead><tr><th>종목</th><th>수량</th><th>진입</th><th>현재</th><th>손절</th><th>목표</th></tr></thead><tbody>'+
+    ps.map(p=>`<tr><td>${esc(p.name)}</td><td class="mono">${p.qty}</td><td class="mono">₩${(p.entry||0).toLocaleString()}</td><td class="mono">₩${(p.cur||0).toLocaleString()}</td><td class="mono dn">₩${(p.stop||0).toLocaleString()}</td><td class="mono up">₩${(p.target||0).toLocaleString()}</td></tr>`).join('')+
+    '</tbody></table>') : '<div style="font-size:11px;color:var(--text-3)">봇 보유 포지션 없음</div>';
+}
+async function applyPreset(name){
+  const msg=$('autoSaveMsg'); if(msg)msg.textContent='프리셋 적용 중...';
+  const r=await apiPost('/api/auto/settings',{riskPreset:name});
+  if(r?.ok){ if(msg)msg.textContent='✅ '+name+' 프리셋 적용됨'; await loadAutoStatus(); } else if(msg) msg.textContent='❌ 실패';
 }
 function applyAutoUI(st) {
   const on=st.running;
@@ -3573,8 +3664,15 @@ function applyAutoUI(st) {
 function collectAutoSettings() {
   return {
     strategies:{goldenCross:$('togGC').classList.contains('on'), rsi:$('togRSI').classList.contains('on')},
-    params:{maShort:+$('pMaS').value||5, maLong:+$('pMaL').value||20, rsiPeriod:+$('pRsiP').value||14, rsiOversold:+$('pRsiOs').value||30, rsiOverbought:+$('pRsiOb').value||70},
-    safety:{maxPerOrder:+$('sMaxOrd').value||1e6, maxPerStock:+$('sMaxStk').value||5e6, takeProfitPct:+$('sTp').value||5, stopLossPct:+$('sSl').value||-3, dailyLossLimit:+$('sDailyL').value||-3e5, tradeStartTime:$('sStart').value||'09:05', tradeEndTime:$('sEnd').value||'15:00', avoidFirst30min:$('togAvoid').classList.contains('on'), protectManual:$('togProtect').classList.contains('on')},
+    params:{maShort:+$('pMaS').value||5, maLong:+$('pMaL').value||20, rsiPeriod:+$('pRsiP').value||14, rsiOversold:+$('pRsiOs').value||30, rsiOverbought:+$('pRsiOb').value||70, atrPeriod:+$('pAtr').value||14},
+    safety:{
+      riskPerTradePct:+$('sRisk').value||0.7, maxPerStockPct:+$('sPerStk').value||20,
+      stopAtrMult:+$('sStopAtr').value||1.5, takeProfitR:+$('sTpR').value||2,
+      dailyLossLimitPct:+$('sDayLossPct').value||-2, maxExposurePct:+$('sMaxExpo').value||60,
+      maxPositions:+$('sMaxPos').value||5, maxConsecLosses:+$('sConsec').value||3, maxTradesPerDay:+$('sMaxTrades').value||20,
+      tradeStartTime:$('sStart').value||'09:05', tradeEndTime:$('sEnd').value||'15:00',
+      trendFilter:$('togTrend').classList.contains('on'), avoidFirst30min:$('togAvoid').classList.contains('on'), protectManual:$('togProtect').classList.contains('on')
+    },
     watchList:autoWatchList, intervalSec:+$('sInterval').value||60
   };
 }
@@ -3850,6 +3948,8 @@ function startStream() {
 function applyLivePrice(d) {
   if (!d || !d.code || !(d.price > 0)) return;
   const up = d.sign !== '5' && d.sign !== '4';
+  const flat = Math.abs(parseFloat(d.chgPct) || 0) < 0.005; // 0.00% 보합 → 흰색
+  const cls = flat ? 'flat' : (up ? 'up' : 'dn');
   // 틱 방향 플래시 (직전 가격 대비) — 토스식 살아있는 느낌
   const lastP = window._lastPx = window._lastPx || {};
   const prevSeen = lastP[d.code];
@@ -3860,11 +3960,11 @@ function applyLivePrice(d) {
   flash(pEl);
   if (pEl) {
     pEl.textContent = '₩' + d.price.toLocaleString();
-    pEl.className = 'wprice ' + (up ? 'up' : 'dn');
+    pEl.className = 'wprice ' + cls;
   }
   if (cEl) {
-    cEl.textContent = (up ? '+' : '') + d.chgPct + '%';
-    cEl.className = 'wchg ' + (up ? 'up' : 'dn');
+    cEl.textContent = (flat ? '' : (up ? '+' : '')) + d.chgPct + '%';
+    cEl.className = 'wchg ' + cls;
     cEl.style.color = '';
   }
   // 대시보드 메인 가격(현재 보고 있는 종목)도 실시간 갱신

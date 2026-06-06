@@ -13,9 +13,17 @@ const STATE_FILE = path.join(__dirname, 'autotrade-state.json');
 const LOG_FILE   = path.join(__dirname, 'autotrade-log.json');
 const ORDER_COOLDOWN_MS = 5 * 60 * 1000; // 같은 종목 재주문 금지 시간 (중복 주문 방지, 계좌 갱신 주기와 정렬)
 
-// ── 기본 설정값 (화면에서 덮어쓸 수 있음) ──
+// ── 리스크 프리셋 (보수/균형/공격) — 화면에서 선택, safety 기본값을 결정 ──
+const RISK_PRESETS = {
+  conservative: { riskPerTradePct:0.4, dailyLossLimitPct:-1.2, maxPositions:3, maxExposurePct:40, maxPerStockPct:15, stopAtrMult:1.2, takeProfitR:2.5, trailAfterR:1, maxConsecLosses:2, maxTradesPerDay:12 },
+  balanced:     { riskPerTradePct:0.7, dailyLossLimitPct:-2.0, maxPositions:5, maxExposurePct:60, maxPerStockPct:20, stopAtrMult:1.5, takeProfitR:2.0, trailAfterR:1, maxConsecLosses:3, maxTradesPerDay:20 },
+  aggressive:   { riskPerTradePct:1.2, dailyLossLimitPct:-3.5, maxPositions:8, maxExposurePct:85, maxPerStockPct:25, stopAtrMult:2.0, takeProfitR:1.8, trailAfterR:1, maxConsecLosses:4, maxTradesPerDay:30 }
+};
+
+// ── 기본 설정값 (화면에서 덮어쓸 수 있음) — 균형 프리셋 기준 ──
 const DEFAULT_SETTINGS = {
   enabled: false,              // 자동매매 on/off
+  riskPreset: 'balanced',      // 선택한 프리셋(표시용)
   strategies: {
     goldenCross: true,         // 골든크로스 사용
     rsi: true                  // RSI 사용
@@ -25,27 +33,38 @@ const DEFAULT_SETTINGS = {
     maLong: 20,                // 장기 이동평균
     rsiPeriod: 14,             // RSI 기간
     rsiOversold: 30,           // 과매도 (이하면 매수 후보)
-    rsiOverbought: 70          // 과매수 (이상이면 매도 후보)
+    rsiOverbought: 70,         // 과매수 (이상이면 매도 후보)
+    atrPeriod: 14              // ATR 기간 (변동성 기반 손절)
   },
   safety: {
-    maxPerOrder: 1000000,      // 1회 최대 매수금액 (원)
-    maxPerStock: 5000000,      // 종목당 최대 보유금액 (원)
-    dailyLossLimit: -300000,   // 하루 손실 한도 (원, 음수). 도달 시 자동 정지
-    takeProfitPct: 5,          // 익절 목표 (%)
-    stopLossPct: -3,           // 손절 기준 (%)
+    // ── 리스크 기반 사이징 ──
+    riskPerTradePct: 0.7,      // 거래당 위험 = 자본의 0.7% (손절까지 거리로 수량 역산)
+    maxPerStockPct: 20,        // 종목당 최대 보유 = 자본의 20% (집중 방지)
+    // ── 변동성 기반 손절/익절 + 트레일링 ──
+    stopAtrMult: 1.5,          // 손절 = 진입 − 1.5×ATR
+    takeProfitR: 2.0,          // 익절 = +2R (손익비 2:1)
+    trailAfterR: 1.0,          // +1R 도달 시 손절을 본전으로 + ATR 트레일링 시작
+    // ── 포트폴리오 서킷브레이커 ──
+    dailyLossLimitPct: -2.0,   // 일일 손실 한도 = 자본의 −2% (도달 시 당일 신규매수 정지)
+    maxPositions: 5,           // 동시 보유(봇) 최대 종목 수
+    maxExposurePct: 60,        // 총 노출 상한 = 자본의 60% (현금버퍼 유지)
+    maxConsecLosses: 3,        // 연속 N패 시 당일 신규매수 정지
+    maxTradesPerDay: 20,       // 일일 최대 거래(매수) 수 — 과매매 방지
+    // ── 진입 품질 필터 ──
+    trendFilter: true,         // 가격 > 장기MA 일 때만 매수 (하락추세 칼 잡기 방지)
+    // ── 시간/보호 ──
     tradeStartTime: '09:05',   // 매수 시작 시간
     tradeEndTime: '15:00',     // 신규 매수 종료 시간 (매도는 15:20까지)
     avoidFirst30min: true,     // 장 시작 30분 신규매수 금지
-    protectManual: true        // ★ 수동 보유 보호: 엔진이 직접 매수한 수량만 매도 (수동 매수분 불가침)
+    protectManual: true        // ★ 수동 보유 보호: 엔진이 직접 매수한 수량만 매도
   },
-  // 자동매매 대상 종목 — KOSPI 시총 상위 우량주 30 (반도체·2차전지·바이오·자동차·금융·통신·소재 분산)
+  // 자동매매 대상 종목 — KOSPI 시총 상위 우량주 50 (반도체·2차전지·바이오·자동차·금융·통신·소재·조선·방산 분산)
   watchList: [
-    '005930','000660','373220','207940','005380', // 삼성전자 SK하이닉스 LG엔솔 삼성바이오 현대차
-    '000270','068270','005490','035420','035720', // 기아 셀트리온 POSCO홀딩스 NAVER 카카오
-    '051910','006400','105560','055550','086790', // LG화학 삼성SDI KB금융 신한지주 하나금융
-    '316140','032830','015760','034730','003550', // 우리금융 삼성생명 한국전력 SK LG
-    '017670','030200','012330','009150','066570', // SKT KT 현대모비스 삼성전기 LG전자
-    '096770','028260','010130','011200','024110'  // SK이노베이션 삼성물산 고려아연 HMM 기업은행
+    '005930','000660','373220','207940','005380','000270','068270','005490','105560','028260',
+    '051910','012330','055550','086790','323410','006400','066570','035720','035420','015760',
+    '034020','096770','011170','000720','003670','010130','033780','000120','010950','003490',
+    '032830','000810','316140','024110','138040','329180','012450','003550','034730','017670',
+    '030200','032640','009150','402340','259960','036570','251270','042700','011200','047050'
   ],
   intervalSec: 30              // 시세 점검 주기 (초)
 };
@@ -91,8 +110,10 @@ function loadState(userId) {
         today: s.today || todayKey(),
         dailyRealizedPnl: s.dailyRealizedPnl || 0,
         stoppedByLoss: s.stoppedByLoss || false,
+        consecLosses: s.consecLosses || 0,   // 연속 손실 횟수 (서킷브레이커)
+        tradesToday: s.tradesToday || 0,     // 당일 매수 체결 수 (과매매 방지)
         positions: s.positions || {},
-        botPositions: s.botPositions || {} // 엔진이 직접 매수한 수량 (종목→주수) — 수동 보유와 구분
+        botPositions: migrateBotPositions(s.botPositions) // 종목→{qty,entry,stop,target,hw,atr,initRisk}
       };
     }
   } catch(e) {}
@@ -101,10 +122,25 @@ function loadState(userId) {
     today: todayKey(),
     dailyRealizedPnl: 0,
     stoppedByLoss: false,
+    consecLosses: 0,
+    tradesToday: 0,
     positions: {},
     botPositions: {}
   };
 }
+
+// 구버전 botPositions(종목→주수 number)를 객체 형태로 승격. 손절정보 없는 건 관리 시 폴백.
+function migrateBotPositions(bp) {
+  const out = {};
+  if (!bp || typeof bp !== 'object') return out;
+  for (const code of Object.keys(bp)) {
+    const v = bp[code];
+    if (typeof v === 'number') { if (v > 0) out[code] = { qty: v }; }       // 레거시: 수량만
+    else if (v && typeof v === 'object' && (v.qty|0) > 0) out[code] = v;    // 신버전 객체
+  }
+  return out;
+}
+function botQtyOf(bp, code) { const p = bp && bp[code]; return p ? (p.qty|0) : 0; }
 
 function saveState(state, userId) {
   writeSoon(stateFileFor(userId), () => JSON.stringify(state, null, 2)); // 비동기 — 블로킹 없음
@@ -156,6 +192,19 @@ function calcRSI(closes, period) {
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
+}
+
+// ATR (Average True Range) — 변동성. bars: [{high,low,close}] 과거→현재
+// TR = max(고-저, |고-전일종가|, |저-전일종가|), ATR = 최근 period TR의 평균
+function calcATR(bars, period) {
+  if (!Array.isArray(bars) || bars.length < period + 1) return null;
+  const trs = [];
+  for (let i = bars.length - period; i < bars.length; i++) {
+    const h = bars[i].high, l = bars[i].low, pc = bars[i-1].close;
+    if (!(h > 0) || !(l > 0) || !(pc > 0)) return null;
+    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  return trs.reduce((a,b)=>a+b,0) / period;
 }
 
 // ════════════════════════════════════════
@@ -289,11 +338,29 @@ class AutoTrader {
   }
 
   getStatus() {
+    const cap = this._capital || 0;
+    const pnl = this.state.dailyRealizedPnl || 0;
+    const bp = this.state.botPositions || {};
+    const positions = Object.keys(bp).map(code => ({
+      code, name: (this.deps.codeToName && this.deps.codeToName(code)) || code,
+      qty: bp[code].qty, entry: bp[code].entry || 0, stop: Math.round(bp[code].stop || 0),
+      target: Math.round(bp[code].target || 0), cur: (this._lastHeld?.[code]?.curPrice) || 0
+    }));
+    const exposure = this._botExposure(this._lastHeld || {});
     return {
       enabled: this.state.settings.enabled,
       running: this.running,
       stoppedByLoss: this.state.stoppedByLoss,
-      dailyRealizedPnl: this.state.dailyRealizedPnl,
+      dailyRealizedPnl: pnl,
+      dailyPnlPct: cap > 0 ? +(pnl / cap * 100).toFixed(2) : 0,
+      capital: cap,
+      dailyLossLimitAmt: cap > 0 ? Math.round(cap * (this.state.settings.safety.dailyLossLimitPct / 100)) : 0,
+      consecLosses: this.state.consecLosses || 0,
+      tradesToday: this.state.tradesToday || 0,
+      openPositions: positions.length,
+      positions,
+      exposure,
+      exposurePct: cap > 0 ? +(exposure / cap * 100).toFixed(1) : 0,
       settings: this.state.settings,
       marketOpen: isMarketOpen(),
       scanListSize: this.scanList.length
@@ -301,15 +368,17 @@ class AutoTrader {
   }
 
   updateSettings(newSettings) {
+    // 프리셋 선택 시 해당 리스크 기본값을 safety에 먼저 깔고, 개별 safety 값이 있으면 그 위에 덮어씀
+    const presetSafety = (newSettings.riskPreset && RISK_PRESETS[newSettings.riskPreset]) || {};
     this.state.settings = {
       ...this.state.settings,
       ...newSettings,
       strategies: { ...this.state.settings.strategies, ...(newSettings.strategies||{}) },
       params: { ...this.state.settings.params, ...(newSettings.params||{}) },
-      safety: { ...this.state.settings.safety, ...(newSettings.safety||{}) }
+      safety: { ...this.state.settings.safety, ...presetSafety, ...(newSettings.safety||{}) }
     };
     this.save();
-    this.log('config', '설정이 업데이트되었습니다.');
+    this.log('config', '설정이 업데이트되었습니다.' + (newSettings.riskPreset ? ` (프리셋: ${newSettings.riskPreset})` : ''));
     if (this.state.settings.enabled && !this.running) this.start();
     if (!this.state.settings.enabled && this.running) this.stop();
     return this.getStatus();
@@ -345,9 +414,23 @@ class AutoTrader {
       this.state.today = tk;
       this.state.dailyRealizedPnl = 0;
       this.state.stoppedByLoss = false;
-      this.log('system', '📅 새로운 거래일 — 일일 손익/정지 상태 초기화');
+      this.state.consecLosses = 0;
+      this.state.tradesToday = 0;
+      this.log('system', '📅 새로운 거래일 — 일일 손익/연속손익/거래수/정지 상태 초기화');
       this.save();
     }
+  }
+
+  // 봇이 보유 중인 종목 수 / 총 노출금액
+  _botPositionCount() { return Object.keys(this.state.botPositions || {}).length; }
+  _botExposure(held) {
+    let sum = 0; const bp = this.state.botPositions || {};
+    for (const c of Object.keys(bp)) {
+      const q = bp[c].qty || 0;
+      const px = (held && held[c] && held[c].curPrice) || bp[c].entry || 0;
+      sum += q * px;
+    }
+    return sum;
   }
 
   // ── 스캔 목록 갱신: 거래량 상위 + watchList (10분마다) ──
@@ -381,14 +464,6 @@ class AutoTrader {
       if (!s.enabled) return;
       if (!isMarketOpen()) return;
 
-      if (this.state.stoppedByLoss) return;
-      if (this.state.dailyRealizedPnl <= s.safety.dailyLossLimit) {
-        this.state.stoppedByLoss = true;
-        this.save();
-        this.log('safety', `🛑 하루 손실 한도 도달 (${this.state.dailyRealizedPnl.toLocaleString()}원 ≤ ${s.safety.dailyLossLimit.toLocaleString()}원). 오늘 자동매매 중지.`);
-        return;
-      }
-
       const cfg = this.deps.loadConfig();
       if (!cfg.appKey) return;
 
@@ -400,32 +475,38 @@ class AutoTrader {
       if (this.tickCount % 5 === 1) {
         const account = await this.deps.getAccount(cfg);
         if (account?.output1) {
+          let holdingsEval = 0;
           account.output1.forEach(p => {
             const qty = parseInt(p.hldg_qty||0);
-            if (qty > 0) heldPositions[p.pdno] = {
+            if (qty > 0) { heldPositions[p.pdno] = {
               qty, avgPrice: parseInt(p.pchs_avg_pric||0),
               curPrice: parseInt(p.prpr||0),
               pnlPct: parseFloat(p.evlu_pfls_rt||0),
               evalAmt: parseInt(p.evlu_amt||0)
-            };
+            }; holdingsEval += parseInt(p.evlu_amt||0); }
           });
           this._lastHeld = heldPositions;
-          // 봇 지분을 실보유와 대조해 축소 — 수동으로 일부 팔았으면 봇 몫도 줄어든다
+          // 운용 자본 = 예수금 + 보유평가액 (총자산). 사이징·서킷브레이커의 % 기준.
+          const cash = parseInt(account.output2?.[0]?.dnca_tot_amt || account.output2?.[0]?.prvs_rcdl_excc_amt || 0);
+          const cap = cash + holdingsEval;
+          if (cap > 0) this._capital = cap;
+          // 봇 지분을 실보유와 대조 — 수동으로 일부 팔았으면 봇 몫(qty)도 줄이고, 청산됐으면 제거
           const bot = this.state.botPositions || (this.state.botPositions = {});
           for (const c of Object.keys(bot)) {
             const realQty = heldPositions[c]?.qty || 0;
             if (realQty <= 0) delete bot[c];
-            else if (bot[c] > realQty) bot[c] = realQty;
+            else if (bot[c].qty > realQty) bot[c].qty = realQty;
           }
         }
       }
       heldPositions = this._lastHeld || {};
+      const capital = this._capital || 0;
 
       // 미체결 주문 맵 — 잔고 캐시(5틱)와 실제 사이의 공백을 메움
       // (미체결 매도 종목 재매도 = 공매도성 사고, 미체결 매수 누락 = 한도 초과 매수)
       const pending = this._pendingMap();
 
-      // ── 1) 보유 종목 손절/익절 체크 ──
+      // ── 1) 보유 포지션 관리: ATR 손절 / 트레일링 / R 익절 (항상 실행 — 리스크 축소는 정지와 무관) ──
       for (const code of Object.keys(heldPositions)) {
         const pos = heldPositions[code];
         if (nowMin() > timeToMin('15:20')) continue;
@@ -433,12 +514,37 @@ class AutoTrader {
         if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
         const sellable = this._sellableQty(code, pos.qty, s); // ★ 수동 보유 보호: 봇이 산 수량만
         if (sellable < 1) continue;
-        if (pos.pnlPct >= s.safety.takeProfitPct) {
-          await this.sell(cfg, code, sellable, pos.curPrice, `익절 (+${pos.pnlPct}% ≥ +${s.safety.takeProfitPct}%)`, pos);
-        } else if (pos.pnlPct <= s.safety.stopLossPct) {
-          await this.sell(cfg, code, sellable, pos.curPrice, `손절 (${pos.pnlPct}% ≤ ${s.safety.stopLossPct}%)`, pos);
+        const cur = pos.curPrice || 0;
+        const bp = (this.state.botPositions || {})[code];
+        let exit = null;
+        if (bp && bp.stop > 0) {
+          // 트레일링: 고점 갱신 → +trailAfterR 도달 시 손절선을 본전 이상/ATR 추적으로 끌어올림
+          bp.hw = Math.max(bp.hw || bp.entry || cur, cur);
+          if (bp.initRisk > 0 && cur >= bp.entry + s.safety.trailAfterR * bp.initRisk) {
+            let ns = Math.max(bp.stop, bp.entry); // 최소 본전 확보
+            if (bp.atr > 0) ns = Math.max(ns, bp.hw - s.safety.stopAtrMult * bp.atr); // ATR 트레일
+            if (ns > bp.stop) bp.stop = ns;
+          }
+          if (cur <= bp.stop) exit = `손절/트레일 (₩${cur.toLocaleString()} ≤ ₩${Math.round(bp.stop).toLocaleString()})`;
+          else if (bp.target > 0 && cur >= bp.target) exit = `익절 (₩${cur.toLocaleString()} ≥ ₩${Math.round(bp.target).toLocaleString()})`;
+        } else {
+          // 레거시/수동 보호분: 손절정보 없음 → 보수적 % 폴백
+          if (pos.pnlPct <= -3) exit = `손절 (${pos.pnlPct}% ≤ -3%)`;
+          else if (pos.pnlPct >= 6) exit = `익절 (+${pos.pnlPct}% ≥ +6%)`;
         }
+        if (exit) await this.sell(cfg, code, sellable, cur, exit, pos);
       }
+
+      // ── 서킷브레이커: 신규매수 정지 판정 (포지션 관리/리스크 매도는 계속됨) ──
+      const dailyLossLimit = capital > 0 ? capital * (s.safety.dailyLossLimitPct / 100) : -Infinity;
+      let buyingHalted = false;
+      if (this.state.stoppedByLoss) buyingHalted = true;
+      else if (capital > 0 && this.state.dailyRealizedPnl <= dailyLossLimit) {
+        this.state.stoppedByLoss = true; buyingHalted = true; this.save();
+        this.log('safety', `🛑 일일 손실 한도 도달 (${Math.round(this.state.dailyRealizedPnl).toLocaleString()}원 ≤ 자본 ${s.safety.dailyLossLimitPct}% = ${Math.round(dailyLossLimit).toLocaleString()}원) — 오늘 신규매수 중지`);
+      }
+      else if ((this.state.consecLosses || 0) >= s.safety.maxConsecLosses) buyingHalted = true;
+      else if ((this.state.tradesToday || 0) >= s.safety.maxTradesPerDay) buyingHalted = true;
 
       // ── 2) 스캔 목록 전체: 전략 신호 체크 (순차 처리, 딜레이 적용) ──
       const scanTarget = this.scanList.length > 0 ? this.scanList : (s.watchList || []);
@@ -465,12 +571,23 @@ class AutoTrader {
         const held = heldPositions[code];
 
         if (signal?.side === 'BUY') {
+          if (buyingHalted) continue;          // 서킷브레이커 — 신규매수 정지
           if (this.inCooldown(code)) continue; // 쿨다운 내 반복 매수 방지
+          if (capital <= 0) continue;          // 자본 미파악 → 사이징 불가, 매수 보류
           const startMin = s.safety.avoidFirst30min
             ? Math.max(timeToMin(s.safety.tradeStartTime), 9*60+30)
             : timeToMin(s.safety.tradeStartTime);
           const n = nowMin();
           if (n < startMin || n > timeToMin(s.safety.tradeEndTime)) continue;
+
+          // 추세 필터: 가격이 장기MA 위일 때만 매수 (하락추세 '떨어지는 칼' 회피)
+          if (s.safety.trendFilter) {
+            const maL = sma(closes, s.params.maLong);
+            if (!maL || closes[closes.length - 1] < maL) continue;
+          }
+          // 동시 보유(봇) 종목 수 상한 — 신규 종목만 제한, 기존 보유 추가매수는 허용
+          const alreadyBot = !!(this.state.botPositions || {})[code];
+          if (!alreadyBot && this._botPositionCount() >= s.safety.maxPositions) continue;
 
           let price;
           try {
@@ -478,18 +595,27 @@ class AutoTrader {
           } catch(e) { continue; }
           if (!price || price <= 0) continue;
 
-          // 미체결 매수 금액도 한도에 합산 — 체결 전 추가 매수로 maxPerStock 초과 방지
+          // ── 변동성(ATR) 기반 손절거리 → 리스크 기반 수량 ──
+          const atr = calcATR(chart, s.params.atrPeriod);
+          const stopDist = (atr && atr > 0) ? s.safety.stopAtrMult * atr : price * 0.03; // ATR 없으면 3% 폴백
+          const stop = price - stopDist;
+          if (stop <= 0) continue;
+          const riskAmt = capital * (s.safety.riskPerTradePct / 100);   // 거래당 위험액
+          let qty = Math.floor(riskAmt / stopDist);                     // 손절까지 거리로 수량 역산
+          // 종목당 한도(자본%) — 미체결·보유 합산 초과 방지
           const pendBuyAmt = pending[code]?.buyAmt || 0;
           const curHoldAmt = (held ? held.evalAmt : 0) + pendBuyAmt;
-          if (curHoldAmt >= s.safety.maxPerStock) continue;
-
-          const budget = Math.min(s.safety.maxPerOrder, s.safety.maxPerStock - curHoldAmt);
-          const qty = Math.floor(budget / price);
+          const perStockCap = capital * (s.safety.maxPerStockPct / 100);
+          qty = Math.min(qty, Math.floor(Math.max(0, perStockCap - curHoldAmt) / price));
+          // 총 노출 상한(자본%) — 현금버퍼 유지
+          const expRoom = capital * (s.safety.maxExposurePct / 100) - this._botExposure(heldPositions) - pendBuyAmt;
+          qty = Math.min(qty, Math.floor(Math.max(0, expRoom) / price));
           if (qty < 1) {
-            this.log('system', `${name} 예산 부족 (₩${budget.toLocaleString()} / 현재가 ₩${price.toLocaleString()})`);
+            this.log('system', `${name} 매수 보류 (리스크/한도 내 수량 0 — 현재가 ₩${price.toLocaleString()})`);
             continue;
           }
-          await this.buy(cfg, code, qty, price, signal.reason);
+          const target = price + s.safety.takeProfitR * stopDist;       // +R배수 익절
+          await this.buy(cfg, code, qty, price, signal.reason, { stop, target, atr: atr || 0, initRisk: stopDist });
 
         } else if (signal?.side === 'SELL' && held && held.qty > 0) {
           if (this.inCooldown(code)) continue; // 쿨다운 내 중복 매도 방지
@@ -518,7 +644,7 @@ class AutoTrader {
   // (사용자가 손으로 산 주식을 엔진이 멋대로 파는 사고 방지)
   _sellableQty(code, heldQty, s) {
     if (!s.safety.protectManual) return heldQty; // 보호 꺼짐 = 전량 관리 (기존 동작)
-    const botQty = (this.state.botPositions || {})[code] || 0;
+    const botQty = botQtyOf(this.state.botPositions, code);
     return Math.min(botQty, heldQty);
   }
 
@@ -535,7 +661,8 @@ class AutoTrader {
     return m;
   }
 
-  async buy(cfg, code, qty, price, reason) {
+  async buy(cfg, code, qty, price, reason, plan) {
+    plan = plan || {};
     const name = this.deps.codeToName(code) || code;
     this.log('signal', `📈 매수신호 ${name}(${code}) ${qty}주 @ ₩${price.toLocaleString()} — ${reason}`);
     let result;
@@ -549,11 +676,22 @@ class AutoTrader {
     }
     if (result?.rt_cd === '0') {
       this.lastAction[code] = Date.now(); // 쿨다운 시작
-      // 봇 지분 기록 — 이 수량만큼만 엔진이 매도할 권리를 가진다
+      this.state.tradesToday = (this.state.tradesToday || 0) + 1; // 과매매 서킷용
+      // 봇 포지션 기록 — 손절/목표/ATR 포함. 이 수량만큼만 엔진이 매도할 권리를 가진다.
       if (!this.state.botPositions) this.state.botPositions = {};
-      this.state.botPositions[code] = (this.state.botPositions[code] || 0) + qty;
+      const ex = this.state.botPositions[code];
+      if (ex && ex.qty > 0) {
+        const nq = ex.qty + qty;
+        ex.entry = Math.round((ex.entry * ex.qty + price * qty) / nq); // 가중평균 진입가
+        ex.qty = nq;
+        ex.stop = plan.stop || ex.stop; ex.target = plan.target || ex.target;
+        ex.atr = plan.atr || ex.atr; ex.initRisk = plan.initRisk || ex.initRisk;
+        ex.hw = Math.max(ex.hw || ex.entry, price);
+      } else {
+        this.state.botPositions[code] = { qty, entry: price, stop: plan.stop || 0, target: plan.target || 0, atr: plan.atr || 0, initRisk: plan.initRisk || 0, hw: price };
+      }
       this.save();
-      // 낙관적 보유 반영 — 계좌 갱신 전에도 maxPerStock이 누적 매수에 적용되게
+      // 낙관적 보유 반영 — 계좌 갱신 전에도 한도/노출이 누적 매수에 적용되게
       if (!this._lastHeld) this._lastHeld = {};
       const prevPos = this._lastHeld[code];
       this._lastHeld[code] = {
@@ -561,8 +699,9 @@ class AutoTrader {
         avgPrice: price, curPrice: price, pnlPct: 0,
         evalAmt: (prevPos?.evalAmt || 0) + qty * price
       };
-      const msg = `📈 <b>매수 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}\n사유: ${reason}`;
-      this.log('buy', `✅ 매수주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()}`, { code, qty, price, reason });
+      const stopStr = plan.stop ? `\n손절: ₩${Math.round(plan.stop).toLocaleString()} / 목표: ₩${Math.round(plan.target||0).toLocaleString()}` : '';
+      const msg = `📈 <b>매수 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}${stopStr}\n사유: ${reason}`;
+      this.log('buy', `✅ 매수주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()}` + (plan.stop?` (손절 ₩${Math.round(plan.stop).toLocaleString()})`:''), { code, qty, price, reason, stop: plan.stop, target: plan.target });
       if (this.deps.sendTelegram) await this.deps.sendTelegram(cfg, msg);
     } else {
       this.log('error', `❌ 매수 실패 ${name}: ${result?.msg1 || '알수없음'}`);
@@ -583,18 +722,20 @@ class AutoTrader {
     }
     if (result?.rt_cd === '0') {
       this.lastAction[code] = Date.now(); // 쿨다운 시작
+      // 실현손익 기준가: 봇 진입가(있으면) 우선, 없으면 계좌 평단 — 차감 전에 확보
+      const bp = this.state.botPositions && this.state.botPositions[code];
+      const basis = (bp && bp.entry) || pos?.avgPrice || 0;
       // 봇 지분 차감 — 판 만큼 엔진 몫에서 제거
-      if (this.state.botPositions && this.state.botPositions[code]) {
-        this.state.botPositions[code] -= qty;
-        if (this.state.botPositions[code] <= 0) delete this.state.botPositions[code];
-      }
+      if (bp) { bp.qty -= qty; if (bp.qty <= 0) delete this.state.botPositions[code]; }
       if (this._lastHeld && this._lastHeld[code]) delete this._lastHeld[code]; // 낙관적 제거 — 같은 주식 중복 매도 방지
-      let realized = 0;
-      if (pos?.avgPrice) realized = (price - pos.avgPrice) * qty;
+      const realized = basis ? (price - basis) * qty : 0;
+      this.state.dailyRealizedPnl += realized;
+      // 연속 손익 추적 — 서킷브레이커(연속 N패 정지)
+      if (realized < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
+      else if (realized > 0) this.state.consecLosses = 0;
       const pnlStr = (realized>=0?'+':'') + realized.toLocaleString();
       const msg = `📉 <b>매도 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}\n추정손익: ${pnlStr}원\n사유: ${reason}`;
-      this.state.dailyRealizedPnl += realized;
-      this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()} (추정손익 ${pnlStr}원)`, { code, qty, price, reason, realized });
+      this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()} (추정손익 ${pnlStr}원, 연속손실 ${this.state.consecLosses||0})`, { code, qty, price, reason, realized });
       this.save();
       if (this.deps.sendTelegram) await this.deps.sendTelegram(cfg, msg);
     } else {
@@ -603,4 +744,4 @@ class AutoTrader {
   }
 }
 
-module.exports = { AutoTrader, getLogs, decideSignal, calcRSI, sma };
+module.exports = { AutoTrader, getLogs, decideSignal, calcRSI, calcATR, sma, RISK_PRESETS };

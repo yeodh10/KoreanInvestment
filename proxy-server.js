@@ -11,7 +11,10 @@ const fs    = require('fs');
 const path  = require('path');
 const auth  = require('./auth');
 
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT) || 3000;
+// 기본은 127.0.0.1 — 터널/리버스 프록시만 접속, LAN/공인망 직접 노출 차단.
+// LAN 직접 노출이 필요하면 HOST=0.0.0.0 으로 실행.
+const HOST = process.env.HOST || '127.0.0.1';
 const CONFIG_FILE = path.join(__dirname, 'kis-config.json');
 const STOCK_FILE = path.join(__dirname, 'stocks-data.json');
 
@@ -735,16 +738,37 @@ function setCors(res, req) {
   res.setHeader('X-Frame-Options', 'DENY');
 }
 
+// ── 세션 쿠키 플래그 ──
+// 리버스 프록시(Cloudflare/nginx)가 HTTPS를 종단하면 X-Forwarded-Proto=https → Secure 부여.
+// 로컬 평문 HTTP 테스트에서는 Secure를 빼서 쿠키가 정상 설정되게 한다.
+function cookieFlags(req) {
+  const https = req && (req.headers['x-forwarded-proto'] === 'https' || req.socket?.encrypted);
+  return `HttpOnly; Path=/; SameSite=Lax${https ? '; Secure' : ''}`;
+}
+
 // ── 관리자 세션 판별 ──
 function isAdminSession(session) {
   if (!session) return false;
   try { const u = auth.loadUsers()[session.username]; return (u && u.role) === 'admin'; } catch (e) { return false; }
 }
 
+// ── 실제 클라이언트 IP ──
+// 터널/리버스 프록시(Cloudflare) 뒤에서는 socket.remoteAddress가 항상 127.0.0.1이라
+// 모든 사용자가 한 IP로 합쳐진다 → 가입/로그인 제한이 전체에 걸리는 사고.
+// Cloudflare가 넣어주는 CF-Connecting-IP(없으면 X-Forwarded-For 첫 IP)를 우선 사용.
+// 서버는 127.0.0.1 바인딩이라 이 헤더의 출처는 신뢰된 터널뿐(외부 위조 불가).
+function clientIp(req) {
+  const cf = req.headers['cf-connecting-ip'];
+  if (cf) return cf.trim();
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return xff.split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
 // ── 로그인/가입 무차별 시도 방어 (IP 기준) ──
 const _authGuard = {}; // ip → { fails, lockUntil, regs, regDay }
 function authGuardOf(req) {
-  const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
+  const ip = clientIp(req);
   return _authGuard[ip] || (_authGuard[ip] = { fails: 0, lockUntil: 0, regs: 0, regDay: '' });
 }
 
@@ -755,13 +779,25 @@ function jsonRes(res, status, data) {
 }
 
 // ── 요청 바디 파싱 ──
+const MAX_BODY_BYTES = 256 * 1024; // 요청 본문 상한 — 거대 페이로드로 메모리 고갈시키는 DoS 차단
 function parseBody(req) {
   return new Promise((resolve) => {
     let body = '';
-    req.on('data', chunk => body += chunk);
+    let aborted = false;
+    req.on('data', chunk => {
+      if (aborted) return;
+      body += chunk;
+      if (body.length > MAX_BODY_BYTES) { // 상한 초과 → 즉시 연결 차단
+        aborted = true;
+        try { req.destroy(); } catch (_) {}
+        resolve({});
+      }
+    });
     req.on('end', () => {
+      if (aborted) return;
       try { resolve(JSON.parse(body)); } catch(e) { resolve({}); }
     });
+    req.on('error', () => { if (!aborted) { aborted = true; resolve({}); } });
   });
 }
 
@@ -862,8 +898,8 @@ async function refreshAccount(cfg, userKey, priority = 'low') {
       // 체결 판정: 잔고 수량과 저널의 접수 주문 대조
       const holdings = {};
       for (const p of (result.body.output1 || [])) holdings[p.pdno] = parseInt(p.hldg_qty || 0);
-      const filled = orderJournal.reconcile(null, holdings);
-      if (filled) console.log(`[체결확인] 잔고 대조로 ${filled}건 체결 판정`);
+      const filled = orderJournal.reconcile(userKey, holdings); // 자기 주문만 대조 — 타 유저 미체결 주문 오판 방지
+      if (filled) console.log(`[체결확인] (${userKey}) 잔고 대조로 ${filled}건 체결 판정`);
     }
     return payload;
   } catch (e) { return global._acctCache[userKey]?.data || null; }
@@ -929,7 +965,8 @@ async function refreshVol100(cfg, priority = 'low') {
     } catch (e) { /* 실전 도메인 불가 → 폴백 */ }
     // 2) 폴백: 가격캐시(프리페치·실시간이 데워둠)를 우선 사용(KIS 호출 0회),
     //    캐시에 없는 종목만 병렬 조회 → 거래량 정렬
-    const VOL_CODES = ['005930','000660','373220','207940','005380','000270','035420','035720','068270','005490','051910','006400','105560','066570'];
+    // VTS(모의투자)는 거래량 순위 API 미지원 → 시총 상위 50종목으로 폴백(prefetch가 데운 가격캐시 우선).
+    const VOL_CODES = PREFETCH_VOL_CODES;
     const rows = [];
     const missing = [];
     for (const code of VOL_CODES) {
@@ -962,7 +999,8 @@ async function refreshVol100(cfg, priority = 'low') {
 // 등록 유저의 관심종목 + 주요 거래량 종목 시세를 장중 주기적으로 미리 데워 캐시를 채운다.
 // 우선순위 'low' — 사용자 동작(현재가/호가 등 high)을 절대 방해하지 않는다.
 // TTL이 남은 캐시는 건드리지 않아 rate limit 낭비를 막는다.
-const PREFETCH_VOL_CODES = ['005930','000660','373220','207940','005380','000270','035420','035720'];
+// 시총 상위 50 — prefetch가 데우고, refreshVol100 폴백도 이 목록을 사용(단일 소스)
+const PREFETCH_VOL_CODES = ['005930','000660','373220','207940','005380','000270','068270','005490','105560','028260','051910','012330','055550','086790','323410','006400','066570','035720','035420','015760','034020','096770','011170','000720','003670','010130','033780','000120','010950','003490','032830','000810','316140','024110','138040','329180','012450','003550','034730','017670','030200','032640','009150','402340','259960','036570','251270','042700','011200','047050'];
 // KRX 휴장일 (주말 외, 2026) — auto-trader.js와 동일 목록 유지
 const KRX_HOLIDAYS = new Set([
   '2026-01-01','2026-02-16','2026-02-17','2026-02-18','2026-03-02','2026-05-05','2026-05-25',
@@ -991,7 +1029,7 @@ async function prefetchTick() {
       if (!cfg || !cfg.appKey || !cfg.appSecret) continue;
       let watch = [];
       try { watch = (getTrader(uid).state.settings.watchList) || []; } catch (e) {}
-      const codes = [...new Set([...watch, ...PREFETCH_VOL_CODES])].slice(0, 30);
+      const codes = [...new Set([...watch, ...PREFETCH_VOL_CODES])].slice(0, 60);
       for (const code of codes) {
         const c = global._priceCache && global._priceCache[code];
         if (!c || now - c.t >= SWR_TTL.price) refreshPrice(cfg, code, 'low'); // 만료된 것만
@@ -1085,15 +1123,15 @@ async function handleRequest(req, res, session) {
     const g = authGuardOf(req);
     const day = new Date().toISOString().slice(0, 10);
     if (g.regDay !== day) { g.regDay = day; g.regs = 0; }
-    if (g.regs >= 3) { jsonRes(res, 429, { ok: false, message: '가입 시도 초과 — 내일 다시 시도하세요' }); return; }
-    if ((body.password || '').length < 8) { jsonRes(res, 400, { ok: false, message: '비밀번호는 8자 이상이어야 합니다' }); return; }
+    if (g.regs >= 10) { jsonRes(res, 429, { ok: false, message: '가입 시도 초과 — 내일 다시 시도하세요' }); return; } // 같은 IP 하루 10회 (NAT 공유 사용자 고려)
+    if ((body.password || '').length < 4) { jsonRes(res, 400, { ok: false, message: '비밀번호는 4자 이상이어야 합니다' }); return; }
     g.regs++;
     const r = auth.register(body.username, body.password);
     if (r.ok) {
       // 가입 후 자동 로그인
       const lr = auth.login(body.username, body.password);
       if (lr.ok) {
-        res.setHeader('Set-Cookie', `session=${lr.token}; HttpOnly; Path=/; Max-Age=2592000; SameSite=Lax`);
+        res.setHeader('Set-Cookie', `session=${lr.token}; Max-Age=2592000; ${cookieFlags(req)}`);
         jsonRes(res, 200, { ok:true, username: lr.username, role: lr.role });
         return;
       }
@@ -1115,7 +1153,7 @@ async function handleRequest(req, res, session) {
       if (g.fails >= 5) { g.lockUntil = Date.now() + 5 * 60 * 1000; g.fails = 0; }
     } else { g.fails = 0; g.lockUntil = 0; }
     if (r.ok) {
-      res.setHeader('Set-Cookie', `session=${r.token}; HttpOnly; Path=/; Max-Age=2592000; SameSite=Lax`);
+      res.setHeader('Set-Cookie', `session=${r.token}; Max-Age=2592000; ${cookieFlags(req)}`);
       jsonRes(res, 200, { ok:true, username: r.username, role: r.role });
     } else {
       jsonRes(res, 401, r);
@@ -1123,8 +1161,8 @@ async function handleRequest(req, res, session) {
     return;
   }
   if (pathname === '/api/auth/logout' && req.method === 'POST') {
-    auth.logout(cookies.session);
-    res.setHeader('Set-Cookie', 'session=; HttpOnly; Path=/; Max-Age=0');
+    auth.logout(auth.parseCookies(req).session); // cookies는 handleRequest 스코프 밖이었음 → 직접 파싱 (로그아웃 500 수정)
+    res.setHeader('Set-Cookie', `session=; Max-Age=0; ${cookieFlags(req)}`);
     jsonRes(res, 200, { ok:true });
     return;
   }
@@ -1168,8 +1206,8 @@ async function handleRequest(req, res, session) {
   // GET /api/config/export — 설정 전체 내보내기 (API 키 포함)
   if (pathname === '/api/config/export') {
     const cfg = loadConfig();
-    // 토큰은 제외 (재발급되므로 불필요)
-    const { token, tokenExpiry, ...exportable } = cfg;
+    // 토큰(재발급됨)·내부 소유자 각인(__userId)은 제외
+    const { token, tokenExpiry, __userId, ...exportable } = cfg;
     jsonRes(res, 200, { ok: true, data: exportable });
     return;
   }
@@ -1268,7 +1306,8 @@ async function handleRequest(req, res, session) {
   // ── KIS API 프록시 ──
   const cfg = loadConfig();
   if (!cfg.appKey || !cfg.appSecret) {
-    jsonRes(res, 503, { ok: false, message: 'KIS API 미설정. /api/config 로 설정하세요.', simulation: true });
+    // 에러가 아니라 "설정 필요" 상태 — 200으로 응답해 키 입력 전 대시보드 콘솔이 503으로 도배되지 않게.
+    jsonRes(res, 200, { ok: false, needConfig: true, message: 'KIS API 미설정. 설정에서 키를 입력하세요.', simulation: true });
     return;
   }
 
@@ -1988,15 +2027,15 @@ async function handleRequest(req, res, session) {
     jsonRes(res, 404, { ok: false, message: '알 수 없는 API 경로: ' + pathname });
 
   } catch(e) {
-    console.error('[API Error]', pathname, e.message);
-    jsonRes(res, 500, { ok: false, message: e.message });
+    console.error('[API Error]', pathname, e.message); // 상세는 서버 로그에만
+    jsonRes(res, 500, { ok: false, message: '요청 처리 중 오류가 발생했습니다.' }); // 내부 메시지 노출 안 함
   }
 }
 
 // ════════════════════════════════════════
 // 서버 시작
 // ════════════════════════════════════════
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log('');
   console.log('╔════════════════════════════════════════╗');
   console.log('║     AutoTrade KR — 프록시 서버 실행    ║');

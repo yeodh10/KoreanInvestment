@@ -110,7 +110,7 @@ function register(username, password) {
   username = (username || '').trim().toLowerCase();
   if (!username || !password) return { ok:false, message:'아이디와 비밀번호를 입력하세요' };
   if (username.length < 3) return { ok:false, message:'아이디는 3자 이상이어야 합니다' };
-  if (password.length < 8) return { ok:false, message:'비밀번호는 8자 이상이어야 합니다' };
+  if (password.length < 4) return { ok:false, message:'비밀번호는 4자 이상이어야 합니다' };
   const users = loadUsers();
   if (users[username]) return { ok:false, message:'이미 존재하는 아이디입니다' };
   const userId = 'u_' + crypto.randomBytes(6).toString('hex');
@@ -191,6 +191,8 @@ function loadUserConfig(userId) {
 }
 function saveUserConfig(userId, cfg) {
   const p = userConfigPath(userId);
+  // 디렉터리가 (외부 정리/백업 등으로) 사라졌어도 저장이 깨지지 않게 방어적 생성
+  try { if (!fs.existsSync(USER_CONFIG_DIR)) fs.mkdirSync(USER_CONFIG_DIR, { recursive: true }); } catch (e) {}
   // API 키는 암호화해서 저장
   const toSave = {
     appKey: encrypt(cfg.appKey),

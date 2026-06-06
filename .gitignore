@@ -19,3 +19,6 @@ npm-debug.log*
 *.bak
 gen_stocks.js
 Importamos las librerias necesarias.txt
+
+# 터널 임시 주소(재시작마다 바뀜)
+CURRENT-URL.txt
