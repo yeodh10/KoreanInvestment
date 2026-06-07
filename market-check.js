@@ -62,6 +62,48 @@ const ok2 = r => !r.err && r.status === 200;
   const serverUp = ok2(localMe) || (localMe.status >= 200 && localMe.status < 500);
   const tunnelUp = !pubHome.err && pubHome.status < 500;
 
+  // ── 1b) 부하 견딤 미니테스트 — 폭락장 트래픽 폭주를 가정해 메인을 동시 12요청 ──
+  const N = 12, t0 = Date.now();
+  const rs = await Promise.all(Array.from({ length: N }, () => localGet('/')));
+  const oks = rs.filter(r => !r.err && r.status === 200);
+  const mss = oks.map(r => r.ms).sort((a, b) => a - b);
+  const p50 = mss.length ? mss[Math.floor(mss.length * 0.5)] : 0;
+  const p95 = mss.length ? (mss[Math.floor(mss.length * 0.95)] || mss[mss.length - 1]) : 0;
+  L.push(`- 부하 견딤(동시 ${N}요청): 성공 ${oks.length}/${N} · p50 ${p50}ms · p95 ${p95}ms · 총 ${Date.now() - t0}ms`);
+  const loadOk = oks.length === N && p95 < 3000;
+
+  // ── 시장 지수 · 환율 (캐시) ──
+  let idx = '';
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'data-cache.json'), 'utf8'));
+    const m = c['market'] && (c['market'].v || c['market']);
+    if (m) {
+      const g = o => o ? `${(o.bstp_nmix_prpr || 0)} (${o.bstp_nmix_prdy_ctrt || 0}%)` : '-';
+      idx = `KOSPI ${g(m.KOSPI)} · KOSDAQ ${g(m.KOSDAQ)} · USD/KRW ${m.USDKRW && m.USDKRW.rate || '-'}`;
+      L.push(`- 지수/환율: ${idx}`);
+    }
+  } catch (_) {}
+
+  // ── 봇 대응 · 서킷 상태 (유저별 state) ──
+  L.push('\n### 봇 대응 · 서킷');
+  let circuitTripped = false;
+  try {
+    const dir = path.join(__dirname, 'user-configs');
+    const states = fs.existsSync(dir) ? fs.readdirSync(dir).filter(x => /^autotrade-state-/.test(x)) : [];
+    if (!states.length) L.push('- (상태 파일 없음)');
+    for (const sf of states) {
+      let s = {}; try { s = JSON.parse(fs.readFileSync(path.join(dir, sf), 'utf8')); } catch (_) {}
+      const pnl = s.dailyRealizedPnl || 0, sft = s.settings && s.settings.safety || {};
+      const halts = [];
+      if (s.stoppedByLoss) halts.push('일일손실정지');
+      if ((s.consecLosses || 0) >= (sft.maxConsecLosses || 99)) halts.push('연속패정지');
+      if ((s.tradesToday || 0) >= (sft.maxTradesPerDay || 999)) halts.push('거래수한도');
+      if (halts.length) circuitTripped = true;
+      const uid = sf.replace('autotrade-state-', '').replace('.json', '');
+      L.push(`- [${uid}] enabled=${s.settings && s.settings.enabled} · 실현손익 ${(pnl >= 0 ? '+' : '') + Math.round(pnl).toLocaleString()} · 연속패 ${s.consecLosses || 0} · 거래 ${s.tradesToday || 0} · 봇보유 ${Object.keys(s.botPositions || {}).length}종목 · 서킷 ${halts.length ? '🛑 ' + halts.join(',') : '정상범위'}`);
+    }
+  } catch (e) { L.push('- 봇 상태 읽기 실패: ' + e.message); }
+
   // ── 2) 자동매매 엔진 활동 (유저별 로그 최근 항목) ──
   L.push('\n### 자동매매 엔진');
   let engineLines = 0, engineErrs = 0;
@@ -76,15 +118,17 @@ const ok2 = r => !r.err && r.status === 200;
       engineLines += today.length;
       const errs = today.filter(e => e.type === 'error'); engineErrs += errs.length;
       const acts = today.filter(e => e.type === 'buy' || e.type === 'sell');
+      const stops = today.filter(e => /손절|트레일/.test(e.message || ''));
+      const fills = today.filter(e => /체결 확정/.test(e.message || ''));
       const uid = lf.replace('autotrade-log-', '').replace('.json', '');
-      L.push(`- [${uid}] 오늘 로그 ${today.length}건 · 매수/매도 ${acts.length}건 · 오류 ${errs.length}건`);
+      L.push(`- [${uid}] 오늘 로그 ${today.length}건 · 매수/매도 ${acts.length}건 · 손절/트레일 ${stops.length}건 · 체결확정 ${fills.length}건 · 오류 ${errs.length}건`);
       today.slice(0, 5).forEach(e => L.push(`    · ${(e.message || '').slice(0, 90)}`));
     }
   } catch (e) { L.push('- 엔진 로그 읽기 실패: ' + e.message); }
 
   // ── 3) 서버 로그 분석 (KIS 실시간 연결 · 최근 오류) ──
   L.push('\n### 서버 로그 (실시간 연결 · 오류 패턴)');
-  let wsConnected = false, errSnap = [];
+  let wsConnected = false, errSnap = [], serverStable = true;
   try {
     // 로그 끝 64KB만 읽는다 — 로테이션 없이 커진 로그를 통째로 메모리에 올리지 않게
     let buf = '';
@@ -104,6 +148,12 @@ const ok2 = r => !r.err && r.status === 200;
     const errPat = /오류|error|EGW|타임아웃|timeout|실패|ECONN|Unhandled/i;
     const errs = tail.filter(l => errPat.test(l) && !/구독 응답|레거시|ExperimentalWarning/.test(l));
     L.push(`- 최근 400줄 중 오류성 로그: ${errs.length}건`);
+    // 폭락장 부하 견딤 지표
+    const egw = tail.filter(l => /EGW00201|초당 거래건수/.test(l)).length;
+    const reconn = tail.filter(l => /재연결|무수신|강제 재연결/.test(l)).length;
+    const procEx = tail.filter(l => /\[Rejection\]|\[Uncaught\]/.test(l)).length;
+    L.push(`- 부하 견딤: KIS 레이트리밋거부(EGW) ${egw}건 · WS 재연결/무수신 ${reconn}건 · 프로세스 예외 ${procEx}건`);
+    serverStable = procEx === 0;
     errSnap = errs.slice(-6);
     errSnap.forEach(l => L.push(`    · ${l.slice(0, 110)}`));
   } catch (e) { L.push('- 서버 로그 읽기 실패: ' + e.message); }
@@ -112,10 +162,13 @@ const ok2 = r => !r.err && r.status === 200;
   L.push('\n### 종합');
   const verdict = [];
   verdict.push(serverUp ? '🟢 서버 정상' : '🔴 서버 응답 이상');
+  verdict.push(serverStable ? '🟢 무중단(예외 0)' : '🔴 프로세스 예외 발생');
   verdict.push(tunnelUp ? '🟢 터널 정상' : '🔴 터널 이상');
   verdict.push(wsConnected ? '🟢 실시간 연결' : '🟡 실시간 연결 미확인');
+  verdict.push(loadOk ? '🟢 부하 견딤' : '🟡 부하 지연/실패');
   const slow = [localHome, pubHome].filter(r => !r.err && r.ms > 1500);
   verdict.push(slow.length ? `🟡 느린 응답 ${slow.length}건(>1.5s)` : '🟢 응답속도 양호');
+  verdict.push(circuitTripped ? '🛑 봇 서킷 발동' : '🟢 서킷 정상범위');
   verdict.push(engineErrs ? `🟡 엔진 오류 ${engineErrs}건` : '🟢 엔진 오류 없음');
   L.push('- ' + verdict.join(' · '));
 
@@ -129,7 +182,7 @@ const ok2 = r => !r.err && r.status === 200;
   try {
     const auth = require('./auth.js');
     const users = auth.loadUsers();
-    const summary = `📊 <b>장중 점검 ${hhmm}</b>\n${verdict.join('\n')}\n메인 ${localHome.ms||'-'}ms · 공개 ${pubHome.ms||'-'}ms`;
+    const summary = `📊 <b>장중 점검 ${hhmm}</b>\n${idx ? idx + '\n' : ''}${verdict.join('\n')}\n부하 p95 ${p95}ms · 공개 ${pubHome.ms||'-'}ms`;
     for (const uname of Object.keys(users)) {
       const cfg = auth.loadUserConfig(users[uname].userId);
       if (cfg.telegramToken && cfg.telegramChatId) await sendTelegram(cfg.telegramToken, cfg.telegramChatId, summary);
