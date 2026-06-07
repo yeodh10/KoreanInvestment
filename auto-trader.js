@@ -387,6 +387,10 @@ class AutoTrader {
     sf.maxExposurePct    = num(sf.maxExposurePct, 60, 1, 100);
     sf.maxConsecLosses   = Math.round(num(sf.maxConsecLosses, 3, 1, 20));
     sf.maxTradesPerDay   = Math.round(num(sf.maxTradesPerDay, 20, 1, 200));
+    // 시간 문자열 검증 — 'abc' 등이면 timeToMin→NaN으로 시간 게이트가 무력화돼 매매창 무시
+    const okTime = t => typeof t === 'string' && /^([01]?\d|2[0-3]):[0-5]\d$/.test(t);
+    if (!okTime(sf.tradeStartTime)) sf.tradeStartTime = '09:05';
+    if (!okTime(sf.tradeEndTime))   sf.tradeEndTime = '15:00';
     return sf;
   }
 
@@ -519,40 +523,53 @@ class AutoTrader {
               evalAmt: parseInt(p.evlu_amt||0)
             }; holdingsEval += parseInt(p.evlu_amt||0); holdMap[p.pdno] = qty; }
           });
-          this._lastHeld = heldPositions;
-          // 저널 체결 확정 — 브라우저(SSE) 미접속 헤드리스 운영에서도 미체결 가드/자동취소가 정상 동작
-          try { if (this.deps.reconcileOrders) this.deps.reconcileOrders(holdMap); } catch (_) {}
-          // 운용 자본 = 순자산(있으면) 또는 예수금+보유평가액. 미결제 매수분 이중계상 방지로 순자산 우선.
-          const o2 = account.output2?.[0] || {};
-          const cash = parseInt(o2.dnca_tot_amt || o2.prvs_rcdl_excc_amt || 0);
-          const cap = parseInt(o2.nass_amt || 0) || (cash + holdingsEval);
-          if (cap > 0) this._capital = cap;
-          // ★ 봇 지분 ↔ 실보유 대조 + 실현손익 확정.
-          //   "체결되면 도달할 수량"(실보유 + 미체결 매수 잔량)보다 실제가 적으면 그만큼이
-          //   (봇/수동) 매도 체결된 것 → 그 수량만 실현손익 계상하고 봇 몫 축소.
-          //   매도는 '접수'가 아니라 여기(실제 체결)에서만 확정 → 미체결 자동취소 시 포지션 고아화 방지,
-          //   부분체결 중 매수분을 매도로 오인하는 오삭감도 방지한다.
           const bot = this.state.botPositions || (this.state.botPositions = {});
-          for (const c of Object.keys(bot)) {
-            const realQty = holdMap[c] || 0;
-            const pendBuyQty = pending[c]?.buyQty || 0;
-            const expected = realQty + pendBuyQty;
-            if (expected < (bot[c].qty || 0)) {
-              const soldQty = bot[c].qty - expected;
-              const basis = bot[c].entry || 0;
-              const sellPx = bot[c].lastSellPrice || heldPositions[c]?.curPrice || basis;
-              if (basis > 0 && sellPx > 0) {
-                const realized = (sellPx - basis) * soldQty;
-                this.state.dailyRealizedPnl += realized;
-                if (realized < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
-                else if (realized > 0) this.state.consecLosses = 0;
-                this.log('sell', `🧾 체결 확정 ${this.deps.codeToName(c)||c} ${soldQty}주 (실현손익 ${(realized>=0?'+':'')+Math.round(realized).toLocaleString()}원, 연속손실 ${this.state.consecLosses||0})`, { code:c, soldQty, realized });
+          const prevHeld = this._lastHeld || {};
+          const holdEmpty = Object.keys(holdMap).length === 0;
+          // ★ rt_cd=0인데 output1이 비거나 누락된 "일시적 빈 잔고"가 봇 지분을 통째로 지우는 사고 방지:
+          //   직전엔 보유가 있었는데 갑자기 0이고 봇 포지션이 남아 있으면 한 틱 대조 보류(직전 잔고 유지)하고 재확인.
+          if (holdEmpty && Object.keys(prevHeld).length > 0 && Object.keys(bot).length > 0 && (this._emptyBalanceStreak||0) < 1) {
+            this._emptyBalanceStreak = (this._emptyBalanceStreak||0) + 1;
+            this.log('error', '⚠️ 빈 잔고 응답(일시 의심) — 이번 틱 잔고 대조 보류, 직전 잔고 유지');
+          } else {
+            this._emptyBalanceStreak = holdEmpty ? (this._emptyBalanceStreak||0) + 1 : 0;
+            this._lastHeld = heldPositions;
+            // 저널 체결 확정 — 브라우저(SSE) 미접속 헤드리스 운영에서도 미체결 가드/자동취소가 정상 동작
+            try { if (this.deps.reconcileOrders) this.deps.reconcileOrders(holdMap); } catch (_) {}
+            // 운용 자본 = 순자산(있으면) 또는 예수금+보유평가액. 미결제 매수분 이중계상 방지로 순자산 우선.
+            const o2 = account.output2?.[0] || {};
+            const cash = parseInt(o2.dnca_tot_amt || o2.prvs_rcdl_excc_amt || 0);
+            const cap = parseInt(o2.nass_amt || 0) || (cash + holdingsEval);
+            if (cap > 0) this._capital = cap;
+            // ★ 봇 지분 ↔ 실보유 대조. "체결되면 도달할 수량"(실보유+미체결 매수잔량)보다 실제가 적으면 축소.
+            //   ★★ 실현손익은 "우리가 실제로 낸 매도분(_sellPending)"에만 계상한다. 낙관적으로 더했다
+            //   미체결·취소된 매수분이 줄어든 것을 '매도'로 오인해 유령 손익이 일일손익/연속패 서킷을 오염시키던
+            //   문제를 차단. 매도는 '접수'가 아니라 여기(실제 체결)에서만 확정 → 미체결 취소 시 고아화도 방지.
+            for (const c of Object.keys(bot)) {
+              const realQty = holdMap[c] || 0;
+              const pendBuyQty = pending[c]?.buyQty || 0;
+              const expected = realQty + pendBuyQty;
+              if (expected < (bot[c].qty || 0)) {
+                const shrink = bot[c].qty - expected;
+                const soldByBot = Math.min(shrink, bot[c]._sellPending || 0); // 실제 낸 매도분만 손익 계상
+                if (soldByBot > 0) {
+                  const basis = bot[c].entry || 0;
+                  const sellPx = bot[c].lastSellPrice || heldPositions[c]?.curPrice || basis;
+                  if (basis > 0 && sellPx > 0) {
+                    const realized = (sellPx - basis) * soldByBot;
+                    this.state.dailyRealizedPnl += realized;
+                    if (realized < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
+                    else if (realized > 0) this.state.consecLosses = 0;
+                    this.log('sell', `🧾 체결 확정 ${this.deps.codeToName(c)||c} ${soldByBot}주 (실현손익 ${(realized>=0?'+':'')+Math.round(realized).toLocaleString()}원, 연속손실 ${this.state.consecLosses||0})`, { code:c, soldQty:soldByBot, realized });
+                  }
+                  bot[c]._sellPending = (bot[c]._sellPending || 0) - soldByBot;
+                }
+                bot[c].qty = expected; // 미체결 매수 취소분은 손익 없이 수량만 축소
               }
-              bot[c].qty = expected;
+              if ((bot[c].qty || 0) <= 0 && (pending[c]?.buyQty || 0) <= 0) delete bot[c];
             }
-            if ((bot[c].qty || 0) <= 0 && pendBuyQty <= 0) delete bot[c];
+            this.save();
           }
-          this.save();
         }
       }
       heldPositions = this._lastHeld || {};
@@ -799,7 +816,7 @@ class AutoTrader {
       //   접수 즉시 차감하면 미체결→자동취소 시 포지션이 봇 장부에서 사라져 손절 관리가
       //   영구 중단되는 고아화 사고가 난다. 여기선 체결 확정용 기준가만 기록.
       const bp = this.state.botPositions && this.state.botPositions[code];
-      if (bp) bp.lastSellPrice = price;
+      if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; } // 실제 낸 매도분 — 잔고대조에서 이 수량만 손익 계상
       const msg = `📉 <b>매도 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 ${pxStr}\n사유: ${reason}`;
       this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 ${pxStr} — ${reason}`, { code, qty, price, reason, market });
       this.save();

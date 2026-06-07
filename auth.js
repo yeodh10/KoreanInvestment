@@ -31,6 +31,7 @@ if (!fs.existsSync(USER_CONFIG_DIR)) {
 const db = new DatabaseSync(AUTH_DB);
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA synchronous = NORMAL');
+db.exec('PRAGMA busy_timeout = 5000'); // market-check 등 타 프로세스와 락 경합 시 5초 대기(로그인 500 방지)
 db.exec(`CREATE TABLE IF NOT EXISTS users (
   userId TEXT PRIMARY KEY,
   username TEXT UNIQUE NOT NULL,
@@ -142,7 +143,7 @@ function _atomicWrite(file, text) {
 // ── 유저 저장소 ── (하위호환: {username: {userId, username, role, ...}} 형태 반환)
 function loadUsers() {
   const rows = db.prepare('SELECT userId,username,passwordHash,createdAt,role FROM users').all();
-  const out = {};
+  const out = Object.create(null); // __proto__ 키가 프로토타입을 건드리지 않게
   for (const u of rows) out[u.username] = u;
   return out;
 }
@@ -152,6 +153,8 @@ function register(username, password) {
   username = (username || '').trim().toLowerCase();
   if (!username || !password) return { ok:false, message:'아이디와 비밀번호를 입력하세요' };
   if (username.length < 3) return { ok:false, message:'아이디는 3자 이상이어야 합니다' };
+  // 영문 소문자·숫자·_ 만 — '__proto__' 등 프로토타입 오염 키나 특수문자 차단
+  if (!/^[a-z0-9_]{3,20}$/.test(username)) return { ok:false, message:'아이디는 영문 소문자·숫자·_ 3~20자만 가능합니다' };
   if (password.length < 8) return { ok:false, message:'비밀번호는 8자 이상이어야 합니다' }; // 실거래 서비스 — 무차별 대입 방어
   const userId = 'u_' + crypto.randomBytes(6).toString('hex');
   const createdAt = new Date().toISOString();

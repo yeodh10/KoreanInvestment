@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
-const CACHE_FILE = path.join(__dirname, 'data-cache.json');
+const CACHE_FILE = process.env.CACHE_FILE || path.join(__dirname, 'data-cache.json'); // 테스트는 임시 파일로 격리
 
 // ── 마지막 정상 데이터 저장소 (영속) ──
 let _store = null;

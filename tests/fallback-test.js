@@ -3,6 +3,10 @@
  */
 const path = require('path');
 const fs = require('fs');
+// 격리된 임시 캐시 파일 — 운영 data-cache.json 오염·상태 의존 방지
+const CACHE = path.join(__dirname, '..', 'data-cache.test.json');
+process.env.CACHE_FILE = CACHE;
+try { fs.unlinkSync(CACHE); } catch (e) {}
 const fb = require(path.join(__dirname, '..', 'data-fallback.js'));
 
 let pass = 0, fail = 0;
@@ -37,19 +41,19 @@ function ok(name, cond) { cond ? (pass++, console.log('  ✅', name)) : (fail++,
   fb.save('test:tick', { output: [{ stck_prpr: '71900' }] });
   ok('저장 후 조회', fb.get('test:tick').output[0].stck_prpr === '71900');
   fb.flush(true);
-  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data-cache.json'), 'utf8'));
+  const raw = JSON.parse(fs.readFileSync(CACHE, 'utf8'));
   ok('디스크 영속화', raw['test:tick'].v.output[0].stck_prpr === '71900');
 
   console.log('== 환율 폴백 ==');
+  // 임시 캐시라 fx 키가 없어 fetcher가 실제로 호출됨 → 파싱·라운딩 경로를 진짜로 검증
   fb._setFxFetcher(async () => ({ rates: { KRW: 1387.55 } }));
-  // 캐시된 값이 있을 수 있으니 키 제거 후 테스트
-  fb.save('fx:USDKRW', undefined); // no-op (undefined는 저장 안 됨)
   const v1 = await fb.fetchUsdKrw();
-  ok('환율 수신 (공개소스)', v1 > 1000 && v1 < 3000);
+  ok('환율 수신·파싱 (공개소스)', Math.abs(v1 - 1387.55) < 1);
   fb._setFxFetcher(async () => { throw new Error('down'); });
   const v2 = await fb.fetchUsdKrw();
-  ok('소스 다운 시 마지막 값', v2 === v1);
+  ok('소스 다운 시 마지막 값 폴백', v2 === v1);
 
+  try { fs.unlinkSync(CACHE); } catch (e) {}
   console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
   process.exit(fail ? 1 : 0);
 })();

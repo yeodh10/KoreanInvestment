@@ -16,6 +16,7 @@ autotrade-log.json
 autotrade-state-*.json
 autotrade-log-*.json
 data-cache.json
+data-cache.test.json
 order-journal.json
 order-journal.json.migrated
 # 주문 저널 SQLite DB (+ WAL 사이드카) · 테스트 임시 DB

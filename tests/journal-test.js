@@ -43,6 +43,15 @@ ok('체결수량 반영', kk.tot_ccld_qty === '2' && kk.rmn_qty === '0');
 const sold = rows.find(r => r.pdno === '005490');
 ok('취소 표시', sold.cncl_yn === 'Y' && sold._status === '취소');
 
+// 동일 odno 다건(유저 간 ODNO 충돌) — userId로 정확히 자기 주문만 체결/취소
+J.add({ userId: 'ju1', side: 'buy', code: '111111', qty: 5, price: 100, orderType: '00', odno: 'DUP', orgNo: '1', qtyBefore: 0 });
+J.add({ userId: 'ju2', side: 'buy', code: '222222', qty: 3, price: 100, orderType: '00', odno: 'DUP', orgNo: '1', qtyBefore: 0 }); // 더 최신(id 큼)
+ok('동일 odno: u1 체결통보가 u1 주문에 기록', J.markFilled('DUP', 5, 100, 'ju1') === true);
+ok('u1 주문 체결 확정', J.todayList('ju1').find(e => e.odno === 'DUP').status === '체결');
+ok('u2 주문은 영향 없음(접수 유지)', J.todayList('ju2').find(e => e.odno === 'DUP').status === '접수');
+ok('동일 odno: u2 취소가 u2 주문에만 적용', J.markCancel('DUP', 'ju2') === true && J.todayList('ju2').find(e => e.odno === 'DUP').status === '취소');
+ok('u1 주문은 취소 영향 없음(체결 유지)', J.todayList('ju1').find(e => e.odno === 'DUP').status === '체결');
+
 // 멀티유저 동시 기록 — 한 유저 기록이 다른 유저 것에 덮여 사라지지 않음(SQLite 원자성)
 const NU = 200;
 for (let i = 0; i < NU; i++) {

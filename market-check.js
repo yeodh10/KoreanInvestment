@@ -86,8 +86,18 @@ const ok2 = r => !r.err && r.status === 200;
   L.push('\n### 서버 로그 (실시간 연결 · 오류 패턴)');
   let wsConnected = false, errSnap = [];
   try {
-    const raw = fs.readFileSync('/var/log/autotrade.log', 'utf8').split('\n');
-    const tail = raw.slice(-400);
+    // 로그 끝 64KB만 읽는다 — 로테이션 없이 커진 로그를 통째로 메모리에 올리지 않게
+    let buf = '';
+    try {
+      const fd = fs.openSync('/var/log/autotrade.log', 'r');
+      const { size } = fs.fstatSync(fd);
+      const len = Math.min(size, 65536);
+      const b = Buffer.alloc(len);
+      fs.readSync(fd, b, 0, len, size - len);
+      fs.closeSync(fd);
+      buf = b.toString('utf8');
+    } catch (_) { buf = fs.readFileSync('/var/log/autotrade.log', 'utf8'); }
+    const tail = buf.split('\n').slice(-400);
     const lastWs = [...tail].reverse().find(l => /KIS WebSocket|WS 오류|연결 끊김|재연결/.test(l));
     wsConnected = !!(lastWs && /연결됨/.test(lastWs));
     L.push(`- 실시간 WS 최근 상태: ${lastWs ? lastWs.replace(/^.*?\]\s*/, '').slice(0, 80) : '(로그 없음)'}`);

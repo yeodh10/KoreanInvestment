@@ -202,14 +202,24 @@ function mkTrader(deps) {
   ok('매도 접수만으로 봇 지분 차감 안 함', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
   ok('매도 접수 시점 실현손익 미확정(0)', t.state.dailyRealizedPnl === 0);
 
-  // 13) 잔고 대조로 매도 체결 확정 → 실현손익 계상 + 봇 지분 제거
+  // 13) 잔고 대조로 매도 체결 확정 → 실현손익 계상 + 봇 지분 제거 (_sellPending=실제 낸 매도분)
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000) })); // 실보유 0 = 전량 체결됨
-  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0, lastSellPrice:66000 } };
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0, lastSellPrice:66000, _sellPending:10 } };
   t.tickCount = 0; // 다음 틱에서 잔고 갱신(tickCount%5===1)
   await t.tick();
   ok('잔고 대조로 체결 확정 — 실현손익 +60,000 계상', t.state.dailyRealizedPnl === 60000);
   ok('체결 확정 후 봇 지분 제거', !t.state.botPositions['005930']);
+
+  // 13-1) 부분체결 매수 후 잔여취소 → 미체결분이 '매도'로 오계상되지 않음(유령 손익 방지)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 })); // 실보유 005930 10주
+  t.state.botPositions = { '005930': { qty:14, entry:60000, stop:50000, target:200000, atr:1000, initRisk:1000, hw:70000 } }; // 14주 낙관기록, _sellPending 없음
+  t.deps.getPendingOrders = () => []; // 미체결 4주가 취소됨 → pendBuyQty 0
+  t.tickCount = 0;
+  await t.tick();
+  ok('미체결 매수 취소분이 매도로 오계상 안 됨(손익 0)', t.state.dailyRealizedPnl === 0);
+  ok('봇 지분은 실보유로 축소(14→10), 손익 미발생', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
 
   // 14) 부분체결: 미체결 매수 잔량이 있으면 봇 지분을 매도로 오삭감하지 않음
   orders.length = 0;

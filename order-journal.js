@@ -24,6 +24,7 @@ const LEGACY_JSON = path.join(__dirname, 'order-journal.json');
 const db = new DatabaseSync(DB_FILE);
 db.exec('PRAGMA journal_mode = WAL');   // 동시 읽기/쓰기 견고
 db.exec('PRAGMA synchronous = NORMAL'); // 내구성/속도 균형 (WAL에서 안전)
+db.exec('PRAGMA busy_timeout = 5000');  // 다른 프로세스와 락 경합 시 즉시 BUSY 대신 5초 대기
 db.exec(`CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   t INTEGER NOT NULL,
@@ -101,6 +102,15 @@ function add(e) {
 // userId 지정 시 그 유저 주문만 매칭 — 타 유저 체결통보가 내 주문을 건드리는 것 방지
 const _updFill = db.prepare(
   `UPDATE orders SET fillQty = ?, fillPrice = ?, price = ?, status = ?, filledAt = ? WHERE id = ?`);
+// userId는 WHERE 조건에 포함한다. LIMIT 뒤에서 거르면, 같은 odno(계좌별 일련번호라 유저 간 충돌 가능)의
+// 최신 행이 타 유저 것일 때 내 유저 체결이 누락된다. with/without 두 스테이트먼트로 분기.
+const _findFillUser = db.prepare(
+  `SELECT * FROM orders WHERE odno = ? AND status != '취소' AND userId = ? ORDER BY id DESC LIMIT 1`);
+const _findFillAny = db.prepare(
+  `SELECT * FROM orders WHERE odno = ? AND status != '취소' ORDER BY id DESC LIMIT 1`);
+function _findFillByOdno(odno, userId) {
+  return (userId ? _findFillUser.get(odno, userId) : _findFillAny.get(odno)) || null;
+}
 function markFilled(odno, qty, price, userId) {
   const e = _findFillByOdno(odno, userId);
   if (!e) return false;
@@ -118,23 +128,17 @@ function markFilled(odno, qty, price, userId) {
   _updFill.run(fillQty, fillPrice, newPrice, status, Date.now(), e.id);
   return true;
 }
-// node:sqlite 명명 파라미터 폴백 (드라이버 차이 대비)
-const _findFillPos = db.prepare(
-  `SELECT * FROM orders WHERE odno = ? AND status != '취소' ORDER BY id DESC LIMIT 1`);
-function _findFillByOdno(odno, userId) {
-  const r = _findFillPos.get(odno);
-  if (r && userId && r.userId !== userId) return null;
-  return r || null;
-}
-
 // ── 취소 처리 — 부분체결분 이력은 보존 ──
-const _findCancel = db.prepare(
+// userId는 WHERE에 포함(markFilled와 동일 이유 — 동일 odno 타 유저 최신행이 가리는 것 방지)
+const _findCancelUser = db.prepare(
+  `SELECT * FROM orders WHERE odno = ? AND status IN ('접수','부분체결') AND userId = ? ORDER BY id DESC LIMIT 1`);
+const _findCancelAny = db.prepare(
   `SELECT * FROM orders WHERE odno = ? AND status IN ('접수','부분체결') ORDER BY id DESC LIMIT 1`);
 const _updCancel = db.prepare(
   `UPDATE orders SET status = ?, qty = ?, canceledRemainder = 1 WHERE id = ?`);
 function markCancel(odno, userId) {
-  const e = _findCancel.get(odno);
-  if (!e || (userId && e.userId !== userId)) return false;
+  const e = userId ? _findCancelUser.get(odno, userId) : _findCancelAny.get(odno);
+  if (!e) return false;
   // 일부라도 체결된 주문의 취소 = 잔량 취소. 체결 이력을 '취소'로 덮지 않는다.
   const status = (e.fillQty > 0) ? '체결' : '취소';
   const qty = (e.fillQty > 0) ? e.fillQty : e.qty; // 실제 체결 수량으로 확정

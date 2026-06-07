@@ -1132,10 +1132,21 @@ async function prefetchTick() {
       if (!cfg || !cfg.appKey || !cfg.appSecret) continue;
       let watch = [];
       try { watch = (getTrader(uid).state.settings.watchList) || []; } catch (e) {}
-      const codes = [...new Set([...watch, ...PREFETCH_VOL_CODES])].slice(0, 60);
-      for (const code of codes) {
+      const codes = [...new Set([...watch, ...PREFETCH_VOL_CODES, '005930'])].slice(0, 60);
+      if (!global._stockinfoCache) global._stockinfoCache = {};
+      if (!global._obCache) global._obCache = {};
+      if (!global._tickCache) global._tickCache = {};
+      for (let i = 0; i < codes.length; i++) {
+        const code = codes[i];
         const c = global._priceCache && global._priceCache[code];
         if (!c || now - c.t >= SWR_TTL.price) refreshPrice(cfg, code, 'low'); // 만료된 것만
+        // ★ 첫 클릭 콜드 제거: 종목정보 캐시는 비어있을 때만 워밍(이후엔 라우트 SWR이 신선도 유지).
+        if (!global._stockinfoCache[code]) refreshStockinfo(cfg, code, 'low');
+        // 호가·체결은 무겁다 → 첫 클릭 가능성 높은 상위 8종목만 워밍
+        if (i < 8) {
+          if (!global._obCache[code]) refreshOrderbook(cfg, code, 'low');
+          if (!global._tickCache[code]) refreshTick(cfg, code, 'low');
+        }
       }
       // 지수·거래량 캐시도 데움(전역 캐시 — TTL 남으면 건너뜀, 중복은 플래그가 차단)
       if (!global._marketCache || !global._marketCache.data || now - global._marketCache.ts >= SWR_TTL.market) refreshMarket(cfg, 'low');
@@ -1181,6 +1192,18 @@ async function cancelStaleOrders() {
   }
 }
 setInterval(() => { cancelStaleOrders().catch(() => {}); }, 60000).unref();
+
+// ── 장중 SWR 캐시(종목정보·호가·체결) KST 자정 정리 ──
+// 코드별로 무한 누적되던 메모리 + 익일 개장 전 전일값 서빙을 차단. _priceCache는 디스크 영속·stale 처리가 있어 제외.
+function scheduleIntradayCacheClear() {
+  const t = setTimeout(() => {
+    global._stockinfoCache = {}; global._obCache = {}; global._tickCache = {};
+    console.log('[캐시] 장중 SWR 캐시 자정 정리 (stockinfo/ob/tick)');
+    scheduleIntradayCacheClear();
+  }, msToKstMidnight() + 1000);
+  if (t.unref) t.unref();
+}
+scheduleIntradayCacheClear();
 
 // ════════════════════════════════════════
 // HTTP 서버
@@ -1626,7 +1649,11 @@ async function handleRequest(req, res, session) {
             FID_INPUT_DATE_1: fromDate, FID_INPUT_DATE_2: toDate,
             FID_PERIOD_DIV_CODE: 'D', FID_ORG_ADJ_PRC: '0'
           }, 'high');
-          if (dayResult.body?.output2?.length) global._minDayCache[mdKey] = dayResult;
+          if (dayResult.body?.output2?.length) {
+            // toDate가 매일 바뀌어 키가 영구 누적되던 메모리 누수 차단 — 오늘 키 외엔 제거
+            for (const k in global._minDayCache) if (!k.endsWith('_' + toDate)) delete global._minDayCache[k];
+            global._minDayCache[mdKey] = dayResult;
+          }
         }
         if (dayResult.body?.output1) output1 = dayResult.body.output1;
         const dayRows = (dayResult.body?.output2 || [])
@@ -1837,6 +1864,7 @@ async function handleRequest(req, res, session) {
     // inquire-balance의 예수금과 달리 미수·증거금·미결제를 반영한 실제 주문가능액.
     if (pathname === '/api/buyable') {
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '종목코드 형식 오류' }); return; }
       const price = parseInt(query.price || 0);
       const trId = cfg.txMode === 'vts' ? 'VTTC8908R' : 'TTTC8908R';
       const [cano, prd] = (cfg.accNo || '').split('-');
@@ -1851,13 +1879,20 @@ async function handleRequest(req, res, session) {
           cash: parseInt(o.ord_psbl_cash || o.nrcvb_buy_amt || 0),  // 주문가능현금
           maxQty: parseInt(o.max_buy_qty || o.nrcvb_buy_qty || 0)    // 최대 매수 가능 수량
         }, msg: r.body?.msg1 });
-      } catch (e) { jsonRes(res, 200, { ok: false, message: e.message }); }
+      } catch (e) { jsonRes(res, 200, { ok: false, message: '매수가능 조회 실패' }); }
       return;
     }
 
     // POST /api/order — 주문
     if (pathname === '/api/order' && req.method === 'POST') {
       const body = await parseBody(req);
+      // ★ 서버측 입력 검증 — 멀티유저 서비스에서 서버가 신뢰경계. 변조 클라이언트의 음수/NaN/거대값 차단.
+      const ordType = (body.orderType === '01') ? '01' : '00';
+      const qtyN = Number(body.qty), priceN = Number(body.price || 0);
+      if (!/^[0-9A-Z]{6}$/.test(String(body.code || ''))) { jsonRes(res, 400, { ok: false, message: '종목코드 형식 오류' }); return; }
+      if (body.side !== 'buy' && body.side !== 'sell') { jsonRes(res, 400, { ok: false, message: 'side 오류' }); return; }
+      if (!Number.isInteger(qtyN) || qtyN < 1 || qtyN > 1000000) { jsonRes(res, 400, { ok: false, message: '수량은 1 이상의 정수여야 합니다' }); return; }
+      if (ordType === '00' && (!Number.isFinite(priceN) || priceN <= 0)) { jsonRes(res, 400, { ok: false, message: '지정가 주문은 0보다 큰 가격이 필요합니다' }); return; }
       const isBuy  = body.side === 'buy';
       const trId   = cfg.txMode === 'vts'
         ? (isBuy ? 'VTTC0802U' : 'VTTC0801U')
@@ -1867,17 +1902,17 @@ async function handleRequest(req, res, session) {
         CANO: cano || '',
         ACNT_PRDT_CD: acntPrdtCd || '01',
         PDNO: body.code,
-        ORD_DVSN: body.orderType || '00',
-        ORD_QTY: String(body.qty),
-        ORD_UNPR: String(body.price || 0)
+        ORD_DVSN: ordType,
+        ORD_QTY: String(qtyN),
+        ORD_UNPR: ordType === '01' ? '0' : String(priceN) // 시장가는 단가 0
       };
       // 큐를 통해 직렬화 + 초당 한도 거부 시 자동 재시도
       const result = await kisPost(cfg, '/uapi/domestic-stock/v1/trading/order-cash', trId, orderObj);
       console.log(`[주문] ${isBuy?'매수':'매도'} ${body.code} ${body.qty}주 → ${result.body?.rt_cd==='0'?'✅접수':'❌'+(result.body?.msg1||'실패')}`);
       if (result.body?.rt_cd === '0') {
         orderJournal.add({
-          userId: session.userId, side: body.side, code: body.code, qty: body.qty,
-          price: body.price || 0, orderType: body.orderType || '00',
+          userId: session.userId, side: body.side, code: body.code, qty: qtyN,
+          price: ordType === '01' ? 0 : priceN, orderType: ordType,
           odno: result.body?.output?.ODNO, orgNo: result.body?.output?.KRX_FWDG_ORD_ORGNO,
           qtyBefore: heldQtyOf(session.userId || 'default', body.code)
         });
@@ -1950,6 +1985,7 @@ async function handleRequest(req, res, session) {
     // GET /api/cancel — 주문 취소
     if (pathname === '/api/cancel' && req.method === 'POST') {
       const body = await parseBody(req);
+      if (!/^[0-9]{1,20}$/.test(String(body.ordNo || ''))) { jsonRes(res, 400, { ok: false, message: '주문번호 형식 오류' }); return; }
       const trId = cfg.txMode === 'vts' ? 'VTTC0803U' : 'TTTC0803U';
       const [cano, acntPrdtCd] = (cfg.accNo||'').split('-');
       const cq = parseInt(body.qty) || 0; // 문자열 "0"도 전량취소로 일관 처리
@@ -2141,5 +2177,8 @@ server.on('error', e => {
   process.exit(1);
 });
 
-process.on('uncaughtException', e => console.error('[Uncaught]', e.message));
+process.on('uncaughtException', e => console.error('[Uncaught]', e && e.stack || e));
+// 미처리 promise reject — Node 15+ 기본은 프로세스 강제 종료. 가드 밖 reject 한 건이
+// 멀티유저 서버 전체를 즉사시키는 것을 막는다(로그만 남기고 생존).
+process.on('unhandledRejection', e => console.error('[Rejection]', e && e.stack || e));
 // Phase 0+1 속도 개선 적용 (앱키별 큐 · 이중 스로틀 제거 · SWR · prefetch)
