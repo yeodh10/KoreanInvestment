@@ -545,10 +545,17 @@ class AutoTrader {
             //   ★★ 실현손익은 "우리가 실제로 낸 매도분(_sellPending)"에만 계상한다. 낙관적으로 더했다
             //   미체결·취소된 매수분이 줄어든 것을 '매도'로 오인해 유령 손익이 일일손익/연속패 서킷을 오염시키던
             //   문제를 차단. 매도는 '접수'가 아니라 여기(실제 체결)에서만 확정 → 미체결 취소 시 고아화도 방지.
+            const now = Date.now();
             for (const c of Object.keys(bot)) {
               const realQty = holdMap[c] || 0;
               const pendBuyQty = pending[c]?.buyQty || 0;
               const expected = realQty + pendBuyQty;
+              // _sellPending 누수 정리: 미체결 매도가 없고(취소·전량체결됨), 매도 접수 후 6분이 지났는데도
+              // _sellPending이 남아 있으면 = 지정가 매도가 미체결로 취소된 것. 0으로 정리해 이후 수동매도가
+              // 옛 매도가로 오귀속되는 것을 막는다. (시장가 즉시체결은 ≤5분 내 잔고대조에서 소비되므로 6분이면 안전.)
+              if ((bot[c]._sellPending || 0) > 0 && !(pending[c] && pending[c].hasSell) && bot[c]._sellAt && (now - bot[c]._sellAt) > 6*60*1000) {
+                bot[c]._sellPending = 0;
+              }
               if (expected < (bot[c].qty || 0)) {
                 const shrink = bot[c].qty - expected;
                 const soldByBot = Math.min(shrink, bot[c]._sellPending || 0); // 실제 낸 매도분만 손익 계상
@@ -807,7 +814,11 @@ class AutoTrader {
     } catch (e) {
       // 한 종목 매도 예외가 다른 보유 종목의 손절을 막지 않도록 틱을 끊지 않음 + 보수적 쿨다운
       this.lastAction[code] = Date.now();
-      this.log('error', `❌ 매도주문 예외 ${name}: ${e.message} (쿨다운 적용)`);
+      // 시장가 매도는 타임아웃이어도 체결됐을 가능성이 높다 → 봇 매도분으로 기록해 잔고대조에서 손실이
+      // 계상되게(손실 누락→손실한도 서킷 약화 방지). 지정가는 미체결 가능성이 있어 기록하지 않음.
+      if (market) { const bp = this.state.botPositions && this.state.botPositions[code];
+        if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; bp._sellAt = Date.now(); } }
+      this.log('error', `❌ 매도주문 예외 ${name}: ${e.message} (쿨다운 적용${market?', 시장가는 체결 가정 기록':''})`);
       return;
     }
     if (result?.rt_cd === '0') {
@@ -816,7 +827,7 @@ class AutoTrader {
       //   접수 즉시 차감하면 미체결→자동취소 시 포지션이 봇 장부에서 사라져 손절 관리가
       //   영구 중단되는 고아화 사고가 난다. 여기선 체결 확정용 기준가만 기록.
       const bp = this.state.botPositions && this.state.botPositions[code];
-      if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; } // 실제 낸 매도분 — 잔고대조에서 이 수량만 손익 계상
+      if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; bp._sellAt = Date.now(); } // 실제 낸 매도분 — 잔고대조에서 이 수량만 손익 계상
       const msg = `📉 <b>매도 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 ${pxStr}\n사유: ${reason}`;
       this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 ${pxStr} — ${reason}`, { code, qty, price, reason, market });
       this.save();

@@ -221,6 +221,27 @@ function mkTrader(deps) {
   ok('미체결 매수 취소분이 매도로 오계상 안 됨(손익 0)', t.state.dailyRealizedPnl === 0);
   ok('봇 지분은 실보유로 축소(14→10), 손익 미발생', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
 
+  // 13-2) _sellPending 누수 정리 — 지정가 매도 미체결 취소 후 6분 경과 시 정리(수동매도 오귀속 방지)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 })); // 보유 005930 10, 잔고 불변
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:50000, target:200000, atr:1000, initRisk:1000, hw:70000, lastSellPrice:55000, _sellPending:10, _sellAt: FIXED - 7*60*1000 } };
+  t.deps.getPendingOrders = () => []; // 미체결 매도 없음(취소됨)
+  t.tickCount = 0;
+  await t.tick();
+  ok('미체결 취소된 _sellPending 6분 후 0으로 정리', (t.state.botPositions['005930']._sellPending||0) === 0);
+  ok('정리 과정에서 손익 오계상 없음', t.state.dailyRealizedPnl === 0);
+
+  // 15-2) 빈 잔고 일시 유예 — 직전 보유가 있었는데 갑자기 빈 응답이면 한 틱 보류, 연속이면 청산 확정
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:50000, target:200000, atr:1000, initRisk:1000, hw:70000 } };
+  t.tickCount = 0; await t.tick(); // 첫 잔고 반영
+  t.deps.getAccount = async () => ({ rt_cd:'0', output1: [], output2:[{dnca_tot_amt:'10000000'}] }); // 빈 응답
+  t.tickCount = 0; await t.tick();
+  ok('빈 잔고 1회 — 봇 지분 보존(유예)', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
+  t.tickCount = 0; await t.tick();
+  ok('빈 잔고 연속 — 청산 확정(봇 지분 제거)', !t.state.botPositions['005930']);
+
   // 14) 부분체결: 미체결 매수 잔량이 있으면 봇 지분을 매도로 오삭감하지 않음
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 })); // 실보유 10
