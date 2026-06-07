@@ -80,6 +80,12 @@ node tests/engine-test.js && node tests/realtime-test.js && node tests/fallback-
    핵심: 매도 봇지분·실현손익을 **잔고 대조(실제 체결) 시점으로 일원화**(접수≠체결, 손절은 시장가),
    보유 손절은 실시간가로 판정, 실시간 WS connecting 고착 해제, 멀티탭 체결통보 단일 확정.
    `QA-최종점검-20260607.md` 참고. ⚠️ 실전 전 모의에서 부분체결·급락 시나리오 검증 권장.
+10. **운영 상시화 + 기능 (06-07)**: systemd(autotrade.service) 상시 운영·자동재시작, 평일 09:05·10:00
+    장중 자동 점검(autotrade-check.timer + market-check.js), users·sessions·주문저널 SQLite(WAL) 전환,
+    SWR 캐시(stockinfo/ob/tick)·계좌 종합 패널·매수가능조회·정렬·약관.
+11. **출시 최종 검증 (06-08)**: 6영역 심층+적대적 재검증 → 테스트 99→131. 저널 userId WHERE(odno충돌),
+    unhandledRejection, 유령손익(_sellPending) 차단, 반응속도(prefetch 워밍·선페인트·병렬), 서버 입력검증.
+    `QA-최종검증-20260608.md` 참고.
 
 ## 5. 백로그 (우선순위순)
 
