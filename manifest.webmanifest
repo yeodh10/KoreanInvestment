@@ -1,0 +1,16 @@
+{
+  "name": "AutoTrade KR",
+  "short_name": "AutoTrade",
+  "description": "한국주식 자동매매·수동매매 (KIS OpenAPI)",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#16181D",
+  "theme_color": "#16181D",
+  "lang": "ko",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

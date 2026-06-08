@@ -840,6 +840,7 @@ function serveStatic(res, filepath) {
     '.css':  'text/css',
     '.json': 'application/json',
     '.png':  'image/png',
+    '.webmanifest': 'application/manifest+json',
   };
   const mime = mimeTypes[ext] || 'text/plain';
   try {
@@ -1260,7 +1261,11 @@ async function handleRequest(req, res, session) {
   const query    = Object.fromEntries(parsed.searchParams);
 
   // ── 정적 파일 — 화이트리스트 방식 (서버 소스 .js·설정 파일 노출 차단) ──
-  const STATIC_WHITELIST = { '/': 'app.html', '/index.html': 'app.html', '/app.html': 'app.html' };
+  const STATIC_WHITELIST = {
+    '/': 'app.html', '/index.html': 'app.html', '/app.html': 'app.html',
+    '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js',
+    '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png'
+  };
   if (STATIC_WHITELIST[pathname]) {
     serveStatic(res, path.join(__dirname, STATIC_WHITELIST[pathname])); return;
   }

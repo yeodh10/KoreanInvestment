@@ -2,8 +2,16 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>AutoTrade KR</title>
+<!-- PWA: 안드로이드 홈 화면 설치형 앱 -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#16181D">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AutoTrade">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <style>
 /* ── 토스 스타일 다크 디자인 시스템 ── */
@@ -4367,6 +4375,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   startStream(); // Phase 2: 실시간 시세 스트림 시작
   // loadVol100 부팅 호출 제거 — 고아 페이지(volume100) 데이터를 부팅마다 당겨오던 낭비
 });
+// PWA 서비스워커 등록 (실패해도 앱 동작엔 영향 없음)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
 </script>
 </body>
 </html>
