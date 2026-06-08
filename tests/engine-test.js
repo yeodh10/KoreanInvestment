@@ -14,7 +14,7 @@ global.Date = class extends RealDate {
   static now() { return FIXED; }
 };
 
-const { AutoTrader, decideSignal, calcRSI, calcATR, sma, RISK_PRESETS } = require(path.join(__dirname, '..', 'auto-trader.js'));
+const { AutoTrader, decideSignal, decideIntradayRebound, calcRSI, calcATR, sma, RISK_PRESETS } = require(path.join(__dirname, '..', 'auto-trader.js'));
 
 let pass = 0, fail = 0;
 function ok(name, cond) { cond ? (pass++, console.log('  ✅', name)) : (fail++, console.log('  ❌', name)); }
@@ -36,6 +36,23 @@ const flatBars = [...Array(20)].map(() => ({ high: 101, low: 99, close: 100 }));
 ok('calcATR 일정 변동성 = 2', calcATR(flatBars, 14) === 2);
 ok('calcATR 데이터 부족 → null', calcATR(flatBars.slice(0,5), 14) === null);
 ok('RISK_PRESETS 3종 존재', !!(RISK_PRESETS.conservative && RISK_PRESETS.balanced && RISK_PRESETS.aggressive));
+
+// ════════ 1-b. 장중 반등 모멘텀 (decideIntradayRebound) ════════
+realLog('== 장중 반등 신호 ==');
+const mbars = (closes, vols) => closes.map((c, i) => ({ open: c - 1, high: c + 1, low: c - 2, close: c, vol: vols ? vols[i] : 1000 }));
+// 상승 꼬리 분봉(단기이평 상향) + 마지막 거래량 급증
+const rbCloses = [96000, 95800, 95500, 95300, 95000, 95500, 96000, 96500, 97000, 97000];
+const rbVols   = [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 3000];
+const rbBars = mbars(rbCloses, rbVols);
+const ctxOK = { prevClose: 100000, curPrice: 97000, dayLow: 95000 }; // 당일 -3%, 저가대비 +2.1%
+const rb = decideIntradayRebound(rbBars, ctxOK);
+ok('4조건 충족 → BUY', rb && rb.side === 'BUY');
+ok('손절 = 현재가 -2%', rb && rb.stop === Math.round(97000 * 0.98));
+ok('낙폭 부족(-1.5%) → null', decideIntradayRebound(rbBars, { prevClose: 100000, curPrice: 98500, dayLow: 95000 }) === null);
+ok('저가대비 반등 부족 → null', decideIntradayRebound(rbBars, { prevClose: 100000, curPrice: 97000, dayLow: 96500 }) === null);
+ok('거래량 미급증 → null', decideIntradayRebound(mbars(rbCloses), ctxOK) === null); // vol 전부 1000
+ok('분봉 이평 하락 → null', decideIntradayRebound(mbars([97000,96800,96500,96300,96000,95800,95500,95300,95000,95000], rbVols), ctxOK) === null);
+ok('데이터 부족 → null', decideIntradayRebound(rbBars.slice(0, 3), ctxOK) === null);
 
 // ════════ 2. mock 헬퍼 ════════
 const orders = [];

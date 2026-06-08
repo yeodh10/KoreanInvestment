@@ -256,6 +256,53 @@ function decideSignal(closes, settings) {
 }
 
 // ════════════════════════════════════════
+// 장중 반등 모멘텀 (분봉 기반) — "균형형"
+// 일봉 전략이 못 잡는 장중 V자 반등을 안전하게 포착한다.
+// 철학: 바닥을 예측해 떨어지는 칼을 잡는 게 아니라, 반등이 시작된 걸 거래량으로 확인하고
+//       올라타되 틀리면 즉시 좁게(-2%) 손절. 4개 조건을 모두 충족해야 진입.
+// bars: 당일 분봉 [{open,high,low,close,vol}] 과거→현재
+// ctx:  { prevClose(전일종가), curPrice(현재가), dayLow(당일저가) }
+// p:    파라미터(설정에서 주입). 반환: { side:'BUY', reason, stop } | null
+// ════════════════════════════════════════
+function decideIntradayRebound(bars, ctx, p) {
+  p = p || {};
+  const minDropPct   = (p.minDropPct   != null) ? p.minDropPct   : -2.5; // 당일 전일대비 이 이하(낙폭과대)만 대상
+  const reboundPct   = (p.reboundPct   != null) ? p.reboundPct   : 1.5;  // 당일 저가 대비 이 이상 반등(바닥 확인)
+  const volMult      = (p.volMult      != null) ? p.volMult      : 1.5;  // 직전 분봉 거래량 ≥ 평균×배수(매수세)
+  const imaShort     = (p.imaShort     != null) ? p.imaShort     : 5;    // 분봉 단기 이평
+  const stopPct      = (p.stopPct      != null) ? p.stopPct      : 2.0;  // 손절 폭(%)
+  if (!Array.isArray(bars) || bars.length < imaShort + 2) return null;
+  const prevClose = ctx && ctx.prevClose, curPrice = ctx && ctx.curPrice, dayLow = ctx && ctx.dayLow;
+  if (!(prevClose > 0) || !(curPrice > 0) || !(dayLow > 0)) return null;
+
+  // 1) 낙폭과대: 당일 전일대비가 minDropPct 이하
+  const chgPct = (curPrice - prevClose) / prevClose * 100;
+  if (chgPct > minDropPct) return null;
+
+  // 2) 반등 확인: 당일 저가 대비 reboundPct 이상 회복 (V자 바닥을 직접 안 잡고 올라온 뒤 진입)
+  const upFromLow = (curPrice - dayLow) / dayLow * 100;
+  if (upFromLow < reboundPct) return null;
+
+  // 3) 거래량 급증: 직전 분봉 거래량이 최근 평균 대비 volMult배 이상 (수급 유입 = 진짜 매수세)
+  const vols = bars.map(b => b.vol || 0);
+  const lastVol = vols[vols.length - 1];
+  const win = Math.min(20, vols.length);
+  const avgVol = vols.slice(-win).reduce((a, b) => a + b, 0) / win;
+  if (!(avgVol > 0) || lastVol < avgVol * volMult) return null;
+
+  // 4) 분봉 단기이평 상향 전환 + 직전 분봉 양봉 (단기 모멘텀이 위로 꺾였는지)
+  const closes = bars.map(b => b.close).filter(v => v > 0);
+  const maNow = sma(closes, imaShort), maPrev = sma(closes.slice(0, -1), imaShort);
+  if (!(maNow > 0) || !(maPrev > 0) || maNow <= maPrev) return null;
+  const lb = bars[bars.length - 1];
+  if (!(lb.close >= lb.open)) return null; // 직전 분봉이 양봉(상승 마감)일 것
+
+  // 손절: 현재가 -stopPct% (좁은 손절). 진입 즉시 리스크를 좁게 고정.
+  const stop = Math.round(curPrice * (1 - stopPct / 100));
+  return { side: 'BUY', reason: `장중반등 (당일 ${chgPct.toFixed(1)}%, 저가대비 +${upFromLow.toFixed(1)}%, 거래량 ${(lastVol / avgVol).toFixed(1)}x)`, stop };
+}
+
+// ════════════════════════════════════════
 // 시간 체크
 // ════════════════════════════════════════
 // 한국시간(KST, UTC+9) — 서버 타임존과 무관하게 정확
@@ -838,4 +885,4 @@ class AutoTrader {
   }
 }
 
-module.exports = { AutoTrader, getLogs, decideSignal, calcRSI, calcATR, sma, RISK_PRESETS };
+module.exports = { AutoTrader, getLogs, decideSignal, decideIntradayRebound, calcRSI, calcATR, sma, RISK_PRESETS };
