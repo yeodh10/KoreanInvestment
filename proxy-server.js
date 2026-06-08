@@ -233,7 +233,12 @@ async function pumpKis(key) {
     while (q.high.length || q.low.length) {
       // 동시 진행 상한 — 느린 응답이 쌓여도 소켓이 폭주하지 않게
       if ((q.inflight || 0) >= 8) { await new Promise(r => setTimeout(r, 50)); continue; }
-      const job = q.high.length ? q.high.shift() : q.low.shift();
+      // high 우선이되 4:1로 low(백그라운드 시세 갱신)도 섞어 기아 방지.
+      // 폭락장처럼 high 요청이 폭주할 때 low가 영구히 밀려 화면 시세 캐시가 멈추던 문제 차단.
+      let job;
+      if (q.high.length && (q._lowStarve || 0) < 4) { job = q.high.shift(); q._lowStarve = (q._lowStarve || 0) + 1; }
+      else if (q.low.length) { job = q.low.shift(); q._lowStarve = 0; }
+      else { job = q.high.shift(); }
       // 주문(직발사) 진행 중이면 그 시간만큼 일반 큐가 양보 (초당 한도 충돌 방지)
       const hold = (q.holdUntil || 0) - Date.now();
       const wait = Math.max(q.gap - (Date.now() - q.last), hold);
@@ -1133,13 +1138,18 @@ async function prefetchTick() {
       let watch = [];
       try { watch = (getTrader(uid).state.settings.watchList) || []; } catch (e) {}
       const codes = [...new Set([...watch, ...PREFETCH_VOL_CODES, '005930'])].slice(0, 60);
+      // 봇 보유 종목은 화면·관리 핵심 → stale이면 high로 끌어올려 폭락장 부하에도 절대 안 멈추게.
+      let held = [];
+      try { held = Object.keys(getTrader(uid).state.botPositions || {}); } catch (e) {}
       if (!global._stockinfoCache) global._stockinfoCache = {};
       if (!global._obCache) global._obCache = {};
       if (!global._tickCache) global._tickCache = {};
       for (let i = 0; i < codes.length; i++) {
         const code = codes[i];
         const c = global._priceCache && global._priceCache[code];
-        if (!c || now - c.t >= SWR_TTL.price) refreshPrice(cfg, code, 'low'); // 만료된 것만
+        // 보유종목 또는 watchList 상위 12개는 high(화면 즉시), 나머지는 low(백그라운드)
+        const prio = (held.includes(code) || i < 12) ? 'high' : 'low';
+        if (!c || now - c.t >= SWR_TTL.price) refreshPrice(cfg, code, prio); // 만료된 것만
         // ★ 첫 클릭 콜드 제거: 종목정보 캐시는 비어있을 때만 워밍(이후엔 라우트 SWR이 신선도 유지).
         if (!global._stockinfoCache[code]) refreshStockinfo(cfg, code, 'low');
         // 호가·체결은 무겁다 → 첫 클릭 가능성 높은 상위 8종목만 워밍
