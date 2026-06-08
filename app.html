@@ -2499,10 +2499,7 @@ function setRatio(ratio) {
   const price=parseInt($('orderPrice').value||0), avail=parseInt($('orderAvail').textContent.replace(/[^\d]/g,'')||0);
   if(price>0 && avail>0) { $('orderQty').value=Math.floor(avail*ratio/price)||1; updateTotal(); }
 }
-function updateTotal() {
-  const p=parseInt($('orderPrice').value||0), q=parseInt($('orderQty').value||1);
-  setText('orderTotal', p&&q?'₩'+(p*q).toLocaleString():'—');
-}
+// (updateTotal은 아래 수수료 포함 버전이 유일 정의 — 중복 죽은 정의 제거)
 // ── 주문 공통 안전장치: 입력 검증 + 확인창 + 중복제출 방지 ──
 let _orderInflight = false;
 function validateOrder(code, qty, price, type) {

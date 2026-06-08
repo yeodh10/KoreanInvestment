@@ -72,8 +72,10 @@ const ok2 = r => !r.err && r.status === 200;
   L.push(`- 부하 견딤(동시 ${N}요청): 성공 ${oks.length}/${N} · p50 ${p50}ms · p95 ${p95}ms · 총 ${Date.now() - t0}ms`);
   const loadOk = oks.length === N && p95 < 3000;
 
-  // ── 시장 지수 · 환율 (캐시) ──
-  let idx = '';
+  // ── 시장 지수 · 환율 + 시세 피드 신선도 (캐시) ──
+  let idx = '', feedStale = false;
+  const km = new Date(Date.now() + KST), kmm = km.getUTCHours() * 60 + km.getUTCMinutes();
+  const openMkt = km.getUTCDay() >= 1 && km.getUTCDay() <= 5 && kmm >= 540 && kmm <= 930;
   try {
     const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'data-cache.json'), 'utf8'));
     const m = c['market'] && (c['market'].v || c['market']);
@@ -81,6 +83,16 @@ const ok2 = r => !r.err && r.status === 200;
       const g = o => o ? `${(o.bstp_nmix_prpr || 0)} (${o.bstp_nmix_prdy_ctrt || 0}%)` : '-';
       idx = `KOSPI ${g(m.KOSPI)} · KOSDAQ ${g(m.KOSDAQ)} · USD/KRW ${m.USDKRW && m.USDKRW.rate || '-'}`;
       L.push(`- 지수/환율: ${idx}`);
+    }
+    // ★ 시세 피드 신선도 — 서버가 살아 있어도 시세 갱신이 멈추면(폭락장 큐 적체 등) "거짓 초록"이
+    //   되므로, 장중엔 시세 캐시 갱신 시각으로 정지/지연을 실제로 감지한다.
+    const pp = c['persist:price'] && (c['persist:price'].v || c['persist:price']) || {};
+    const tot = Object.keys(pp).length;
+    if (openMkt && tot > 0) {
+      const fresh = Object.values(pp).filter(e => e && e.t && Date.now() - e.t < 120000).length;
+      const ratio = fresh / tot;
+      L.push(`- 시세 피드: ${fresh}/${tot} 종목 2분내 갱신 (${Math.round(ratio * 100)}%)`);
+      feedStale = ratio < 0.3; // 장중인데 30% 미만 신선 = 피드 지연/정지 의심
     }
   } catch (_) {}
 
@@ -164,7 +176,8 @@ const ok2 = r => !r.err && r.status === 200;
   verdict.push(serverUp ? '🟢 서버 정상' : '🔴 서버 응답 이상');
   verdict.push(serverStable ? '🟢 무중단(예외 0)' : '🔴 프로세스 예외 발생');
   verdict.push(tunnelUp ? '🟢 터널 정상' : '🔴 터널 이상');
-  verdict.push(wsConnected ? '🟢 실시간 연결' : '🟡 실시간 연결 미확인');
+  verdict.push(wsConnected ? '🟢 실시간 연결' : (openMkt ? '🔴 실시간 연결 끊김' : '🟡 실시간 연결 미확인'));
+  verdict.push(openMkt ? (feedStale ? '🔴 시세 피드 지연/정지' : '🟢 시세 피드 신선') : '🟢 장외');
   verdict.push(loadOk ? '🟢 부하 견딤' : '🟡 부하 지연/실패');
   const slow = [localHome, pubHome].filter(r => !r.err && r.ms > 1500);
   verdict.push(slow.length ? `🟡 느린 응답 ${slow.length}건(>1.5s)` : '🟢 응답속도 양호');

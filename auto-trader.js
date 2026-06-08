@@ -611,12 +611,6 @@ class AutoTrader {
               const realQty = holdMap[c] || 0;
               const pendBuyQty = pending[c]?.buyQty || 0;
               const expected = realQty + pendBuyQty;
-              // _sellPending 누수 정리: 미체결 매도가 없고(취소·전량체결됨), 매도 접수 후 6분이 지났는데도
-              // _sellPending이 남아 있으면 = 지정가 매도가 미체결로 취소된 것. 0으로 정리해 이후 수동매도가
-              // 옛 매도가로 오귀속되는 것을 막는다. (시장가 즉시체결은 ≤5분 내 잔고대조에서 소비되므로 6분이면 안전.)
-              if ((bot[c]._sellPending || 0) > 0 && !(pending[c] && pending[c].hasSell) && bot[c]._sellAt && (now - bot[c]._sellAt) > 6*60*1000) {
-                bot[c]._sellPending = 0;
-              }
               if (expected < (bot[c].qty || 0)) {
                 const shrink = bot[c].qty - expected;
                 const soldByBot = Math.min(shrink, bot[c]._sellPending || 0); // 실제 낸 매도분만 손익 계상
@@ -633,6 +627,12 @@ class AutoTrader {
                   bot[c]._sellPending = (bot[c]._sellPending || 0) - soldByBot;
                 }
                 bot[c].qty = expected; // 미체결 매수 취소분은 손익 없이 수량만 축소
+              } else if ((bot[c]._sellPending || 0) > 0 && !(pending[c] && pending[c].hasSell) && bot[c]._sellAt && (now - bot[c]._sellAt) > 6*60*1000) {
+                // ★ _sellPending 누수 정리는 "이번 틱에 계상할 체결 축소가 없을 때만" 한다. 체결로 잔고가
+                //   빠진 경우(위 if)는 손익을 먼저 계상해야 하며, 여기서 먼저 0으로 지우면 실현손실이
+                //   서킷에서 누락된다(빈잔고 유예로 정산이 밀려 _sellAt>6분이 된 경우 실측 재현된 버그).
+                //   미체결 매도가 없고(취소·전량체결) 6분 지난 잔여 _sellPending(지정가 미체결 취소분)만 정리.
+                bot[c]._sellPending = 0;
               }
               if ((bot[c].qty || 0) <= 0 && (pending[c]?.buyQty || 0) <= 0) delete bot[c];
             }
@@ -780,8 +780,8 @@ class AutoTrader {
           if (nowMin() <= timeToMin('15:20')) {
             await this.sell(cfg, code, sellable, held.curPrice, signal.reason, held);
           }
-        } else if (s.safety.intradayRebound && !buyingHalted) {
-          // ── 장중 반등 모멘텀(분봉) — 일봉 BUY/SELL 신호가 없을 때만. ──
+        } else if (!signal && s.safety.intradayRebound && !buyingHalted) {
+          // ── 장중 반등 모멘텀(분봉) — 일봉 신호가 전혀 없을 때만(SELL 신호 종목을 같은 틱에 사는 구멍 차단). ──
           //   추세필터는 의도적으로 면제(하락추세 반등을 잡는 전략). 나머지 안전장치(쿨다운·자본·시간·
           //   동시보유·리스크 사이징·종목당한도·노출한도·서킷)는 일봉 매수와 동일하게 그대로 적용한다.
           if (this.inCooldown(code)) continue;
@@ -792,18 +792,32 @@ class AutoTrader {
           if (n < startMin || n > timeToMin(s.safety.tradeEndTime)) continue;
           const alreadyBot = !!(this.state.botPositions || {})[code];
           if (!alreadyBot && this._botPositionCount() >= s.safety.maxPositions) continue;
+          const rbDrop = (s.safety.rbMinDrop != null ? s.safety.rbMinDrop : -2.5);
+          // ★ 1차 필터를 라이브 호출 없이 캐시/일봉으로 — 무신호 전 종목에 매 틱 라이브 getCurrentPrice가
+          //   터져 폭락장 high 큐가 폭증하던 문제 차단. 시세 캐시(없으면 일봉 종가)로 낙폭과대 후보만 추린 뒤
+          //   그 종목만 라이브 가격으로 정밀 확인한다.
+          const prevClose = closes[closes.length - 2] || 0;
+          const pc = (typeof global !== 'undefined' && global._priceCache) ? global._priceCache[code] : null;
+          let estPx = (pc && pc.data && pc.data.price) || 0;
+          let estPrev = (pc && pc.data && pc.data.prev > 0) ? pc.data.prev : prevClose;
+          if (!estPx) estPx = closes[closes.length - 1] || 0; // 캐시 없으면 일봉 마지막 종가
+          const chgEst = estPrev > 0 && estPx > 0 ? (estPx - estPrev) / estPrev * 100 : 0;
+          if (chgEst > rbDrop + 1) continue; // 캐시 기준 낙폭과대 근처(+1%p 여유)만 라이브로 정밀 확인
           let price; try { price = await this.deps.getCurrentPrice(cfg, code); } catch (e) { continue; }
           if (!price || price <= 0) continue;
-          const prevClose = closes[closes.length - 2] || 0;
           const chgPct = prevClose > 0 ? (price - prevClose) / prevClose * 100 : 0;
-          // 낙폭과대 종목만 분봉을 조회(부하 절감) — 폭락장이 아니면 분봉 호출 자체가 거의 없다.
-          if (chgPct > (s.safety.rbMinDrop != null ? s.safety.rbMinDrop : -2.5)) continue;
+          if (chgPct > rbDrop) continue; // 라이브 가격으로 낙폭과대 재확인
           if (!this.deps.getMinuteBars) continue;
           let mbars; try { mbars = await this.deps.getMinuteBars(cfg, code); } catch (e) { continue; }
           if (!mbars || !mbars.length) continue;
           const lows = mbars.map(b => b.low).filter(v => v > 0);
           if (!lows.length) continue;
-          const dayLow = Math.min(...lows);
+          // 진짜 당일 저가: 분봉(최근 ~30분) 저가와 종목정보 캐시의 당일 저가(stck_lwpr) 중 더 낮은 값.
+          //   분봉만 쓰면 "최근 30분 저가"라 오전 폭락저점을 놓쳐 반등폭이 과소계산됨.
+          let dayLow = Math.min(...lows);
+          const si = (typeof global !== 'undefined' && global._stockinfoCache) ? global._stockinfoCache[code] : null;
+          const siLow = si && si.resp && si.resp.data && si.resp.data.low || 0;
+          if (siLow > 0) dayLow = Math.min(dayLow, siLow);
           const rb = decideIntradayRebound(mbars, { prevClose, curPrice: price, dayLow }, {
             minDropPct: s.safety.rbMinDrop, reboundPct: s.safety.rbReboundPct,
             volMult: s.safety.rbVolMult, stopPct: s.safety.rbStopPct

@@ -1164,8 +1164,9 @@ async function prefetchTick() {
       for (let i = 0; i < codes.length; i++) {
         const code = codes[i];
         const c = global._priceCache && global._priceCache[code];
-        // 보유종목 또는 watchList 상위 12개는 high(화면 즉시), 나머지는 low(백그라운드)
-        const prio = (held.includes(code) || i < 12) ? 'high' : 'low';
+        // 봇 보유종목(소수)만 high로 — 화면 핵심이라 폭락장 부하에도 안 멈추게. watchList/시세표는 SSE
+        // 실시간 구독으로 채워지므로 low로 충분. (top12까지 high로 올리면 사용자 클릭 high를 밀어내 역효과)
+        const prio = held.includes(code) ? 'high' : 'low';
         if (!c || now - c.t >= SWR_TTL.price) refreshPrice(cfg, code, prio); // 만료된 것만
         // ★ 첫 클릭 콜드 제거: 종목정보 캐시는 비어있을 때만 워밍(이후엔 라우트 SWR이 신선도 유지).
         if (!global._stockinfoCache[code]) refreshStockinfo(cfg, code, 'low');
@@ -2187,6 +2188,7 @@ server.listen(PORT, HOST, () => {
     const n = Object.keys(users).length;
     console.log(`👥 가입 유저: ${n}명`);
   } catch(e) { console.log('유저 로드 보류:', e.message); }
+  try { auth.purgeExpiredSessions(); } catch (_) {} // 만료 세션 정리(서버 부팅 시 1회)
   console.log('🤖 자동매매 엔진 로드됨 — 웹의 [전략 설정] 탭에서 제어하세요.');
 
   // ── Phase 1: 서버 prefetch 루프 시작 (관심종목/거래량 캐시 워밍) ──

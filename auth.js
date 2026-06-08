@@ -208,11 +208,11 @@ function logout(token) {
   return { ok:true };
 }
 
-// ── 만료 세션 일괄 정리 (기동 시 1회) ──
+// ── 만료 세션 일괄 정리 ── (서버 부팅 시 1회 명시 호출. require 시점 자동 실행하지 않아
+//   market-check 등 단명 프로세스가 auth.js를 require해도 live DB에 DELETE 쓰기를 하지 않게 분리.)
 function purgeExpiredSessions() {
   try { db.prepare('DELETE FROM sessions WHERE createdAt < ?').run(Date.now() - SESSION_TTL); } catch (_) {}
 }
-purgeExpiredSessions();
 
 // ── 유저별 KIS 설정 (API 키는 암호화 저장, 유저별 개별 파일) ──
 function userConfigPath(userId) { return path.join(USER_CONFIG_DIR, `${userId}.json`); }
@@ -269,5 +269,5 @@ function parseCookies(req) {
 module.exports = {
   register, login, logout, getUserBySession,
   loadUserConfig, saveUserConfig,
-  loadUsers, parseCookies, encrypt, decrypt
+  loadUsers, parseCookies, encrypt, decrypt, purgeExpiredSessions
 };

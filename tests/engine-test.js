@@ -249,6 +249,16 @@ function mkTrader(deps) {
   ok('미체결 취소된 _sellPending 6분 후 0으로 정리', (t.state.botPositions['005930']._sellPending||0) === 0);
   ok('정리 과정에서 손익 오계상 없음', t.state.dailyRealizedPnl === 0);
 
+  // 13-3) 결합버그 — 체결로 잔고가 빠졌고 _sellAt>6분이어도 손실이 누수정리에 먹히지 않고 정상 계상
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000) })); // 실보유 0 = 전량 체결
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0, lastSellPrice:55000, _sellPending:10, _sellAt: FIXED - 7*60*1000 } };
+  t.tickCount = 0;
+  await t.tick();
+  ok('체결+_sellAt>6분 → 실현손실 -50,000 정상 계상(누수정리에 안 먹힘)', t.state.dailyRealizedPnl === -50000);
+  ok('연속손실 +1 반영', t.state.consecLosses === 1);
+  ok('체결 확정 후 봇 지분 제거', !t.state.botPositions['005930']);
+
   // 15-2) 빈 잔고 일시 유예 — 직전 보유가 있었는데 갑자기 빈 응답이면 한 틱 보류, 연속이면 청산 확정
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
@@ -292,7 +302,9 @@ function mkTrader(deps) {
   realLog('== 장중 반등 전략 (엔진 통합) ==');
   const rebBars = [66000,65800,65500,65300,65000,65500,66000,66500,67000,67000].map((c,i)=>({open:c-1,high:c+1,low:c-2,close:c,vol:i===9?3000:1000}));
   // 17) ON + 낙폭과대(-4.3%) + 분봉 반등 → 매수, 추세필터 켜져 있어도 면제
+  // (캐시-우선 1차 필터를 위해 _priceCache에 라이브가 들어와 있는 실제 장중 상황을 재현)
   orders.length = 0;
+  global._priceCache = { '005930': { t: Date.now(), data: { price: 67000, prev: 70000 } } };
   t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000), price: 67000, minBars: rebBars }));
   t.state.settings.safety.intradayRebound = true;
   t.state.settings.safety.trendFilter = true; // 면제 확인용
@@ -307,12 +319,14 @@ function mkTrader(deps) {
   await t.tick();
   ok('장중반등 OFF → 매수 0(기본 불변)', orders.filter(o => o.side === 'buy').length === 0);
 
-  // 19) 낙폭 부족(-1%)이면 분봉 조회 없이 미진입
+  // 19) 낙폭 부족(-1%)이면 라이브/분봉 조회 없이 미진입 (캐시 1차 필터에서 컷)
   orders.length = 0;
+  global._priceCache = { '005930': { t: Date.now(), data: { price: 69300, prev: 70000 } } };
   t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000), price: 69300, minBars: rebBars }));
   t.state.settings.safety.intradayRebound = true;
   await t.tick();
   ok('낙폭 부족(-1%) → 장중반등 미진입', orders.filter(o => o.side === 'buy').length === 0);
+  global._priceCache = {}; // 정리
 
   realLog('== KST 시간대 ==');
   t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
