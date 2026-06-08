@@ -14,7 +14,7 @@ function ok(name, cond) { cond ? (pass++, console.log('  ✅', name)) : (fail++,
 
 // 접수 기록
 J.add({ userId: 'u1', side: 'buy', code: '035720', qty: 2, price: 41600, orderType: '00', odno: 'A1', orgNo: '00950', qtyBefore: 0 });
-J.add({ userId: 'u1', side: 'buy', code: '005930', qty: 1, price: 0, orderType: '01', odno: 'A2', orgNo: '00950', qtyBefore: 5 });
+J.add({ userId: 'u1', side: 'buy', code: '005930', qty: 1, price: 41700, orderType: '00', odno: 'A2', orgNo: '00950', qtyBefore: 5 });
 J.add({ userId: 'u1', side: 'sell', code: '005490', qty: 12, price: 400000, orderType: '00', odno: 'A3', orgNo: '00950', qtyBefore: 12 });
 ok('오늘 목록 3건', J.todayList('u1').length === 3);
 ok('미체결 3건', J.pendingList('u1').length === 3);
@@ -51,6 +51,15 @@ ok('u1 주문 체결 확정', J.todayList('ju1').find(e => e.odno === 'DUP').sta
 ok('u2 주문은 영향 없음(접수 유지)', J.todayList('ju2').find(e => e.odno === 'DUP').status === '접수');
 ok('동일 odno: u2 취소가 u2 주문에만 적용', J.markCancel('DUP', 'ju2') === true && J.todayList('ju2').find(e => e.odno === 'DUP').status === '취소');
 ok('u1 주문은 취소 영향 없음(체결 유지)', J.todayList('ju1').find(e => e.odno === 'DUP').status === '체결');
+
+// 시장가('01')는 접수=체결 즉시 확정 — qtyBefore NULL(개장 직후 콜드 캐시)이어도 영원히 '접수'로
+//   방치되지 않게. 모의투자는 체결통보가 없어도 거래내역·손익이 즉시 반영된다.
+J.add({ userId: 'mk', side: 'sell', code: '000660', qty: 3, price: 200000, orderType: '01', odno: 'MK1', orgNo: '1', qtyBefore: null });
+const mk1 = J.todayList('mk').find(e => e.odno === 'MK1');
+ok('시장가 매도 즉시 체결 확정', !!mk1 && mk1.status === '체결' && mk1.fillQty === 3);
+ok('시장가는 qtyBefore NULL이어도 미체결에 안 남음', J.pendingList('mk').length === 0);
+J.add({ userId: 'mk', side: 'buy', code: '000660', qty: 2, price: 0, orderType: '01', odno: 'MK2', orgNo: '1', qtyBefore: 0 });
+ok('시장가 매수도 즉시 체결', J.todayList('mk').find(e => e.odno === 'MK2').status === '체결');
 
 // 멀티유저 동시 기록 — 한 유저 기록이 다른 유저 것에 덮여 사라지지 않음(SQLite 원자성)
 const NU = 200;

@@ -1961,6 +1961,17 @@ async function handleRequest(req, res, session) {
       const kstToday = orderJournal._kstDateKey().replace(/-/g, '');
       const sd = (query.startDate || kstToday).replace(/-/g, '') || kstToday;
       const ed = (query.endDate || kstToday).replace(/-/g, '') || kstToday;
+      // 로컬 주문 저널(SQLite) — 항상 즉시(수 ms). 1차 소스.
+      const jEntriesEarly = (sd === kstToday && ed === kstToday)
+        ? orderJournal.todayList(session.userId)
+        : orderJournal.listRange(session.userId, sd, ed);
+      const jRowsEarly = orderJournal.toKisFormat(jEntriesEarly, codeToNameLookup);
+      // ★ 모의투자(VTS)는 KIS 당일체결 API가 빈 응답 → KIS 왕복·큐 대기 없이 저널만으로 즉시 응답.
+      //   (거래내역 화면이 장중 high 큐 적체에 걸려 느려지던 문제 제거)
+      if (cfg.txMode === 'vts') {
+        jsonRes(res, 200, { ok: true, data: { output1: jRowsEarly, rt_cd: '0' }, journal: true });
+        return;
+      }
       let result = null;
       try {
         result = await kisProxy(cfg, '/uapi/domestic-stock/v1/trading/inquire-daily-ccld', trId, {

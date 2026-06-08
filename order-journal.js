@@ -88,13 +88,25 @@ function _ymdToKstStart(ymd) {
 const _ins = db.prepare(`INSERT INTO orders
   (t,userId,side,code,qty,price,orderType,odno,orgNo,qtyBefore,status,fillQty,fillPrice,filledAt,canceledRemainder)
   VALUES (?,?,?,?,?,?,?,?,?,?, '접수', 0, NULL, NULL, 0)`);
+// 시장가('01')는 접수=체결로 즉시 확정. KIS가 주문 접수(odno 발급)를 응답한 시장가는 장중 즉시
+// 체결되며, 모의투자(VTS)는 체결통보가 없어 잔고대조로만 확정되는데 개장 직후엔 계좌캐시가 콜드라
+// qtyBefore를 못 기록 → 영원히 '접수'로 방치되던 문제(어제 손절 4건)를 차단한다.
+const _insFilled = db.prepare(`INSERT INTO orders
+  (t,userId,side,code,qty,price,orderType,odno,orgNo,qtyBefore,status,fillQty,fillPrice,filledAt,canceledRemainder)
+  VALUES (?,?,?,?,?,?,?,?,?,?, '체결', ?, ?, ?, 0)`);
 function add(e) {
   const t = Date.now();
   const qty = parseInt(e.qty) || 0;
   const price = parseInt(e.price) || 0;
   const qtyBefore = (e.qtyBefore === null || e.qtyBefore === undefined) ? null : parseInt(e.qtyBefore);
+  const orderType = e.orderType ?? '00';
+  if (orderType === '01') { // 시장가 → 즉시 체결 확정
+    _insFilled.run(t, e.userId ?? null, e.side ?? null, e.code ?? null, qty, price,
+                   orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore, qty, price || null, t);
+    return { t, status: '체결', ...e, qty, price, qtyBefore, fillQty: qty };
+  }
   _ins.run(t, e.userId ?? null, e.side ?? null, e.code ?? null, qty, price,
-           e.orderType ?? '00', e.odno ?? null, e.orgNo ?? null, qtyBefore);
+           orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore);
   return { t, status: '접수', ...e, qty, price, qtyBefore };
 }
 
