@@ -378,6 +378,9 @@ class AutoTrader {
   // 인스턴스 로그 (유저별)
   log(type, message, meta) {
     const entry = { time: new Date().toISOString(), type, message, meta: meta||null };
+    // 반복 노이즈(스캔 진행/목록갱신)는 콘솔·저장 모두 제외 — 매수/매도/손절/신호/알림 이력이
+    // 분당 수건의 스캔 로그에 밀려 500건 캡에서 사라지던 문제 차단. (봇 활동은 매매·상태로 확인)
+    if (type === 'system' && /스캔 시작|스캔 완료|스캔 목록 갱신/.test(message)) return entry;
     this._logs.unshift(entry);
     if (this._logs.length > 500) this._logs = this._logs.slice(0, 500);
     console.log(`[자동매매:${this.userId} ${new Date().toLocaleTimeString('ko-KR')}] ${message}`);
