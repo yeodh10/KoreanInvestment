@@ -50,6 +50,12 @@ const DEFAULT_SETTINGS = {
     maxExposurePct: 60,        // 총 노출 상한 = 자본의 60% (현금버퍼 유지)
     maxConsecLosses: 3,        // 연속 N패 시 당일 신규매수 정지
     maxTradesPerDay: 20,       // 일일 최대 거래(매수) 수 — 과매매 방지
+    // ── 장중 반등 모멘텀(분봉) — 기본 OFF. 검증 후 전략 화면에서 켠다. ──
+    intradayRebound: false,    // 일봉 전략이 못 잡는 장중 V자 반등 포착(균형형)
+    rbMinDrop: -2.5,           // 당일 전일대비 이 이하(낙폭과대)만 대상
+    rbReboundPct: 1.5,         // 당일 저가 대비 이 이상 반등(바닥 확인)
+    rbVolMult: 1.5,            // 직전 분봉 거래량 ≥ 평균×배수(매수세)
+    rbStopPct: 2.0,            // 진입 즉시 좁은 손절(%)
     // ── 진입 품질 필터 ──
     trendFilter: true,         // 가격 > 장기MA 일 때만 매수 (하락추세 칼 잡기 방지)
     // ── 시간/보호 ──
@@ -434,6 +440,11 @@ class AutoTrader {
     sf.maxExposurePct    = num(sf.maxExposurePct, 60, 1, 100);
     sf.maxConsecLosses   = Math.round(num(sf.maxConsecLosses, 3, 1, 20));
     sf.maxTradesPerDay   = Math.round(num(sf.maxTradesPerDay, 20, 1, 200));
+    // 장중 반등 파라미터 클램프 (intradayRebound 토글은 boolean이라 클램프 제외 — undefined면 기존값 유지)
+    sf.rbMinDrop    = num(sf.rbMinDrop, -2.5, -15, -0.5);
+    sf.rbReboundPct = num(sf.rbReboundPct, 1.5, 0.3, 10);
+    sf.rbVolMult    = num(sf.rbVolMult, 1.5, 1, 10);
+    sf.rbStopPct    = num(sf.rbStopPct, 2.0, 0.5, 5);
     // 시간 문자열 검증 — 'abc' 등이면 timeToMin→NaN으로 시간 게이트가 무력화돼 매매창 무시
     const okTime = t => typeof t === 'string' && /^([01]?\d|2[0-3]):[0-5]\d$/.test(t);
     if (!okTime(sf.tradeStartTime)) sf.tradeStartTime = '09:05';
@@ -766,6 +777,49 @@ class AutoTrader {
           if (nowMin() <= timeToMin('15:20')) {
             await this.sell(cfg, code, sellable, held.curPrice, signal.reason, held);
           }
+        } else if (s.safety.intradayRebound && !buyingHalted) {
+          // ── 장중 반등 모멘텀(분봉) — 일봉 BUY/SELL 신호가 없을 때만. ──
+          //   추세필터는 의도적으로 면제(하락추세 반등을 잡는 전략). 나머지 안전장치(쿨다운·자본·시간·
+          //   동시보유·리스크 사이징·종목당한도·노출한도·서킷)는 일봉 매수와 동일하게 그대로 적용한다.
+          if (this.inCooldown(code)) continue;
+          if (capital <= 0) continue;
+          const startMin = s.safety.avoidFirst30min
+            ? Math.max(timeToMin(s.safety.tradeStartTime), 9*60+30) : timeToMin(s.safety.tradeStartTime);
+          const n = nowMin();
+          if (n < startMin || n > timeToMin(s.safety.tradeEndTime)) continue;
+          const alreadyBot = !!(this.state.botPositions || {})[code];
+          if (!alreadyBot && this._botPositionCount() >= s.safety.maxPositions) continue;
+          let price; try { price = await this.deps.getCurrentPrice(cfg, code); } catch (e) { continue; }
+          if (!price || price <= 0) continue;
+          const prevClose = closes[closes.length - 2] || 0;
+          const chgPct = prevClose > 0 ? (price - prevClose) / prevClose * 100 : 0;
+          // 낙폭과대 종목만 분봉을 조회(부하 절감) — 폭락장이 아니면 분봉 호출 자체가 거의 없다.
+          if (chgPct > (s.safety.rbMinDrop != null ? s.safety.rbMinDrop : -2.5)) continue;
+          if (!this.deps.getMinuteBars) continue;
+          let mbars; try { mbars = await this.deps.getMinuteBars(cfg, code); } catch (e) { continue; }
+          if (!mbars || !mbars.length) continue;
+          const lows = mbars.map(b => b.low).filter(v => v > 0);
+          if (!lows.length) continue;
+          const dayLow = Math.min(...lows);
+          const rb = decideIntradayRebound(mbars, { prevClose, curPrice: price, dayLow }, {
+            minDropPct: s.safety.rbMinDrop, reboundPct: s.safety.rbReboundPct,
+            volMult: s.safety.rbVolMult, stopPct: s.safety.rbStopPct
+          });
+          if (!rb) continue;
+          const stopDist = price - rb.stop;
+          if (!(stopDist > 0)) continue;
+          const riskAmt = capital * (s.safety.riskPerTradePct / 100);
+          let qty = Math.floor(riskAmt / stopDist);
+          if (!Number.isFinite(qty)) continue;
+          const pendBuyAmt = pending[code]?.buyAmt || 0;
+          const curHoldAmt = (held ? held.evalAmt : 0) + pendBuyAmt;
+          const perStockCap = capital * (s.safety.maxPerStockPct / 100);
+          qty = Math.min(qty, Math.floor(Math.max(0, perStockCap - curHoldAmt) / price));
+          const expRoom = capital * (s.safety.maxExposurePct / 100) - this._botExposure(heldPositions) - pendBuyAmt;
+          qty = Math.min(qty, Math.floor(Math.max(0, expRoom) / price));
+          if (qty < 1) continue;
+          const target = price + s.safety.takeProfitR * stopDist;
+          await this.buy(cfg, code, qty, price, rb.reason, { stop: rb.stop, target, atr: 0, initRisk: stopDist });
         }
 
         // 종목 사이 딜레이 (KIS 제한 준수)

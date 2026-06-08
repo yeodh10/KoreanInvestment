@@ -1161,6 +1161,7 @@ td.mono,th.mono{font-family:var(--mono)}
           <div class="toggle-row"><div><div class="toggle-name">추세 필터 (가격 &gt; 20MA)</div><div class="toggle-desc">하락추세 '떨어지는 칼' 회피 — 상승추세에서만 매수</div></div><div class="tog on" id="togTrend" onclick="this.classList.toggle('on')"></div></div>
           <div class="toggle-row"><div><div class="toggle-name">장 시작 30분 매수 금지</div><div class="toggle-desc">09:00~09:30 변동성 회피</div></div><div class="tog on" id="togAvoid" onclick="this.classList.toggle('on')"></div></div>
           <div class="toggle-row"><div><div class="toggle-name">수동 보유 보호</div><div class="toggle-desc">엔진이 직접 매수한 수량만 매도 — 손으로 산 주식 불가침</div></div><div class="tog on" id="togProtect" onclick="this.classList.toggle('on')"></div></div>
+          <div class="toggle-row"><div><div class="toggle-name">⚡ 장중 반등 모멘텀 (분봉)</div><div class="toggle-desc">낙폭과대 종목의 거래량 동반 반등을 포착 — 일봉이 못 잡는 V자 반등 (균형형·손절 -2%). 검증 후 켜세요</div></div><div class="tog" id="togRebound" onclick="this.classList.toggle('on')"></div></div>
         </div>
       </div>
     </div>
@@ -3898,6 +3899,7 @@ async function loadAutoStatus() {
   $('togTrend').classList.toggle('on',sf.trendFilter!==false);
   $('togAvoid').classList.toggle('on',sf.avoidFirst30min);
   $('togProtect').classList.toggle('on',sf.protectManual!==false); // 기본 ON
+  $('togRebound').classList.toggle('on',sf.intradayRebound===true); // 기본 OFF
   $('sInterval').value=s.intervalSec;
   // 프리셋 하이라이트
   ['Con','Bal','Agg'].forEach(k=>{const b=$('preset'+k);if(b)b.style.color='';});
@@ -3950,7 +3952,8 @@ function collectAutoSettings() {
       dailyLossLimitPct:+$('sDayLossPct').value||-2, maxExposurePct:+$('sMaxExpo').value||60,
       maxPositions:+$('sMaxPos').value||5, maxConsecLosses:+$('sConsec').value||3, maxTradesPerDay:+$('sMaxTrades').value||20,
       tradeStartTime:$('sStart').value||'09:05', tradeEndTime:$('sEnd').value||'15:00',
-      trendFilter:$('togTrend').classList.contains('on'), avoidFirst30min:$('togAvoid').classList.contains('on'), protectManual:$('togProtect').classList.contains('on')
+      trendFilter:$('togTrend').classList.contains('on'), avoidFirst30min:$('togAvoid').classList.contains('on'), protectManual:$('togProtect').classList.contains('on'),
+      intradayRebound:$('togRebound').classList.contains('on')
     },
     watchList:autoWatchList, intervalSec:+$('sInterval').value||60
   };

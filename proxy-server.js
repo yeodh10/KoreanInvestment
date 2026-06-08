@@ -495,6 +495,22 @@ async function executeOrder(cfg, { side, code, qty, price, orderType }, userId) 
   return r.body;
 }
 
+// 당일 분봉 (장중 반등 전략용) — inquire-time-itemchartprice, 최근 ~30분 1분봉
+async function fetchMinuteBars(cfg, code) {
+  return withRetry(async () => {
+    const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', 'FHKST03010200', {
+      FID_ETC_CLS_CODE: '', FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code,
+      FID_INPUT_HOUR_1: '', FID_PW_DATA_INCU_YN: 'N'
+    }, 'high'); // 봇 매수 타이밍 판단 — 적시성 우선(낙폭과대 종목만 조회되므로 빈도 낮음)
+    const rows = r.body?.output2 || [];
+    return rows.slice().reverse().map(b => ({   // 최신→과거 → 과거→현재
+      open: parseInt(b.stck_oprc || 0), high: parseInt(b.stck_hgpr || 0),
+      low: parseInt(b.stck_lwpr || 0), close: parseInt(b.stck_prpr || 0),
+      vol: parseInt(b.cntg_vol || 0)
+    })).filter(b => b.close > 0);
+  }, `분봉:${code}`);
+}
+
 // 코드→이름
 function codeToNameLookup(code) {
   const master = loadStockMaster();
@@ -588,6 +604,7 @@ function getTrader(userId) {
     loadConfig:      userLoadConfig,
     getStockChart:   fetchChart,       // (cfg, code, period) 시그니처 그대로 사용
     getCurrentPrice: fetchCurrentPrice,// (cfg, code)
+    getMinuteBars:   fetchMinuteBars,  // (cfg, code) — 장중 반등 전략용 당일 분봉
     placeOrder:      (c, o) => executeOrder(c, o, userId), // (cfg, order) — 저널 기록용 userId 전달
     getAccount:      fetchAccount,     // (cfg)
     getVolTop:       fetchVolTop,      // (cfg)

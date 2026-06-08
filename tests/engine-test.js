@@ -75,6 +75,7 @@ function mkDeps(opts) {
     getVolTop: async () => ({ output: [] }),
     getStockChart: async () => { if (slowChartMs) await new Promise(r => setTimeout(r, slowChartMs)); return chart; },
     getCurrentPrice: async () => price || 70000,
+    getMinuteBars: async () => opts.minBars || null,
     getAccount: async () => account,
     placeOrder: async (cfg, o) => { orders.push({ ...o }); return { rt_cd: '0' }; },
     codeToName: c => c, sendTelegram: null
@@ -287,6 +288,31 @@ function mkTrader(deps) {
   ok('dailyLossLimitPct 양수 입력 → 음수로 클램프', t.state.settings.safety.dailyLossLimitPct < 0);
   await t.tick();
   ok('극단 설정에도 유한·≥1 수량 주문만', orders.filter(o => o.side === 'buy').every(o => Number.isFinite(o.qty) && o.qty >= 1));
+
+  realLog('== 장중 반등 전략 (엔진 통합) ==');
+  const rebBars = [66000,65800,65500,65300,65000,65500,66000,66500,67000,67000].map((c,i)=>({open:c-1,high:c+1,low:c-2,close:c,vol:i===9?3000:1000}));
+  // 17) ON + 낙폭과대(-4.3%) + 분봉 반등 → 매수, 추세필터 켜져 있어도 면제
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000), price: 67000, minBars: rebBars }));
+  t.state.settings.safety.intradayRebound = true;
+  t.state.settings.safety.trendFilter = true; // 면제 확인용
+  await t.tick();
+  ok('장중반등 ON → 낙폭과대 반등 매수(추세필터 면제)', orders.filter(o => o.side === 'buy').length === 1);
+  ok('장중반등 손절 -2% 반영', !!t.state.botPositions['005930'] && t.state.botPositions['005930'].stop === Math.round(67000 * 0.98));
+
+  // 18) OFF → 매수 0 (기본 동작 불변)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000), price: 67000, minBars: rebBars }));
+  t.state.settings.safety.intradayRebound = false;
+  await t.tick();
+  ok('장중반등 OFF → 매수 0(기본 불변)', orders.filter(o => o.side === 'buy').length === 0);
+
+  // 19) 낙폭 부족(-1%)이면 분봉 조회 없이 미진입
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000), price: 69300, minBars: rebBars }));
+  t.state.settings.safety.intradayRebound = true;
+  await t.tick();
+  ok('낙폭 부족(-1%) → 장중반등 미진입', orders.filter(o => o.side === 'buy').length === 0);
 
   realLog('== KST 시간대 ==');
   t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
