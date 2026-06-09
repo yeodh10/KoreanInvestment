@@ -772,10 +772,10 @@ td.mono,th.mono{font-family:var(--mono)}
         <div class="panel" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
           <!-- 탭 헤더 -->
           <div style="display:flex;border-bottom:1px solid var(--border);flex-shrink:0">
-            <button class="trading-tab active" id="ttab1" onclick="switchTradingTab('tick')">실시간 체결</button>
-            <button class="trading-tab" id="ttab2" onclick="switchTradingTab('news')">뉴스/공시</button>
+            <button class="trading-tab active" id="ttab4" onclick="switchTradingTab('chart')">차트</button>
+            <button class="trading-tab" id="ttab1" onclick="switchTradingTab('tick')">실시간 체결</button>
             <button class="trading-tab" id="ttab3" onclick="switchTradingTab('investor')">외국인/기관</button>
-            <button class="trading-tab" id="ttab4" onclick="switchTradingTab('chart')">차트</button>
+            <button class="trading-tab" id="ttab2" onclick="switchTradingTab('news')">뉴스/공시</button>
           </div>
           <!-- 탭 본문 -->
           <div style="flex:1;overflow-y:auto">
@@ -1659,7 +1659,7 @@ function showPage(id) {
   if (id === 'history') { initHistDates(); loadHistory(); } // 진입 시 최근 7일 자동 조회
   if (id === 'performance') loadPerformance();
   if (id === 'strategy') { loadAutoStatus(); refreshAutoLogs(); startAutoLogPoll(); }
-  if (id === 'trading') { loadTradingStock(); refreshOrders(); setTimeout(() => { if (obCode) loadTick(obCode); }, 600); } // 체결도 즉시 로드
+  if (id === 'trading') { loadTradingStock(); switchTradingTab('chart'); refreshOrders(); setTimeout(() => { if (obCode) loadTick(obCode); }, 600); } // 차트 먼저 띄우고, 체결도 즉시 로드
   if (id === 'settings') loadSettings();
 }
 
