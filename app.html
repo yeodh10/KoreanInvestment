@@ -918,7 +918,15 @@ td.mono,th.mono{font-family:var(--mono)}
     <div class="panel">
       <div class="panel-head"><span class="panel-title">보유종목</span><span style="font-size:11px;color:var(--text-3)" id="pfHoldCount">—</span></div>
       <div class="tbl-wrap">
-        <table><thead><tr><th>종목</th><th>코드</th><th>수량</th><th>평균단가</th><th>현재가</th><th>평가금액</th><th>매입금액</th><th>평가손익</th><th>수익률</th><th>비중</th><th>매도</th></tr></thead>
+        <table><thead><tr><th>종목</th><th>코드</th>
+          <th id="pfTh_qty" onclick="sortPf('qty')" style="cursor:pointer;user-select:none">수량 ↕</th>
+          <th>평균단가</th>
+          <th id="pfTh_cur" onclick="sortPf('cur')" style="cursor:pointer;user-select:none">현재가 ↕</th>
+          <th id="pfTh_ev" onclick="sortPf('ev')" style="cursor:pointer;user-select:none">평가금액 ↕</th>
+          <th id="pfTh_buy" onclick="sortPf('buy')" style="cursor:pointer;user-select:none">매입금액 ↕</th>
+          <th id="pfTh_pl" onclick="sortPf('pl')" style="cursor:pointer;user-select:none">평가손익 ↕</th>
+          <th id="pfTh_rt" onclick="sortPf('rt')" style="cursor:pointer;user-select:none">수익률 ↕</th>
+          <th>비중</th><th>매도</th></tr></thead>
         <tbody id="pfBody"><tr><td colspan="11" class="empty">계좌 연결 시 보유 종목이 표시됩니다</td></tr></tbody></table>
       </div>
     </div>
@@ -2388,13 +2396,25 @@ function applyAccount(data) {
   return r.data;
 }
 
+// 포트폴리오 정렬 상태 — 헤더 클릭 시 같은 키면 방향 토글, 다른 키면 내림차순부터
+let _pfSort = { key: null, dir: -1 };
+function pfSortVal(p, key) {
+  const n = v => parseFloat(v || 0);
+  return { qty:n(p.hldg_qty), cur:n(p.prpr), ev:n(p.evlu_amt), buy:n(p.pchs_amt), pl:n(p.evlu_pfls_amt), rt:n(p.evlu_pfls_rt) }[key] || 0;
+}
+function sortPf(key) {
+  if (_pfSort.key === key) _pfSort.dir *= -1; else { _pfSort.key = key; _pfSort.dir = -1; }
+  ['qty','cur','ev','buy','pl','rt'].forEach(k => { const th = $('pfTh_' + k); if (th) th.textContent = th.textContent.replace(/[↕▲▼]/, k === key ? (_pfSort.dir < 0 ? '▼' : '▲') : '↕'); });
+  loadPortfolio(); // /api/account는 SWR 캐시라 즉시 응답 → 재정렬 렌더
+}
 async function loadPortfolio() {
   const tbody = $('pfBody');
   if (!proxyOnline) { tbody.innerHTML='<tr><td colspan="11" class="empty">프록시 미연결</td></tr>'; return; }
-  tbody.innerHTML='<tr><td colspan="11" class="empty">불러오는 중...</td></tr>';
+  if (!tbody.querySelector('tr td:nth-child(3)')) tbody.innerHTML='<tr><td colspan="11" class="empty">불러오는 중...</td></tr>';
   const r = await api('/api/account');
   if (!r?.ok) { tbody.innerHTML='<tr><td colspan="11" class="empty">조회 실패</td></tr>'; return; }
   const positions = (r.data.output1||[]).filter(p=>parseInt(p.hldg_qty||0)>0);
+  if (_pfSort.key) positions.sort((a,b) => (pfSortVal(a,_pfSort.key) - pfSortVal(b,_pfSort.key)) * _pfSort.dir);
   const s = (r.data.output2&&r.data.output2[0]) || {};
   const total = parseInt(s.tot_evlu_amt||0), principal=parseInt(s.pchs_amt_smtl_amt||0);
   const cash=parseInt(s.dnca_tot_amt||s.prvs_rcdl_excc_amt||0), pnl=parseInt(s.evlu_pfls_smtl_amt||0);
