@@ -738,9 +738,10 @@ class AutoTrader {
             const maL = sma(closes, s.params.maLong);
             if (!maL || closes[closes.length - 1] < maL) continue;
           }
-          // 동시 보유(봇) 종목 수 상한 — 신규 종목만 제한, 기존 보유 추가매수는 허용
-          const alreadyBot = !!(this.state.botPositions || {})[code];
-          if (!alreadyBot && this._botPositionCount() >= s.safety.maxPositions) continue;
+          // 이미 봇이 보유한 종목은 추가매수 금지 — 한 종목 1회 진입(분할 몰빵 방지) + 한도 찬 종목을
+          // 매 틱 두드리며 "수량 0 보류" 로그를 도배하던 문제 차단. 종목 분산은 maxPositions로.
+          if ((this.state.botPositions || {})[code]) continue;
+          if (this._botPositionCount() >= s.safety.maxPositions) continue;
 
           let price;
           try {
@@ -790,8 +791,8 @@ class AutoTrader {
             ? Math.max(timeToMin(s.safety.tradeStartTime), 9*60+30) : timeToMin(s.safety.tradeStartTime);
           const n = nowMin();
           if (n < startMin || n > timeToMin(s.safety.tradeEndTime)) continue;
-          const alreadyBot = !!(this.state.botPositions || {})[code];
-          if (!alreadyBot && this._botPositionCount() >= s.safety.maxPositions) continue;
+          if ((this.state.botPositions || {})[code]) continue; // 반등 전략도 이미 보유 종목엔 추가매수 안 함
+          if (this._botPositionCount() >= s.safety.maxPositions) continue;
           const rbDrop = (s.safety.rbMinDrop != null ? s.safety.rbMinDrop : -2.5);
           // ★ 1차 필터를 라이브 호출 없이 캐시/일봉으로 — 무신호 전 종목에 매 틱 라이브 getCurrentPrice가
           //   터져 폭락장 high 큐가 폭증하던 문제 차단. 시세 캐시(없으면 일봉 종가)로 낙폭과대 후보만 추린 뒤

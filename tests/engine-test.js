@@ -328,6 +328,13 @@ function mkTrader(deps) {
   ok('낙폭 부족(-1%) → 장중반등 미진입', orders.filter(o => o.side === 'buy').length === 0);
   global._priceCache = {}; // 정리
 
+  // 20) 이미 봇이 보유한 종목은 BUY 신호가 떠도 추가매수 안 함 (분할 몰빵·한도찬 종목 헛시도 방지)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 60000 }));
+  t.state.botPositions = { '005930': { qty: 10, entry: 60000, stop: 58000 } }; // 이미 보유
+  await t.tick();
+  ok('이미 봇 보유 종목은 추가매수 안 함(몰빵 방지)', orders.filter(o => o.side === 'buy').length === 0);
+
   realLog('== KST 시간대 ==');
   t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
   ok('KST 10:00 목요일 → 장중', t.getStatus().marketOpen === true);
