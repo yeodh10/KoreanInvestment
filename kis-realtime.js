@@ -228,7 +228,7 @@ function parseKisMessage(text) {
   if (p1 === -1 || p2 === -1 || p3 === -1) return { type: 'unknown', raw: text };
   const flag = text.slice(0, p1), trId = text.slice(p1 + 1, p2);
   const count = parseInt(text.slice(p2 + 1, p3)) || 1;
-  if (flag === '1') return { type: 'encrypted', trId, payloadB64: text.slice(p3 + 1) }; // 암호화 TR(체결통보)
+  if (flag === '1') return { type: 'encrypted', trId, count, payloadB64: text.slice(p3 + 1) }; // 암호화 TR(체결통보) — count 다중레코드
   const f = text.slice(p3 + 1).split('^');
 
   if (trId === TR_PRICE) {
@@ -404,9 +404,18 @@ class KisFeed {
         const dec = crypto.createDecipheriv('aes-256-cbc', Buffer.from(k.key, 'utf8'), Buffer.from(k.iv, 'utf8'));
         const txt = Buffer.concat([dec.update(Buffer.from(m.payloadB64, 'base64')), dec.final()]).toString('utf8');
         const f = txt.split('^');
-        // 체결통보 필드: [2]주문번호 [8]종목코드 [9]체결수량 [10]체결단가 [13]체결여부('2'=체결)
-        const ev = { odno: f[2], code: f[8], qty: parseInt(f[9] || 0), price: parseInt(f[10] || 0), filled: f[13] === '2' };
-        for (const fn of this.execHooks.values()) try { fn(ev); } catch (_) {}
+        // ★ KIS는 한 프레임에 다중 체결을 count>1로 묶어 보낸다(데이터 TR과 동일). 한 건만 처리하면
+        //   둘째 레코드부터의 체결이 영구 유실되어 보유수량·실현손익이 어긋난다(CRITICAL). count로 분할 처리.
+        // 체결통보 필드(레코드 기준): [2]주문번호 [8]종목코드 [9]체결수량 [10]체결단가 [13]체결여부('2'=체결)
+        const count = m.count || 1;
+        const stride = count > 1 ? Math.floor(f.length / count) : f.length;
+        for (let i = 0; i < count; i++) {
+          const b = i * stride;
+          const odno = f[b + 2];
+          if (!odno) continue;
+          const ev = { odno, code: f[b + 8], qty: parseInt(f[b + 9] || 0), price: parseInt(f[b + 10] || 0), filled: f[b + 13] === '2' };
+          for (const fn of this.execHooks.values()) try { fn(ev); } catch (_) {}
+        }
       } catch (e) { this.log('⚠️ 체결통보 복호화 실패: ' + e.message); }
       return;
     }
