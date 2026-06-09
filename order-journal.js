@@ -38,8 +38,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS orders (
   fillQty INTEGER DEFAULT 0,
   fillPrice INTEGER,
   filledAt INTEGER,
-  canceledRemainder INTEGER DEFAULT 0
+  canceledRemainder INTEGER DEFAULT 0,
+  source TEXT                 -- bot(자동매매) / manual(직접) / NULL(불명)
 )`);
+try { db.exec('ALTER TABLE orders ADD COLUMN source TEXT'); } catch (e) {} // 구버전 DB 마이그레이션(이미 있으면 무시)
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_t ON orders(t)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_odno ON orders(odno)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(userId)');
@@ -86,27 +88,28 @@ function _ymdToKstStart(ymd) {
 // ── 주문 접수 기록 ──
 // e: { userId, side, code, qty, price, orderType, odno, orgNo, qtyBefore(null 가능) }
 const _ins = db.prepare(`INSERT INTO orders
-  (t,userId,side,code,qty,price,orderType,odno,orgNo,qtyBefore,status,fillQty,fillPrice,filledAt,canceledRemainder)
-  VALUES (?,?,?,?,?,?,?,?,?,?, '접수', 0, NULL, NULL, 0)`);
+  (t,userId,side,code,qty,price,orderType,odno,orgNo,qtyBefore,status,fillQty,fillPrice,filledAt,canceledRemainder,source)
+  VALUES (?,?,?,?,?,?,?,?,?,?, '접수', 0, NULL, NULL, 0, ?)`);
 // 시장가('01')는 접수=체결로 즉시 확정. KIS가 주문 접수(odno 발급)를 응답한 시장가는 장중 즉시
 // 체결되며, 모의투자(VTS)는 체결통보가 없어 잔고대조로만 확정되는데 개장 직후엔 계좌캐시가 콜드라
 // qtyBefore를 못 기록 → 영원히 '접수'로 방치되던 문제(어제 손절 4건)를 차단한다.
 const _insFilled = db.prepare(`INSERT INTO orders
-  (t,userId,side,code,qty,price,orderType,odno,orgNo,qtyBefore,status,fillQty,fillPrice,filledAt,canceledRemainder)
-  VALUES (?,?,?,?,?,?,?,?,?,?, '체결', ?, ?, ?, 0)`);
+  (t,userId,side,code,qty,price,orderType,odno,orgNo,qtyBefore,status,fillQty,fillPrice,filledAt,canceledRemainder,source)
+  VALUES (?,?,?,?,?,?,?,?,?,?, '체결', ?, ?, ?, 0, ?)`);
 function add(e) {
   const t = Date.now();
   const qty = parseInt(e.qty) || 0;
   const price = parseInt(e.price) || 0;
   const qtyBefore = (e.qtyBefore === null || e.qtyBefore === undefined) ? null : parseInt(e.qtyBefore);
   const orderType = e.orderType ?? '00';
+  const source = e.source ?? null; // bot / manual
   if (orderType === '01') { // 시장가 → 즉시 체결 확정
     _insFilled.run(t, e.userId ?? null, e.side ?? null, e.code ?? null, qty, price,
-                   orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore, qty, price || null, t);
+                   orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore, qty, price || null, t, source);
     return { t, status: '체결', ...e, qty, price, qtyBefore, fillQty: qty };
   }
   _ins.run(t, e.userId ?? null, e.side ?? null, e.code ?? null, qty, price,
-           orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore);
+           orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore, source);
   return { t, status: '접수', ...e, qty, price, qtyBefore };
 }
 
@@ -234,7 +237,8 @@ function toKisFormat(entries, nameOf) {
       odno: e.odno || '',
       ord_gno_brno: e.orgNo || '',
       _journal: true,
-      _status: e.status
+      _status: e.status,
+      _source: e.source || null   // bot / manual / null
     };
   });
 }

@@ -61,6 +61,13 @@ ok('시장가는 qtyBefore NULL이어도 미체결에 안 남음', J.pendingList
 J.add({ userId: 'mk', side: 'buy', code: '000660', qty: 2, price: 0, orderType: '01', odno: 'MK2', orgNo: '1', qtyBefore: 0 });
 ok('시장가 매수도 즉시 체결', J.todayList('mk').find(e => e.odno === 'MK2').status === '체결');
 
+// source(봇/수동) 기록 — 거래내역 배지용
+J.add({ userId: 'sc', side: 'buy', code: '005930', qty: 1, price: 60000, orderType: '00', odno: 'SC1', orgNo: '1', qtyBefore: 0, source: 'bot' });
+J.add({ userId: 'sc', side: 'buy', code: '005930', qty: 1, price: 60000, orderType: '00', odno: 'SC2', orgNo: '1', qtyBefore: 0, source: 'manual' });
+const scRows = J.toKisFormat(J.todayList('sc'), c => c);
+ok('봇 주문 source=bot 노출', scRows.find(r => r.odno === 'SC1')._source === 'bot');
+ok('수동 주문 source=manual 노출', scRows.find(r => r.odno === 'SC2')._source === 'manual');
+
 // 멀티유저 동시 기록 — 한 유저 기록이 다른 유저 것에 덮여 사라지지 않음(SQLite 원자성)
 const NU = 200;
 for (let i = 0; i < NU; i++) {

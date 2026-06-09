@@ -472,7 +472,7 @@ async function fetchAccount(cfg) {
 }
 
 // 주문 실행 (엔진용)
-async function executeOrder(cfg, { side, code, qty, price, orderType }, userId) {
+async function executeOrder(cfg, { side, code, qty, price, orderType, source }, userId) {
   const isBuy = side === 'buy';
   const trId = cfg.txMode === 'vts'
     ? (isBuy ? 'VTTC0802U' : 'VTTC0801U')
@@ -489,7 +489,8 @@ async function executeOrder(cfg, { side, code, qty, price, orderType }, userId) 
     orderJournal.add({
       userId, side, code, qty, price: price || 0, orderType: orderType || '00',
       odno: r.body?.output?.ODNO, orgNo: r.body?.output?.KRX_FWDG_ORD_ORGNO,
-      qtyBefore: heldQtyOf(userId || 'default', code)
+      qtyBefore: heldQtyOf(userId || 'default', code),
+      source: source || 'manual' // 봇 placeOrder는 'bot' 주입, 그 외 직접 주문은 manual
     });
   }
   return r.body;
@@ -605,7 +606,7 @@ function getTrader(userId) {
     getStockChart:   fetchChart,       // (cfg, code, period) 시그니처 그대로 사용
     getCurrentPrice: fetchCurrentPrice,// (cfg, code)
     getMinuteBars:   fetchMinuteBars,  // (cfg, code) — 장중 반등 전략용 당일 분봉
-    placeOrder:      (c, o) => executeOrder(c, o, userId), // (cfg, order) — 저널 기록용 userId 전달
+    placeOrder:      (c, o) => executeOrder(c, { ...o, source: 'bot' }, userId), // 봇 주문 — source=bot 각인
     getAccount:      fetchAccount,     // (cfg)
     getVolTop:       fetchVolTop,      // (cfg)
     codeToName:      codeToNameLookup,
@@ -1882,14 +1883,25 @@ async function handleRequest(req, res, session) {
     if (pathname === '/api/account') {
       if (!global._acctCache) global._acctCache = {};
       const ck = session.userId || 'default';
+      // 보유종목에 봇 매수 여부(_bot) 표시 — 프론트가 🤖/👤 배지로 구분. 캐시는 순수 유지(복제 후 주석).
+      const annotate = (payload) => {
+        try {
+          const bp = getTrader(ck).state.botPositions || {};
+          const bc = new Set(Object.keys(bp).filter(c => (bp[c].qty || 0) > 0));
+          if (bc.size && payload && payload.data && Array.isArray(payload.data.output1)) {
+            return { ...payload, data: { ...payload.data, output1: payload.data.output1.map(p => bc.has(p.pdno) ? { ...p, _bot: true } : p) } };
+          }
+        } catch (e) {}
+        return payload;
+      };
       const cached = global._acctCache[ck];
       if (cached) {
         if (Date.now() - cached.t >= SWR_TTL.acct) refreshAccount(cfg, ck, 'low'); // 만료 → 백그라운드 갱신
-        jsonRes(res, 200, cached.data);
+        jsonRes(res, 200, annotate(cached.data));
         return;
       }
       const payload = await refreshAccount(cfg, ck, 'high');
-      jsonRes(res, 200, payload || { ok: true, data: null });
+      jsonRes(res, 200, annotate(payload || { ok: true, data: null }));
       return;
     }
 

@@ -2351,7 +2351,17 @@ function applyAccount(data) {
   if (!_buyAvailCash) { _buyAvailCash = cash; setText('dashBuyAvail','₩'+cash.toLocaleString()); setText('acBuyable','₩'+cash.toLocaleString()); } // 첫 페인트 폴백(정확값 도착 전)
   updateDashAffordable();
   // 보유수량을 코드별로 캐시 — 매도 '비율' 버튼이 예수금이 아니라 보유수량 기준으로 동작하게
-  _holdingsByCode = {}; holdings.forEach(p=>{ _holdingsByCode[p.pdno]=parseInt(p.hldg_qty||0); });
+  // + 실시간 평가액 계산용 보유 스냅샷(수량·평단·매입금). SSE 틱마다 이 값으로 평가액을 재계산한다.
+  _holdingsByCode = {}; window._holds = {};
+  holdings.forEach(p => {
+    const c = p.pdno;
+    _holdingsByCode[c] = parseInt(p.hldg_qty||0);
+    window._holds[c] = { qty: parseInt(p.hldg_qty||0), avg: parseInt(p.pchs_avg_pric||0),
+                         buyAmt: parseInt(p.pchs_amt||0), name: p.prdt_name || nameOf(c) };
+  });
+  window._lastCash = cash;
+  window._botCodes = new Set(holdings.filter(p => p._bot).map(p => p.pdno)); // 봇 매수 종목 (🤖 배지)
+  if (typeof startStream === 'function') startStream(); // 보유종목이 바뀌면 실시간 구독에 포함
   const rate = principal>0 ? ((pnl/principal)*100).toFixed(2) : '0.00';
   const up = pnl>=0;
   setText('sbTotalAsset', '₩'+totalAsset.toLocaleString());
@@ -2394,15 +2404,15 @@ async function loadPortfolio() {
     const plRt=parseFloat(p.evlu_pfls_rt||0), u=pl>=0, w=((ev/evalSum)*100).toFixed(1);
     const cls = pl>0?'up':pl<0?'dn':'flat'; // 손익 0 = 흰색
     return `<tr>
-      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}</td>
+      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}${holderBadge(p.pdno)}</td>
       <td class="mono" style="color:var(--text-3)">${code}</td>
       <td class="mono">${qty}</td>
       <td class="mono">₩${avg.toLocaleString()}</td>
-      <td class="mono ${cls}">₩${cur.toLocaleString()}</td>
-      <td class="mono">₩${ev.toLocaleString()}</td>
+      <td class="mono ${cls}" id="pf-${code}-cur">₩${cur.toLocaleString()}</td>
+      <td class="mono" id="pf-${code}-ev">₩${ev.toLocaleString()}</td>
       <td class="mono">₩${buy.toLocaleString()}</td>
-      <td class="mono ${cls}">${pl>0?'+':''}₩${pl.toLocaleString()}</td>
-      <td class="mono ${cls}">${pl>0?'+':''}${plRt.toFixed(2)}%</td>
+      <td class="mono ${cls}" id="pf-${code}-pl">${pl>0?'+':''}₩${pl.toLocaleString()}</td>
+      <td class="mono ${cls}" id="pf-${code}-rt">${pl>0?'+':''}${plRt.toFixed(2)}%</td>
       <td><div class="progress" style="width:60px"><div class="progress-fill" style="width:${w}%"></div></div> <span style="font-size:10px">${w}%</span></td>
       <td><button class="panel-btn" onclick="sellFromPf('${jsArg(code)}','${jsArg(name)}',${qty},${cur})">매도</button></td>
     </tr>`;
@@ -3422,12 +3432,12 @@ async function refreshDashHoldings(accountData) {
     const u = plRt >= 0;
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer" onclick="loadStock('${esc(p.pdno)}')">
       <div style="min-width:0;margin-right:8px">
-        <div style="font-size:12px;font-weight:600;color:var(--text-0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${name}</div>
-        <div style="font-size:10px;color:var(--text-3);font-family:var(--mono)">${qty}주 · ₩${cur.toLocaleString()}</div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${name}${holderBadge(p.pdno)}</div>
+        <div style="font-size:10px;color:var(--text-3);font-family:var(--mono)">${qty}주 · <span id="dh-${esc(p.pdno)}-cur">₩${cur.toLocaleString()}</span></div>
       </div>
       <div style="flex-shrink:0;text-align:right">
         <div style="font-size:12px;font-weight:600;font-family:var(--mono);color:var(--text-0)">₩${buyAmt.toLocaleString()}</div>
-        <div class="${u?'up':'dn'}" style="font-size:10.5px;font-weight:600;font-family:var(--mono)">${u?'+':''}${plRt.toFixed(1)}% (${u?'+':''}₩${pl.toLocaleString()})</div>
+        <div id="dh-${esc(p.pdno)}-rt" class="${u?'up':'dn'}" style="font-size:10.5px;font-weight:600;font-family:var(--mono)">${u?'+':''}${plRt.toFixed(1)}% (${u?'+':''}₩${pl.toLocaleString()})</div>
       </div>
     </div>`;
   }).join('');
@@ -3806,6 +3816,9 @@ async function loadHistory() {
   if(!orders.length){$('histBody').innerHTML='<tr><td colspan="10" class="empty">거래 내역 없음</td></tr>';setText('histCount','0건');return;}
   $('histBody').innerHTML=orders.map(o=>{
     const code=esc(o.pdno||''), name=esc(o.prdt_name||nameOf(o.pdno||''));
+    const srcBadge = o._source==='bot'
+      ? ' <span title="자동매매" style="font-size:9px;padding:0 3px;border-radius:3px;background:rgba(52,133,250,.15);color:#3485FA">🤖봇</span>'
+      : o._source==='manual' ? ' <span title="직접 주문" style="font-size:9px;padding:0 3px;border-radius:3px;background:rgba(150,150,150,.15);color:var(--text-3)">👤</span>' : '';
     const isBuy=o.sll_buy_dvsn_cd==='02', side=isBuy?'<span class="badge buy">매수</span>':'<span class="badge sell">매도</span>';
     const qty=parseInt(o.ord_qty||0), filled=parseInt(o.tot_ccld_qty||0), oprc=parseInt(o.ord_unpr||0), cprc=parseInt(o.avg_prvs||o.tot_ccld_unpr||0);
     const amt=cprc*(filled||qty); // 체결수량 기준 금액(부분체결 과대집계 방지)
@@ -3813,7 +3826,7 @@ async function loadHistory() {
     const date=(o.ord_dt||'').replace(/(\d{4})(\d{2})(\d{2})/,'$1-$2-$3');
     return `<tr>
       <td class="mono" style="font-size:10px">${date}</td>
-      <td style="cursor:pointer" onclick="loadStock('${code}')">${name}</td>
+      <td style="cursor:pointer" onclick="loadStock('${code}')">${name}${srcBadge}</td>
       <td>${side}</td>
       <td class="mono">${o.ord_dvsn_name||'지정가'}</td>
       <td class="mono">₩${oprc.toLocaleString()}</td>
@@ -4194,7 +4207,9 @@ let _lastPriceTick = 0, _lastObTick = 0, _lastWatchPoll = 0, _lastObPoll = 0;
 let _streamWant = '';
 function startStream() {
   if (!proxyOnline || typeof EventSource === 'undefined') return;
-  const codes = watchCodes.slice(0, 33); // 시총30 시세표 전체 실시간 (서버 한도 40 내)
+  // 시세표(시총30) + 보유종목을 실시간 구독에 포함 — 보유 평가액이 틱마다 갱신되게(서버 한도 40 내)
+  const hold = window._holds ? Object.keys(window._holds) : [];
+  const codes = [...new Set([...watchCodes.slice(0, 30), ...hold])].slice(0, 38);
   const want = codes.join(',') + '|' + (obCode || '');
   // CLOSED(2) 상태면 같은 대상이라도 재생성해야 한다 — 안 그러면 영구 폴링 강등 후 복구 불능
   if (_es && _es.readyState !== 2 && want === _streamWant) return;
@@ -4279,6 +4294,49 @@ function applyLivePrice(d) {
     if (hp) { hp.textContent = '₩' + d.price.toLocaleString(); hp.className = 'stock-price ' + cls; flash(hp); }
     if (hc) { hc.textContent = `${flat?'—':arrow(d.sign)} ${chg.toLocaleString()} (${flat?'':(up?'+':'')}${d.chgPct}%)`; hc.className = 'stock-chg ' + cls; }
   }
+  // ★ 실시간 보유 평가액 — 보유종목이면 틱마다 현재가·평가액·손익·수익률을 재계산(4초 폴링이 아니라 즉시)
+  const h = window._holds && window._holds[d.code];
+  if (h && h.qty > 0) {
+    const cur = d.price, ev = cur * h.qty, pl = (cur - h.avg) * h.qty;
+    const rt = h.avg > 0 ? ((cur - h.avg) / h.avg * 100) : 0;
+    const hc2 = pl > 0 ? 'up' : pl < 0 ? 'dn' : 'flat';
+    const setHc = (id, txt, cl) => { const e = $(id); if (e) { e.textContent = txt; if (cl) e.className = e.className.replace(/\b(up|dn|flat)\b/g, '').trim() + ' ' + cl; } };
+    // 대시보드 미니 보유
+    setHc(`dh-${d.code}-cur`, '₩' + cur.toLocaleString());
+    setHc(`dh-${d.code}-rt`, (rt >= 0 ? '+' : '') + rt.toFixed(1) + '% (' + (pl >= 0 ? '+' : '') + '₩' + Math.round(pl).toLocaleString() + ')', hc2);
+    // 포트폴리오 테이블
+    setHc(`pf-${d.code}-cur`, '₩' + cur.toLocaleString(), hc2);
+    setHc(`pf-${d.code}-ev`, '₩' + Math.round(ev).toLocaleString());
+    setHc(`pf-${d.code}-pl`, (pl > 0 ? '+' : '') + '₩' + Math.round(pl).toLocaleString(), hc2);
+    setHc(`pf-${d.code}-rt`, (pl > 0 ? '+' : '') + rt.toFixed(2) + '%', hc2);
+    recalcLiveTotals();
+  }
+}
+// 보유 전체를 실시간 시세로 재합산 → 총자산·총손익을 틱마다 갱신
+function recalcLiveTotals() {
+  if (!window._holds) return;
+  let ev = 0, pl = 0;
+  for (const c in window._holds) {
+    const h = window._holds[c];
+    const px = (window._lastPx && window._lastPx[c]) || 0;
+    const cur = px > 0 ? px : h.avg; // 아직 틱 없으면 평단 폴백
+    ev += cur * h.qty; pl += (cur - h.avg) * h.qty;
+  }
+  const total = ev + (window._lastCash || 0), up = pl >= 0;
+  const T = (id, txt) => { const e = $(id); if (e) e.textContent = txt; };
+  const P = (id, txt, sub) => { const e = $(id); if (e) { e.textContent = txt; e.className = (sub ? 'sub ' : 'val ') + (up ? 'up' : 'dn'); } };
+  T('sbTotalAsset', '₩' + Math.round(total).toLocaleString());
+  T('pfTotal', '₩' + Math.round(total).toLocaleString());
+  T('pfTotalAsset', '₩' + Math.round(total).toLocaleString());
+  T('miniPfTotal', '₩' + Math.round(total).toLocaleString());
+  const sb = $('sbPnl'); if (sb) { sb.textContent = (up ? '+' : '') + '₩' + Math.round(pl).toLocaleString(); sb.className = 'sub ' + (up ? 'up' : 'dn'); }
+}
+// 보유자 배지 — 자동매매(봇)가 매수한 종목 🤖 / 직접 매수 👤
+function holderBadge(code) {
+  const bot = window._botCodes && window._botCodes.has(code);
+  return bot
+    ? ' <span title="자동매매가 매수" style="font-size:9px;padding:0 3px;border-radius:3px;background:rgba(52,133,250,.15);color:#3485FA">🤖봇</span>'
+    : ' <span title="직접 매수" style="font-size:9px;padding:0 3px;border-radius:3px;background:rgba(150,150,150,.15);color:var(--text-3)">👤</span>';
 }
 
 // ══════════════════════════════════════════════════════
