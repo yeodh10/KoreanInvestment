@@ -45,6 +45,20 @@
   --sidebar-w: 200px;
   --header-h: 56px;
 }
+/* 라이트(화이트) 테마 — body.light 토글. 브랜드색(블루/레드/그린)은 유지, 배경·텍스트만 반전 */
+body.light {
+  --bg: #FFFFFF;
+  --bg-1: #F9FAFB;
+  --bg-2: #F2F4F6;
+  --bg-3: #E8EBED;
+  --bg-hover: #EDEFF2;
+  --border: rgba(0,0,0,0.07);
+  --border-2: rgba(0,0,0,0.12);
+  --text-0: #191F28;
+  --text-1: #333D4B;
+  --text-2: #6B7684;
+  --text-3: #8B95A1;
+}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;background:var(--bg);color:var(--text-1);font-family:var(--font);font-size:13px;line-height:1.5;overflow:hidden;font-variant-numeric:tabular-nums} /* 숫자 고정폭 — 토스식 정렬 */
 .mono{font-weight:600;letter-spacing:-0.01em} /* 숫자 강조 — 토스 갬성 */
@@ -428,6 +442,7 @@ td.mono,th.mono{font-family:var(--mono)}
     <div class="conn-status"><div class="conn-dot" id="connDot"></div><span id="connText">연결 중...</span></div>
     <div style="display:flex;align-items:center;gap:8px;border-left:1px solid var(--border);padding-left:10px;margin-left:2px">
       <span style="font-size:12px;color:var(--text-1)" id="hdrUsername">—</span>
+      <button class="panel-btn" id="themeToggle" onclick="toggleTheme()" style="font-size:13px;padding:4px 8px" title="라이트/다크 전환">🌙</button>
       <button class="panel-btn" onclick="doLogout()" style="font-size:11px">로그아웃</button>
     </div>
   </div>
@@ -914,7 +929,7 @@ td.mono,th.mono{font-family:var(--mono)}
     </div>
     <div style="padding:12px 16px;display:flex;gap:8px;border-top:1px solid var(--border)">
       <input id="aiInput" class="form-input" style="flex:1" placeholder="설정에 대해 물어보세요…" onkeydown="if(event.key==='Enter')sendAI()" autocomplete="off">
-      <button class="panel-btn" style="background:var(--accent);color:#fff" onclick="sendAI()">전송</button>
+      <button class="panel-btn" style="background:var(--blue);color:#fff" onclick="sendAI()">전송</button>
     </div>
   </div>
 </div>
@@ -2414,7 +2429,36 @@ function applyAccount(data) {
   return r.data;
 }
 
-// ── AI 세팅 비서 ──
+// ── 라이트/다크 테마 (선택 기억) ──
+function applyTheme(light) {
+  document.body.classList.toggle('light', light);
+  const t = $('themeToggle'); if (t) t.textContent = light ? '☀️' : '🌙';
+  const m = document.querySelector('meta[name="theme-color"]'); if (m) m.content = light ? '#FFFFFF' : '#16181D';
+}
+function toggleTheme() {
+  const light = !document.body.classList.contains('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  applyTheme(light);
+}
+
+// ── AI 세팅 비서 (대화 내용 localStorage 저장 — 다시 들어와도 유지) ──
+const AI_HIST_KEY = 'aiHistory';
+function aiSaveHistory() {
+  try {
+    const box = $('aiMessages'); if (!box) return;
+    const msgs = [...box.querySelectorAll('[data-role]')].map(d => ({ role: d.getAttribute('data-role'), text: d.getAttribute('data-text') || '' }));
+    localStorage.setItem(AI_HIST_KEY, JSON.stringify(msgs.slice(-50))); // 최근 50개만
+  } catch (e) {}
+}
+function aiLoadHistory() {
+  try {
+    const raw = localStorage.getItem(AI_HIST_KEY); if (!raw) return;
+    const msgs = JSON.parse(raw); if (!Array.isArray(msgs) || !msgs.length) return;
+    const box = $('aiMessages'); if (!box) return;
+    box.innerHTML = ''; // 기본 인사말 치우고 저장된 대화 복원
+    msgs.forEach(m => aiBubble(m.role, m.text, null, true));
+  } catch (e) {}
+}
 let _aiBusy = false;
 async function sendAI() {
   if (_aiBusy) return;
@@ -2428,11 +2472,12 @@ async function sendAI() {
   aiBubble('ai', (r && r.ok ? r.reply : (r && r.message || '응답 실패')), (r && r.ok) ? r.suggestions : null);
   _aiBusy = false;
 }
-function aiBubble(role, text, suggestions) {
+function aiBubble(role, text, suggestions, noSave) {
   const box = $('aiMessages'); if (!box) return { remove(){} };
   const d = document.createElement('div');
+  d.setAttribute('data-role', role); d.setAttribute('data-text', text);
   d.style.cssText = 'margin:6px 0;padding:10px 12px;border-radius:10px;max-width:85%;white-space:pre-wrap;font-size:13px;line-height:1.5;' +
-    (role === 'user' ? 'background:var(--accent);color:#fff;align-self:flex-end' : 'background:var(--bg-2);color:var(--text-1);align-self:flex-start');
+    (role === 'user' ? 'background:var(--blue);color:#fff;align-self:flex-end' : 'background:var(--bg-2);color:var(--text-1);align-self:flex-start');
   d.textContent = text;
   if (suggestions && suggestions.length) {
     const L = { riskPerTradePct:'거래당리스크%', maxPerStock:'종목당한도', maxPositions:'최대보유종목', maxExposurePct:'노출상한%', stopAtrMult:'손절ATR배수', takeProfitR:'익절R', dailyLossLimitPct:'일일손실한도%', maxConsecLosses:'연속손실서킷', maxTradesPerDay:'일일거래수', trendFilter:'추세필터', intradayRebound:'장중반등', rbMinDrop:'반등낙폭', rbReboundPct:'반등확인%' };
@@ -2445,7 +2490,9 @@ function aiBubble(role, text, suggestions) {
     });
     d.appendChild(sd);
   }
-  box.appendChild(d); box.scrollTop = box.scrollHeight; return d;
+  box.appendChild(d); box.scrollTop = box.scrollHeight;
+  if (!noSave && text !== '…생각 중') aiSaveHistory(); // 실제 메시지만 저장(로딩 임시 제외)
+  return d;
 }
 async function applyAiSetting(key, value, btn, label) {
   if (!confirm((label || key) + ' 을(를) ' + value + ' (으)로 변경할까요?')) return;
@@ -4489,6 +4536,8 @@ async function checkAuth() {
 // 초기화
 // ══════════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', async () => {
+  applyTheme(localStorage.getItem('theme') === 'light'); // 저장된 테마(라이트/다크) 복원
+  aiLoadHistory();                                        // AI 대화 내용 복원
   // 1) 로그인 체크 + 프록시 연결 확인을 병렬로 (직렬 2왕복 → 1왕복, 원격 RTT 절감)
   const [me] = await Promise.all([checkAuth(), checkProxy()]);
   if (!me) {
