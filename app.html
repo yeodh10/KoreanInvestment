@@ -2357,8 +2357,14 @@ function applyAccount(data) {
     const c = p.pdno;
     _holdingsByCode[c] = parseInt(p.hldg_qty||0);
     window._holds[c] = { qty: parseInt(p.hldg_qty||0), avg: parseInt(p.pchs_avg_pric||0),
-                         buyAmt: parseInt(p.pchs_amt||0), name: p.prdt_name || nameOf(c) };
+                         buyAmt: parseInt(p.pchs_amt||0), name: p.prdt_name || nameOf(c),
+                         baseCur: parseInt(p.prpr||0), basePl: parseInt(p.evlu_pfls_amt||0) }; // KIS 기준값
   });
+  // 실시간 총자산/손익은 KIS 권위값(총평가·평가손익) 기준 + "보유평가 변동분"만 가감한다.
+  // (모의투자는 예수금≠D+2라 현금을 직접 더하면 ₩수천만 어긋남 — KIS 총평가를 baseline으로 고정)
+  window._baseTotal = totalAsset;
+  window._baseEv = holdings.reduce((s, p) => s + parseInt(p.evlu_amt||0), 0);
+  window._basePnl = pnl;
   window._lastCash = cash;
   window._botCodes = new Set(holdings.filter(p => p._bot).map(p => p.pdno)); // 봇 매수 종목 (🤖 배지)
   if (typeof startStream === 'function') startStream(); // 보유종목이 바뀌면 실시간 구독에 포함
@@ -4297,8 +4303,10 @@ function applyLivePrice(d) {
   // ★ 실시간 보유 평가액 — 보유종목이면 틱마다 현재가·평가액·손익·수익률을 재계산(4초 폴링이 아니라 즉시)
   const h = window._holds && window._holds[d.code];
   if (h && h.qty > 0) {
-    const cur = d.price, ev = cur * h.qty, pl = (cur - h.avg) * h.qty;
-    const rt = h.avg > 0 ? ((cur - h.avg) / h.avg * 100) : 0;
+    const cur = d.price, ev = cur * h.qty;
+    // 손익 = KIS 평가손익(수수료·세금 반영) + 시세 변동분 → KIS 화면과 정확히 일치
+    const pl = (h.basePl || 0) + (cur - (h.baseCur || h.avg)) * h.qty;
+    const rt = h.buyAmt > 0 ? (pl / h.buyAmt * 100) : 0;
     const hc2 = pl > 0 ? 'up' : pl < 0 ? 'dn' : 'flat';
     const setHc = (id, txt, cl) => { const e = $(id); if (e) { e.textContent = txt; if (cl) e.className = e.className.replace(/\b(up|dn|flat)\b/g, '').trim() + ' ' + cl; } };
     // 대시보드 미니 보유
@@ -4315,14 +4323,17 @@ function applyLivePrice(d) {
 // 보유 전체를 실시간 시세로 재합산 → 총자산·총손익을 틱마다 갱신
 function recalcLiveTotals() {
   if (!window._holds) return;
-  let ev = 0, pl = 0;
+  let liveEv = 0;
   for (const c in window._holds) {
     const h = window._holds[c];
     const px = (window._lastPx && window._lastPx[c]) || 0;
-    const cur = px > 0 ? px : h.avg; // 아직 틱 없으면 평단 폴백
-    ev += cur * h.qty; pl += (cur - h.avg) * h.qty;
+    const cur = px > 0 ? px : (h.baseCur || h.avg); // 틱 없으면 KIS 기준 현재가(변동 0)
+    liveEv += cur * h.qty;
   }
-  const total = ev + (window._lastCash || 0), up = pl >= 0;
+  // KIS 총평가/평가손익을 baseline으로 두고 보유평가 변동분만 가감 (현금·D+2 불일치 우회)
+  const delta = liveEv - (window._baseEv || liveEv);
+  const total = (window._baseTotal || 0) + delta;
+  const pl = (window._basePnl || 0) + delta, up = pl >= 0;
   const T = (id, txt) => { const e = $(id); if (e) e.textContent = txt; };
   const P = (id, txt, sub) => { const e = $(id); if (e) { e.textContent = txt; e.className = (sub ? 'sub ' : 'val ') + (up ? 'up' : 'dn'); } };
   T('sbTotalAsset', '₩' + Math.round(total).toLocaleString());
