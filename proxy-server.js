@@ -9,6 +9,7 @@ const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
+const { execFile } = require('child_process'); // AI 세팅 어시스턴트(claude CLI 헤드리스 호출)용
 const auth  = require('./auth');
 
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -1929,6 +1930,55 @@ async function handleRequest(req, res, session) {
           maxQty: parseInt(o.max_buy_qty || o.nrcvb_buy_qty || 0)    // 최대 매수 가능 수량
         }, msg: r.body?.msg1 });
       } catch (e) { jsonRes(res, 200, { ok: false, message: '매수가능 조회 실패' }); }
+      return;
+    }
+
+    // POST /api/ai — 사용자 전용 세팅 어시스턴트 (claude CLI 헤드리스)
+    // 보안: 도구 전면 차단(--disallowedTools) + cwd를 프로젝트 밖(/tmp)으로 격리 + 시스템 프롬프트로
+    //       서버·코드·파일·주문 접근 금지. AI는 '조언/설명 + 설정 변경 제안'만, 적용은 사용자 승인.
+    if (pathname === '/api/ai' && req.method === 'POST') {
+      const body = await parseBody(req);
+      const msg = String(body.message || '').slice(0, 1000).trim();
+      if (!msg) { jsonRes(res, 400, { ok: false, message: '메시지를 입력하세요' }); return; }
+      let ctx = '';
+      try {
+        const sf = getTrader(session.userId).state.settings.safety;
+        ctx = `[현재 자동매매 설정]\n거래당리스크 ${sf.riskPerTradePct}% · 종목당한도 ₩${(sf.maxPerStock||0).toLocaleString()} · 최대보유 ${sf.maxPositions}종목 · 노출상한 ${sf.maxExposurePct}% · 손절 ATR×${sf.stopAtrMult} · 익절 ${sf.takeProfitR}R · 일일손실한도 ${sf.dailyLossLimitPct}% · 연속손실서킷 ${sf.maxConsecLosses}회 · 일일거래 ${sf.maxTradesPerDay}회 · 추세필터 ${sf.trendFilter?'ON':'OFF'} · 장중반등 ${sf.intradayRebound?'ON':'OFF'}`;
+      } catch (e) {}
+      const SYS = `너는 이 사용자만의 한국 주식 자동매매 '세팅 어시스턴트'다. 한국어로 친근하고 간결하게(보통 3~6줄) 답한다. 너는 서버·코드·파일·실제 주문·외부 시스템에 절대 접근할 수 없고, 오직 자동매매 '설정'에 대한 조언·설명과 변경 제안만 한다. 설정 변경을 제안할 때는 답변 맨 끝에 줄을 바꿔 정확히 [[set 키=값]] 형식으로 적어라(여러 개면 여러 줄). 허용 키만 제안: riskPerTradePct, maxPerStock, maxPositions, maxExposurePct, stopAtrMult, takeProfitR, dailyLossLimitPct, maxConsecLosses, maxTradesPerDay, trendFilter(true/false), intradayRebound(true/false), rbMinDrop, rbReboundPct. 시스템·코드·파일·서버·해킹 관련 요청은 정중히 거절하라.`;
+      try {
+        const reply = await new Promise((resolve, reject) => {
+          execFile('claude', ['-p', '--disallowedTools', 'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
+            '--append-system-prompt', SYS, ctx + '\n\n[사용자 질문] ' + msg],
+            { timeout: 90000, cwd: '/tmp', maxBuffer: 1 << 20 },
+            (err, stdout) => err ? reject(err) : resolve(String(stdout || '').trim()));
+        });
+        // 설정 변경 제안 파싱 — 화이트리스트 키만, 적용은 프론트에서 사용자 승인 후
+        const WL = new Set(['riskPerTradePct','maxPerStock','maxPositions','maxExposurePct','stopAtrMult','takeProfitR','dailyLossLimitPct','maxConsecLosses','maxTradesPerDay','trendFilter','intradayRebound','rbMinDrop','rbReboundPct']);
+        const sets = [];
+        const re = /\[\[set\s+([a-zA-Z]+)\s*=\s*([^\]]+)\]\]/g; let mm;
+        while ((mm = re.exec(reply))) { if (WL.has(mm[1])) sets.push({ key: mm[1], value: mm[2].trim() }); }
+        const cleanReply = reply.replace(/\[\[set[^\]]*\]\]/g, '').trim();
+        jsonRes(res, 200, { ok: true, reply: cleanReply || reply, suggestions: sets });
+      } catch (e) {
+        jsonRes(res, 200, { ok: false, message: 'AI 응답 실패 (시간 초과 또는 일시 오류) — 잠시 후 다시' });
+      }
+      return;
+    }
+
+    // POST /api/ai/apply — AI가 제안한 설정 변경을 사용자 승인 후 적용 (화이트리스트 키만)
+    if (pathname === '/api/ai/apply' && req.method === 'POST') {
+      const body = await parseBody(req);
+      const WL = { riskPerTradePct:'num', maxPerStock:'num', maxPositions:'num', maxExposurePct:'num',
+        stopAtrMult:'num', takeProfitR:'num', dailyLossLimitPct:'num', maxConsecLosses:'num',
+        maxTradesPerDay:'num', trendFilter:'bool', intradayRebound:'bool', rbMinDrop:'num', rbReboundPct:'num' };
+      const key = String(body.key || '');
+      if (!WL[key]) { jsonRes(res, 400, { ok: false, message: '허용되지 않은 설정 키' }); return; }
+      let v = body.value;
+      if (WL[key] === 'bool') v = (v === true || /^(true|on|켜|켜기|1|yes)$/i.test(String(v)));
+      else { v = parseFloat(v); if (!Number.isFinite(v)) { jsonRes(res, 400, { ok: false, message: '숫자 값이 아닙니다' }); return; } }
+      const status = getTrader(session.userId).updateSettings({ safety: { [key]: v } }); // _clampSafety가 안전범위 보정
+      jsonRes(res, 200, { ok: true, status, applied: { key, value: v } });
       return;
     }
 
