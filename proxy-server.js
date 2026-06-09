@@ -1943,9 +1943,9 @@ async function handleRequest(req, res, session) {
       let ctx = '';
       try {
         const sf = getTrader(session.userId).state.settings.safety;
-        ctx = `[현재 자동매매 설정]\n거래당리스크 ${sf.riskPerTradePct}% · 종목당한도 ₩${(sf.maxPerStock||0).toLocaleString()} · 최대보유 ${sf.maxPositions}종목 · 노출상한 ${sf.maxExposurePct}% · 손절 ATR×${sf.stopAtrMult} · 익절 ${sf.takeProfitR}R · 일일손실한도 ${sf.dailyLossLimitPct}% · 연속손실서킷 ${sf.maxConsecLosses}회 · 일일거래 ${sf.maxTradesPerDay}회 · 추세필터 ${sf.trendFilter?'ON':'OFF'} · 장중반등 ${sf.intradayRebound?'ON':'OFF'}`;
+        ctx = `[현재 자동매매 설정]\n거래당리스크 ${sf.riskPerTradePct}% · 종목당한도 ${sf.maxPerStockPct}%(자본대비) · 최대보유 ${sf.maxPositions}종목 · 노출상한 ${sf.maxExposurePct}% · 손절 ATR×${sf.stopAtrMult} · 익절 ${sf.takeProfitR}R · 일일손실한도 ${sf.dailyLossLimitPct}% · 연속손실서킷 ${sf.maxConsecLosses}회 · 일일거래 ${sf.maxTradesPerDay}회 · 추세필터 ${sf.trendFilter?'ON':'OFF'} · 장중반등 ${sf.intradayRebound?'ON':'OFF'}`;
       } catch (e) {}
-      const SYS = `너는 이 사용자만의 한국 주식 자동매매 '세팅 어시스턴트'다. 한국어로 친근하고 간결하게(보통 3~6줄) 답한다. 너는 서버·코드·파일·실제 주문·외부 시스템에 절대 접근할 수 없고, 오직 자동매매 '설정'에 대한 조언·설명과 변경 제안만 한다. 설정 변경을 제안할 때는 답변 맨 끝에 줄을 바꿔 정확히 [[set 키=값]] 형식으로 적어라(여러 개면 여러 줄). 허용 키만 제안: riskPerTradePct, maxPerStock, maxPositions, maxExposurePct, stopAtrMult, takeProfitR, dailyLossLimitPct, maxConsecLosses, maxTradesPerDay, trendFilter(true/false), intradayRebound(true/false), rbMinDrop, rbReboundPct. 시스템·코드·파일·서버·해킹 관련 요청은 정중히 거절하라.`;
+      const SYS = `너는 이 사용자만의 한국 주식 자동매매 '세팅 어시스턴트'다. 한국어로 친근하고 간결하게(보통 3~6줄) 답한다. 너는 서버·코드·파일·실제 주문·외부 시스템에 절대 접근할 수 없고, 오직 자동매매 '설정'에 대한 조언·설명과 변경 제안만 한다. 설정 변경을 제안할 때는 답변 맨 끝에 줄을 바꿔 정확히 [[set 키=값]] 형식으로 적어라(여러 개면 여러 줄). 허용 키만 제안: riskPerTradePct, maxPerStockPct(종목당 한도, 자본대비 %), maxPositions, maxExposurePct, stopAtrMult, takeProfitR, dailyLossLimitPct, maxConsecLosses, maxTradesPerDay, trendFilter(true/false), intradayRebound(true/false), rbMinDrop, rbReboundPct. 시스템·코드·파일·서버·해킹 관련 요청은 정중히 거절하라.`;
       try {
         const reply = await new Promise((resolve, reject) => {
           execFile('claude', ['-p', '--disallowedTools', 'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
@@ -1969,7 +1969,7 @@ async function handleRequest(req, res, session) {
     // POST /api/ai/apply — AI가 제안한 설정 변경을 사용자 승인 후 적용 (화이트리스트 키만)
     if (pathname === '/api/ai/apply' && req.method === 'POST') {
       const body = await parseBody(req);
-      const WL = { riskPerTradePct:'num', maxPerStock:'num', maxPositions:'num', maxExposurePct:'num',
+      const WL = { riskPerTradePct:'num', maxPerStockPct:'num', maxPositions:'num', maxExposurePct:'num',
         stopAtrMult:'num', takeProfitR:'num', dailyLossLimitPct:'num', maxConsecLosses:'num',
         maxTradesPerDay:'num', trendFilter:'bool', intradayRebound:'bool', rbMinDrop:'num', rbReboundPct:'num' };
       const key = String(body.key || '');

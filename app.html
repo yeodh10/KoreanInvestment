@@ -1093,7 +1093,7 @@ td.mono,th.mono{font-family:var(--mono)}
       <div class="pf-stat"><div class="lbl">총 거래</div><div class="val" id="histCount">—</div></div>
       <div class="pf-stat"><div class="lbl">매수 합계</div><div class="val" id="histBuy">—</div></div>
       <div class="pf-stat"><div class="lbl">매도 합계</div><div class="val" id="histSell">—</div></div>
-      <div class="pf-stat"><div class="lbl">실현 손익</div><div class="val" id="histPnl">—</div></div>
+      <div class="pf-stat"><div class="lbl" title="기간 내 매도금액 − 매수금액 (종목 매칭 손익이 아님)">순매매대금 (매도−매수)</div><div class="val" id="histPnl">—</div></div>
     </div>
     <div class="panel">
       <div class="tbl-wrap">
@@ -2400,6 +2400,10 @@ function applyAccount(data) {
     window._holds[c] = { qty: parseInt(p.hldg_qty||0), avg: parseInt(p.pchs_avg_pric||0),
                          buyAmt: parseInt(p.pchs_amt||0), name: p.prdt_name || nameOf(c),
                          baseCur: parseInt(p.prpr||0), basePl: parseInt(p.evlu_pfls_amt||0) }; // KIS 기준값
+    // ★ baseline 시점의 가격으로 _lastPx도 동기화 — baseEv(KIS evlu_amt 시점)와 liveEv(_lastPx 시점)가
+    //   다른 시점이면 총자산이 틱마다 출렁이던 문제(HIGH#12) 차단. 이후 틱이 오면 그때부터 변동분만 반영.
+    if (!window._lastPx) window._lastPx = {};
+    window._lastPx[c] = parseInt(p.prpr||0);
   });
   // 실시간 총자산/손익은 KIS 권위값(총평가·평가손익) 기준 + "보유평가 변동분"만 가감한다.
   // (모의투자는 예수금≠D+2라 현금을 직접 더하면 ₩수천만 어긋남 — KIS 총평가를 baseline으로 고정)
