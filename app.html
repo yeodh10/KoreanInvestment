@@ -1481,7 +1481,7 @@ async function api(path) {
   } catch(e) { return null; }
   finally { clearTimeout(tm); }
 }
-async function apiPost(path, body) {
+async function apiPost(path, body, nonIdempotent) {
   const ctl = new AbortController();
   const tm = setTimeout(() => ctl.abort(), 12000);
   try {
@@ -1494,8 +1494,10 @@ async function apiPost(path, body) {
     });
     return await r.json();
   } catch(e) {
-    // 타임아웃(abort)은 일반 실패와 구분 — 주문이 서버에서 접수됐을 수 있어 "실패"로 단정하면 안 된다.
-    return (e && e.name === 'AbortError') ? { _timeout: true } : null;
+    // 타임아웃(abort)·연결끊김 모두, 비멱등(주문) 호출은 서버에서 이미 접수됐을 수 있어 "실패"로 단정하면
+    // 안 된다(재전송 시 중복체결). 주문 경로는 nonIdempotent=true → 항상 '불확실(_timeout)'로 반환.
+    if (e && e.name === 'AbortError') return { _timeout: true };
+    return nonIdempotent ? { _timeout: true } : null;
   }
   finally { clearTimeout(tm); }
 }
@@ -2182,7 +2184,7 @@ async function dashOrder(side) {
   _orderInflight = true;
   show('var(--bg-3)','var(--text-2)','주문 처리 중...');
   try {
-    const r = await apiPost('/api/order', { side, code, qty:v.q, price:v.p, orderType:type });
+    const r = await apiPost('/api/order', { side, code, qty:v.q, price:v.p, orderType:type }, true);
     if (r?.ok && r.data?.rt_cd==='0') {
       show('var(--blue-dim)','var(--blue)',`✅ ${side==='buy'?'매수':'매도'} ${v.q}주 접수`);
       loadAccount(); setTimeout(refreshBuyable, 1200); setTimeout(refreshOrders, 1000);
@@ -2684,7 +2686,7 @@ async function submitOrder() {
   const btn = $('orderSubmit'); if (btn) btn.disabled = true;
   msgEl.style.display='block'; msgEl.className='kiss-msg info'; msgEl.textContent='주문 처리 중...';
   try {
-    const r=await apiPost('/api/order',{side,code,qty:v.q,price:v.p,orderType:type});
+    const r=await apiPost('/api/order',{side,code,qty:v.q,price:v.p,orderType:type},true);
     if(r?.ok && r.data?.rt_cd==='0'){
       msgEl.className='kiss-msg ok'; msgEl.textContent=`✅ ${side==='buy'?'매수':'매도'} 주문 접수: ${v.q}주`;
       showToast(`${side==='buy'?'매수':'매도'} ${v.q}주 주문이 접수됐어요`);
@@ -3351,7 +3353,7 @@ async function submitSplitOrder() {
   try {
     for (let i = 0; i < count; i++) {
       msgEl.textContent = `분할 주문 ${i+1}/${count} 진행 중...`;
-      const r = await apiPost('/api/order', { side, code, qty: qtyPerOrder, price: v.p, orderType: type });
+      const r = await apiPost('/api/order', { side, code, qty: qtyPerOrder, price: v.p, orderType: type }, true);
       if (r?._timeout) {
         msgEl.className = 'kiss-msg info';
         msgEl.textContent = `⏳ ${i+1}번째 응답 지연 — 주문내역에서 접수 여부 확인 후 재개하세요`;
@@ -3630,7 +3632,7 @@ async function submitSideOrder() {
   if (!confirmOrder(sideSide, code, v.q, v.p, type)) return;
   _orderInflight = true;
   try {
-    const r=await apiPost('/api/order',{side:sideSide,code,qty:v.q,price:v.p,orderType:type});
+    const r=await apiPost('/api/order',{side:sideSide,code,qty:v.q,price:v.p,orderType:type},true);
     if(r?.ok&&r.data?.rt_cd==='0'){ alert(`✅ ${sideSide==='buy'?'매수':'매도'} ${v.q}주 접수`); setTimeout(refreshOrders,1000); }
     else if(r?._timeout){ alert('⏳ 응답 지연 — 주문내역에서 접수 여부를 확인하세요'); setTimeout(refreshOrders,800); }
     else alert('❌ '+(r?.data?.msg1||r?.message||'주문 실패'));

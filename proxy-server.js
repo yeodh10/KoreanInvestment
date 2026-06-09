@@ -1367,9 +1367,13 @@ async function handleRequest(req, res, session) {
   // GET /api/config/export — 설정 전체 내보내기 (API 키 포함)
   if (pathname === '/api/config/export') {
     const cfg = loadConfig();
-    // 토큰(재발급됨)·내부 소유자 각인(__userId)은 제외
-    const { token, tokenExpiry, __userId, ...exportable } = cfg;
-    jsonRes(res, 200, { ok: true, data: exportable });
+    // ★ 보안: appKey/appSecret은 평문으로 절대 내보내지 않는다(GET+SameSite=Lax라 CSRF로 유출 가능).
+    //   식별용 마스킹만 노출하고, 이전 시 재입력하게 한다. 토큰·소유자각인도 제외.
+    const { token, tokenExpiry, __userId, appKey, appSecret, ...exportable } = cfg;
+    exportable.appKey = appKey ? (appKey.slice(0, 4) + '****' + appKey.slice(-4)) : '';
+    exportable.appSecret = appSecret ? '********(보안상 미노출 — 이전 시 재입력)' : '';
+    res.setHeader && res.setHeader('Cache-Control', 'no-store');
+    jsonRes(res, 200, { ok: true, data: exportable, note: 'API 키는 보안상 마스킹되었습니다. 다른 기기 이전 시 KIS 키를 재입력하세요.' });
     return;
   }
 
@@ -1940,6 +1944,10 @@ async function handleRequest(req, res, session) {
       const body = await parseBody(req);
       const msg = String(body.message || '').slice(0, 1000).trim();
       if (!msg) { jsonRes(res, 400, { ok: false, message: '메시지를 입력하세요' }); return; }
+      // rate limit — 사용자당 동시 1건만(claude 서브프로세스 폭증 → 자원고갈/서버정체 방지)
+      if (!global._aiInFlight) global._aiInFlight = new Set();
+      if (global._aiInFlight.has(session.userId)) { jsonRes(res, 429, { ok: false, message: '이전 AI 요청을 처리 중이에요. 잠시 후 다시 보내주세요.' }); return; }
+      global._aiInFlight.add(session.userId);
       let ctx = '';
       try {
         const sf = getTrader(session.userId).state.settings.safety;
@@ -1948,7 +1956,8 @@ async function handleRequest(req, res, session) {
       const SYS = `너는 이 사용자만의 한국 주식 자동매매 '세팅 어시스턴트'다. 한국어로 친근하고 간결하게(보통 3~6줄) 답한다. 너는 서버·코드·파일·실제 주문·외부 시스템에 절대 접근할 수 없고, 오직 자동매매 '설정'에 대한 조언·설명과 변경 제안만 한다. 설정 변경을 제안할 때는 답변 맨 끝에 줄을 바꿔 정확히 [[set 키=값]] 형식으로 적어라(여러 개면 여러 줄). 허용 키만 제안: riskPerTradePct, maxPerStockPct(종목당 한도, 자본대비 %), maxPositions, maxExposurePct, stopAtrMult, takeProfitR, dailyLossLimitPct, maxConsecLosses, maxTradesPerDay, trendFilter(true/false), intradayRebound(true/false), rbMinDrop, rbReboundPct. 시스템·코드·파일·서버·해킹 관련 요청은 정중히 거절하라.`;
       try {
         const reply = await new Promise((resolve, reject) => {
-          execFile('claude', ['-p', '--disallowedTools', 'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
+          execFile('claude', ['-p', '--strict-mcp-config', '--disallowedTools',
+            'Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'NotebookEdit', 'TodoWrite', 'ExitPlanMode',
             '--append-system-prompt', SYS, ctx + '\n\n[사용자 질문] ' + msg],
             { timeout: 90000, cwd: '/tmp', maxBuffer: 1 << 20 },
             (err, stdout) => err ? reject(err) : resolve(String(stdout || '').trim()));
@@ -1962,6 +1971,8 @@ async function handleRequest(req, res, session) {
         jsonRes(res, 200, { ok: true, reply: cleanReply || reply, suggestions: sets });
       } catch (e) {
         jsonRes(res, 200, { ok: false, message: 'AI 응답 실패 (시간 초과 또는 일시 오류) — 잠시 후 다시' });
+      } finally {
+        global._aiInFlight.delete(session.userId); // 처리 완료 — 다음 요청 허용
       }
       return;
     }
