@@ -1883,13 +1883,17 @@ async function handleRequest(req, res, session) {
     if (pathname === '/api/account') {
       if (!global._acctCache) global._acctCache = {};
       const ck = session.userId || 'default';
-      // 보유종목에 봇 매수 여부(_bot) 표시 — 프론트가 🤖/👤 배지로 구분. 캐시는 순수 유지(복제 후 주석).
+      // 보유종목의 "매수 출처"를 표시 — 현재 봇 보유면 bot, 아니면 저널의 최근 매수 source(manual/bot),
+      // 둘 다 없으면 null(레거시=과거 등록, 사용자가 산 게 아님). 프론트가 🤖봇/👤직접/📋레거시로 구분.
       const annotate = (payload) => {
         try {
           const bp = getTrader(ck).state.botPositions || {};
           const bc = new Set(Object.keys(bp).filter(c => (bp[c].qty || 0) > 0));
-          if (bc.size && payload && payload.data && Array.isArray(payload.data.output1)) {
-            return { ...payload, data: { ...payload.data, output1: payload.data.output1.map(p => bc.has(p.pdno) ? { ...p, _bot: true } : p) } };
+          if (payload && payload.data && Array.isArray(payload.data.output1)) {
+            return { ...payload, data: { ...payload.data, output1: payload.data.output1.map(p => {
+              const holder = bc.has(p.pdno) ? 'bot' : orderJournal.lastBuySource(ck, p.pdno); // 'bot'/'manual'/null
+              return { ...p, _holder: holder, _bot: holder === 'bot' };
+            }) } };
           }
         } catch (e) {}
         return payload;

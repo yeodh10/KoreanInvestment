@@ -2365,8 +2365,10 @@ function applyAccount(data) {
   window._baseTotal = totalAsset;
   window._baseEv = holdings.reduce((s, p) => s + parseInt(p.evlu_amt||0), 0);
   window._basePnl = pnl;
+  window._basePrincipal = principal; // 등락률(=손익/매입금) 실시간 계산용
   window._lastCash = cash;
   window._botCodes = new Set(holdings.filter(p => p._bot).map(p => p.pdno)); // 봇 매수 종목 (🤖 배지)
+  window._holderMap = {}; holdings.forEach(p => { window._holderMap[p.pdno] = p._holder || null; }); // 매수 출처
   if (typeof startStream === 'function') startStream(); // 보유종목이 바뀌면 실시간 구독에 포함
   const rate = principal>0 ? ((pnl/principal)*100).toFixed(2) : '0.00';
   const up = pnl>=0;
@@ -4334,20 +4336,27 @@ function recalcLiveTotals() {
   const delta = liveEv - (window._baseEv || liveEv);
   const total = (window._baseTotal || 0) + delta;
   const pl = (window._basePnl || 0) + delta, up = pl >= 0;
+  const rate = (window._basePrincipal > 0) ? (pl / window._basePrincipal * 100) : 0; // 등락률(수익률)
+  const sign = up ? '+' : '';
   const T = (id, txt) => { const e = $(id); if (e) e.textContent = txt; };
-  const P = (id, txt, sub) => { const e = $(id); if (e) { e.textContent = txt; e.className = (sub ? 'sub ' : 'val ') + (up ? 'up' : 'dn'); } };
   T('sbTotalAsset', '₩' + Math.round(total).toLocaleString());
   T('pfTotal', '₩' + Math.round(total).toLocaleString());
   T('pfTotalAsset', '₩' + Math.round(total).toLocaleString());
   T('miniPfTotal', '₩' + Math.round(total).toLocaleString());
-  const sb = $('sbPnl'); if (sb) { sb.textContent = (up ? '+' : '') + '₩' + Math.round(pl).toLocaleString(); sb.className = 'sub ' + (up ? 'up' : 'dn'); }
+  const sb = $('sbPnl'); if (sb) { sb.textContent = sign + '₩' + Math.round(pl).toLocaleString(); sb.className = 'sub ' + (up ? 'up' : 'dn'); }
+  // ★ 등락률(수익률%)도 실시간 — 총자산만 변하고 %가 멈춰있던 문제 수정
+  const pf = $('pfPnl'); if (pf) { pf.textContent = sign + '₩' + Math.round(pl).toLocaleString() + ' (' + sign + rate.toFixed(2) + '%)'; pf.className = 'sub ' + (up ? 'up' : 'dn'); }
+  const pr = $('pfRetRate'); if (pr) { pr.textContent = sign + rate.toFixed(2) + '%'; pr.className = 'val ' + (up ? 'up' : 'dn'); }
+  const pe = $('pfEvPnl'); if (pe) { pe.textContent = sign + '₩' + Math.round(pl).toLocaleString(); pe.className = 'val ' + (up ? 'up' : 'dn'); }
+  const mp = $('miniPfPnl'); if (mp) { mp.textContent = sign + '₩' + Math.round(pl).toLocaleString() + ' (' + sign + rate.toFixed(2) + '%)'; mp.className = (mp.className.replace(/\b(up|dn)\b/g, '').trim()) + ' ' + (up ? 'up' : 'dn'); }
 }
-// 보유자 배지 — 자동매매(봇)가 매수한 종목 🤖 / 직접 매수 👤
+// 보유자 배지 — 매수 출처 기준: 🤖봇(자동매매) / 👤직접(내가) / 📋레거시(과거 등록·출처 불명)
 function holderBadge(code) {
-  const bot = window._botCodes && window._botCodes.has(code);
-  return bot
-    ? ' <span title="자동매매가 매수" style="font-size:9px;padding:0 3px;border-radius:3px;background:rgba(52,133,250,.15);color:#3485FA">🤖봇</span>'
-    : ' <span title="직접 매수" style="font-size:9px;padding:0 3px;border-radius:3px;background:rgba(150,150,150,.15);color:var(--text-3)">👤</span>';
+  const h = window._holderMap && window._holderMap[code];
+  const base = 'font-size:9px;padding:0 3px;border-radius:3px;';
+  if (h === 'manual') return ` <span title="직접 매수" style="${base}background:rgba(150,150,150,.15);color:var(--text-3)">👤직접</span>`;
+  if (h === 'bot')    return ` <span title="자동매매가 매수" style="${base}background:rgba(52,133,250,.15);color:#3485FA">🤖봇</span>`;
+  return ` <span title="과거 등록 — 매수 출처 기록 없음(사용자 매수 아님)" style="${base}background:rgba(180,140,40,.15);color:#c89b3c">📋레거시</span>`;
 }
 
 // ══════════════════════════════════════════════════════

@@ -194,6 +194,14 @@ function todayList(userId) {
   return userId ? _selTodayUser.all(s, e, userId) : _selTodayAll.all(s, e);
 }
 
+// ── 보유종목의 최근 매수 출처 (bot / manual / null=기록없음=레거시) ──
+// 포트폴리오 배지가 "현재 봇 보유 여부"가 아니라 "누가 샀는지"로 정확히 판단하게 한다.
+const _lastBuySrc = db.prepare(
+  `SELECT source FROM orders WHERE userId = ? AND code = ? AND side = 'buy' ORDER BY t DESC LIMIT 1`);
+function lastBuySource(userId, code) {
+  try { const r = _lastBuySrc.get(userId, code); return r ? (r.source || null) : null; } catch (e) { return null; }
+}
+
 // ── 미체결(접수·부분체결 잔량) 목록 ──
 function pendingList(userId) {
   return todayList(userId).filter(e => e.status === '접수' || e.status === '부분체결');
@@ -243,4 +251,4 @@ function toKisFormat(entries, nameOf) {
   });
 }
 
-module.exports = { add, markFilled, markCancel, reconcile, todayList, pendingList, listRange, toKisFormat, _kstDateKey };
+module.exports = { add, markFilled, markCancel, reconcile, todayList, pendingList, listRange, toKisFormat, lastBuySource, _kstDateKey };
