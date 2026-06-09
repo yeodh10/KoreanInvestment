@@ -329,9 +329,10 @@ function mkTrader(deps) {
   global._priceCache = {}; // 정리
 
   // 20) 이미 봇이 보유한 종목은 BUY 신호가 떠도 추가매수 안 함 (분할 몰빵·한도찬 종목 헛시도 방지)
+  //     heldAcct(005930 10주 보유)와 botPositions를 일치시켜 잔고대조에 안 지워지게 한 뒤 BUY 신호 확인
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 60000 }));
-  t.state.botPositions = { '005930': { qty: 10, entry: 60000, stop: 58000 } }; // 이미 보유
+  t = mkTrader(mkDeps({ chart: decChart, account: heldAcct, price: 60000 }));
+  t.state.botPositions = { '005930': { qty: 10, entry: 60000, stop: 58000 } }; // 실보유와 일치
   await t.tick();
   ok('이미 봇 보유 종목은 추가매수 안 함(몰빵 방지)', orders.filter(o => o.side === 'buy').length === 0);
 
