@@ -181,7 +181,7 @@ const ok2 = r => !r.err && r.status === 200;
   verdict.push(loadOk ? '🟢 부하 견딤' : '🟡 부하 지연/실패');
   const slow = [localHome, pubHome].filter(r => !r.err && r.ms > 1500);
   verdict.push(slow.length ? `🟡 느린 응답 ${slow.length}건(>1.5s)` : '🟢 응답속도 양호');
-  verdict.push(circuitTripped ? '🛑 봇 서킷 발동' : '🟢 서킷 정상범위');
+  verdict.push(circuitTripped ? '🟡 신규매수 중지 (한도 도달 — 설계대로 정상 보호)' : '🟢 서킷 정상범위');
   verdict.push(engineErrs ? `🟡 엔진 오류 ${engineErrs}건` : '🟢 엔진 오류 없음');
   L.push('- ' + verdict.join(' · '));
 

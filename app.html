@@ -2228,10 +2228,15 @@ function renderOB(d, opt) {
   const fmtPct = p => base>0 ? ((p-base)/base*100).toFixed(2) : null;
   const pctColor = p => { const x=parseFloat(p); return Math.abs(x)<0.005 ? 'var(--text-0)' : x>0 ? 'var(--red)' : 'var(--down)'; }; // 0.00% = 흰색
 
+  // 합성/마감 호가는 실제 시장가가 아니므로 클릭해 주문가로 채우지 못하게 막는다(HIGH#8)
+  const synth = !!(d.synthetic || (opt && opt.synthetic));
+  const rowAttr = p => synth
+    ? `style="cursor:not-allowed;opacity:.8" onclick="showToast('⚠ 합성 호가 — 실제 시장가가 아니에요. 주문가로 쓰지 마세요','err')"`
+    : `onclick="fillOrderPrice(${p})" style="cursor:pointer"`;
   // 한국식 3단 행: [매도수량 | 가격+등락률 | 매수수량]
   const mkAsk = row => {
     const pct = fmtPct(row.price);
-    return `<div class="ob-row" onclick="fillOrderPrice(${row.price})" style="cursor:pointer">
+    return `<div class="ob-row" ${rowAttr(row.price)}>
       <div class="ob-qty ask">${row.qty>0?row.qty.toLocaleString():''}</div>
       <div class="ob-cell" style="background:rgba(248,81,73,0.1)">
         <span class="ob-price" style="color:var(--red)">${row.price.toLocaleString()}</span>
@@ -2242,7 +2247,7 @@ function renderOB(d, opt) {
   };
   const mkBid = row => {
     const pct = fmtPct(row.price);
-    return `<div class="ob-row" onclick="fillOrderPrice(${row.price})" style="cursor:pointer">
+    return `<div class="ob-row" ${rowAttr(row.price)}>
       <div class="ob-qty ask"></div>
       <div class="ob-cell" style="background:rgba(56,139,253,0.1)">
         <span class="ob-price" style="color:var(--down)">${row.price.toLocaleString()}</span>
@@ -2525,6 +2530,9 @@ async function loadPortfolio() {
   const r = await api('/api/account');
   if (!r?.ok) { tbody.innerHTML='<tr><td colspan="11" class="empty">조회 실패</td></tr>'; return; }
   const positions = (r.data.output1||[]).filter(p=>parseInt(p.hldg_qty||0)>0);
+  // 포트폴리오를 대시보드보다 먼저 열어도 배지가 맞게 — _holderMap을 여기서도 갱신(MED3)
+  window._holderMap = window._holderMap || {};
+  positions.forEach(p => { if (p._holder !== undefined) window._holderMap[p.pdno] = p._holder; });
   if (_pfSort.key) positions.sort((a,b) => (pfSortVal(a,_pfSort.key) - pfSortVal(b,_pfSort.key)) * _pfSort.dir);
   const s = (r.data.output2&&r.data.output2[0]) || {};
   const total = parseInt(s.tot_evlu_amt||0), principal=parseInt(s.pchs_amt_smtl_amt||0);
@@ -4348,7 +4356,8 @@ function startStream() {
   if (!proxyOnline || typeof EventSource === 'undefined') return;
   // 시세표(시총30) + 보유종목을 실시간 구독에 포함 — 보유 평가액이 틱마다 갱신되게(서버 한도 40 내)
   const hold = window._holds ? Object.keys(window._holds) : [];
-  const codes = [...new Set([...watchCodes.slice(0, 30), ...hold])].slice(0, 38);
+  // 보유종목을 먼저 채우고 남는 슬롯에 시세표 — 보유가 SSE 구독에서 누락돼 실시간 평가액이 빠지던 문제(MED4)
+  const codes = [...new Set([...hold, ...watchCodes.slice(0, 30)])].slice(0, 38);
   const want = codes.join(',') + '|' + (obCode || '');
   // CLOSED(2) 상태면 같은 대상이라도 재생성해야 한다 — 안 그러면 영구 폴링 강등 후 복구 불능
   if (_es && _es.readyState !== 2 && want === _streamWant) return;

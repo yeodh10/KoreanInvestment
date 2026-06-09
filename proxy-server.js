@@ -2024,7 +2024,8 @@ async function handleRequest(req, res, session) {
           userId: session.userId, side: body.side, code: body.code, qty: qtyN,
           price: ordType === '01' ? 0 : priceN, orderType: ordType,
           odno: result.body?.output?.ODNO, orgNo: result.body?.output?.KRX_FWDG_ORD_ORGNO,
-          qtyBefore: heldQtyOf(session.userId || 'default', body.code)
+          qtyBefore: heldQtyOf(session.userId || 'default', body.code),
+          source: 'manual' // 직접 주문 — 거래내역/배지 출처 표시(MED1)
         });
       }
       jsonRes(res, 200, { ok: true, data: result.body });
