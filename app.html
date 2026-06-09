@@ -3969,6 +3969,7 @@ async function loadHistory() {
     const isBuy=o.sll_buy_dvsn_cd==='02', side=isBuy?'<span class="badge buy">매수</span>':'<span class="badge sell">매도</span>';
     const qty=parseInt(o.ord_qty||0), filled=parseInt(o.tot_ccld_qty||0), oprc=parseInt(o.ord_unpr||0), cprc=parseInt(o.avg_prvs||o.tot_ccld_unpr||0);
     const amt=cprc*(filled||qty); // 체결수량 기준 금액(부분체결 과대집계 방지)
+    const isMkt=/시장/.test(o.ord_dvsn_name||''); // 시장가는 체결가가 0으로 올 수 있음(HIGH#13 표시 보정)
     if(isBuy)buyAmt+=amt;else sellAmt+=amt;
     const date=(o.ord_dt||'').replace(/(\d{4})(\d{2})(\d{2})/,'$1-$2-$3');
     return `<tr>
@@ -3976,10 +3977,10 @@ async function loadHistory() {
       <td style="cursor:pointer" onclick="loadStock('${code}')">${name}${srcBadge}</td>
       <td>${side}</td>
       <td class="mono">${o.ord_dvsn_name||'지정가'}</td>
-      <td class="mono">₩${oprc.toLocaleString()}</td>
-      <td class="mono">₩${cprc.toLocaleString()}</td>
+      <td class="mono">${oprc>0?'₩'+oprc.toLocaleString():(isMkt?'시장가':'—')}</td>
+      <td class="mono">${cprc>0?'₩'+cprc.toLocaleString():'<span style="color:var(--text-3)">체결가확인</span>'}</td>
       <td class="mono">${qty}</td>
-      <td class="mono">₩${amt.toLocaleString()}</td>
+      <td class="mono">${amt>0?'₩'+amt.toLocaleString():'—'}</td>
       <td class="mono">—</td>
       <td>—</td>
     </tr>`;
