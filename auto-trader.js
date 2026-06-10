@@ -62,7 +62,8 @@ const DEFAULT_SETTINGS = {
     tradeStartTime: '09:05',   // 매수 시작 시간
     tradeEndTime: '15:00',     // 신규 매수 종료 시간 (매도는 15:20까지)
     avoidFirst30min: true,     // 장 시작 30분 신규매수 금지
-    protectManual: true        // ★ 수동 보유 보호: 엔진이 직접 매수한 수량만 매도
+    protectManual: true,       // ★ 수동 보유 보호: 엔진이 직접 매수한 수량만 매도
+    avoidWarnStocks: true      // ★ 위험종목 회피: 관리/투자경고·위험/거래정지/정리매매 종목 자동매수 차단
   },
   // 자동매매 대상 종목 — KOSPI 시총 상위 우량주 50 (반도체·2차전지·바이오·자동차·금융·통신·소재·조선·방산 분산)
   watchList: [
@@ -322,8 +323,9 @@ function kstParts() {
   };
 }
 // KRX 휴장일 (주말 외) — 매년 갱신 필요. 누락 시 KIS가 주문을 거부하므로 2차 방어는 됨.
+// ⚠️ 음력 기반(설·부처님오신날·추석)은 1~2년 뒤 윤달 변동으로 ±1일 오차 가능 — 매년 KRX 공식 캘린더로 확정할 것.
 const KRX_HOLIDAYS = new Set([
-  // 2026년
+  // 2026년 (확정)
   '2026-01-01',                            // 신정
   '2026-02-16','2026-02-17','2026-02-18',  // 설 연휴
   '2026-03-02',                            // 삼일절 대체
@@ -335,14 +337,46 @@ const KRX_HOLIDAYS = new Set([
   '2026-10-05',                            // 개천절 대체
   '2026-10-09',                            // 한글날
   '2026-12-25',                            // 성탄절
-  '2026-12-31'                             // 연말 휴장
+  '2026-12-31',                            // 연말 휴장
+  // 2027년 — 양력·대체공휴일은 요일로 검증(확실), 음력은 추정(⚠️ 공식 캘린더로 재확인 필요)
+  '2027-01-01',                            // 신정 (금)
+  '2027-02-05','2027-02-08',               // ⚠️음력 설(2/6 토) 연휴 전날(금) + 대체공휴일(월)
+  '2027-03-01',                            // 삼일절 (월)
+  '2027-05-05',                            // 어린이날 (수)
+  '2027-05-13',                            // ⚠️음력 부처님오신날 (목, 추정)
+  '2027-08-16',                            // 광복절(8/15 일) 대체 (월)
+  '2027-09-14','2027-09-15','2027-09-16',  // ⚠️음력 추석 연휴 (화·수·목, 추정)
+  '2027-10-04',                            // 개천절(10/3 일) 대체 (월)
+  '2027-10-11',                            // 한글날(10/9 토) 대체 (월)
+  '2027-12-27',                            // 성탄절(12/25 토) 대체 (월)
+  '2027-12-31'                             // 연말 휴장 (금)
 ]);
+
+// ── 단축장/늦장개장 (분 단위, KST). 미등록일은 정규장 09:00~15:30. ──
+// 수능일은 통상 1시간 늦게 개장(10:00~16:30). 날짜는 매년 확정 필요(⚠️ 공식 발표로 재확인).
+const SHORTENED_SESSIONS = {
+  '2026-11-19': { open: 10*60, close: 16*60+30 } // ⚠️ 2027학년도 수능 예정일(목) — 공식 확정 시 수정
+};
+function marketHours(dateKey) {
+  return SHORTENED_SESSIONS[dateKey] || { open: 9*60, close: 15*60+30 };
+}
 function isMarketOpen() {
   const k = kstParts();
   if (k.day === 0 || k.day === 6) return false;
   if (KRX_HOLIDAYS.has(k.dateKey)) return false; // 공휴일 — 헛스캔·휴장일 주문 방지
-  return k.min >= 9*60 && k.min <= 15*60+30;
+  const h = marketHours(k.dateKey);              // 단축장(늦장개장) 반영 — 개장 전 헛주문 방지
+  return k.min >= h.open && k.min <= h.close;
 }
+
+// 휴장일 테이블 신선도 경고 — 등록된 최신 연도가 올해를 못 덮으면 부팅 시 1회 경고
+(function warnHolidayTableStale() {
+  try {
+    let maxYear = 0;
+    for (const d of KRX_HOLIDAYS) { const y = parseInt(d.slice(0, 4)); if (y > maxYear) maxYear = y; }
+    const curYear = new Date(Date.now() + 9 * 60 * 60 * 1000).getUTCFullYear();
+    if (maxYear < curYear) console.warn(`⚠️ KRX 휴장일 테이블이 ${maxYear}년까지만 등록됨 (현재 ${curYear}년) — auto-trader.js KRX_HOLIDAYS/SHORTENED_SESSIONS 갱신 필요`);
+  } catch (_) {}
+})();
 function timeToMin(hhmm) {
   const [h,m] = hhmm.split(':').map(Number);
   return h*60 + m;
@@ -770,6 +804,7 @@ class AutoTrader {
             this.log('system', `${name} 매수 보류 (리스크/한도 내 수량 0 — 현재가 ₩${price.toLocaleString()})`);
             continue;
           }
+          if (await this._riskBlocked(cfg, code, name)) continue; // 관리/투자경고·위험/거래정지 종목 차단
           const target = price + s.safety.takeProfitR * stopDist;       // +R배수 익절
           await this.buy(cfg, code, qty, price, signal.reason, { stop, target, atr: atr || 0, initRisk: stopDist });
 
@@ -836,6 +871,7 @@ class AutoTrader {
           const expRoom = capital * (s.safety.maxExposurePct / 100) - this._botExposure(heldPositions) - pendBuyAmt;
           qty = Math.min(qty, Math.floor(Math.max(0, expRoom) / price));
           if (qty < 1) continue;
+          if (await this._riskBlocked(cfg, code, name)) continue; // 관리/투자경고·위험/거래정지 종목 차단
           const target = price + s.safety.takeProfitR * stopDist;
           await this.buy(cfg, code, qty, price, rb.reason, { stop: rb.stop, target, atr: 0, initRisk: stopDist });
         }
@@ -851,6 +887,16 @@ class AutoTrader {
     } finally {
       this._ticking = false;
     }
+  }
+
+  // ★ 위험종목 매수 차단 — 관리/투자경고·위험/거래정지/정리매매 종목은 자동매수하지 않는다.
+  //   조회 실패 시(getStockFlags 예외/미주입)엔 막지 않음(과차단 방지, KIS가 2차 게이트).
+  async _riskBlocked(cfg, code, name) {
+    if (!this.state.settings.safety.avoidWarnStocks || !this.deps.getStockFlags) return false;
+    let flags;
+    try { flags = await this.deps.getStockFlags(cfg, code); } catch (_) { return false; }
+    if (flags && flags.blocked) { this.log('safety', `🚫 ${name} 매수 차단 — ${flags.reason} 종목`); return true; }
+    return false;
   }
 
   // ★ 매도 가능 수량 — 수동 보유 보호가 켜져 있으면 엔진이 직접 매수한 수량까지만

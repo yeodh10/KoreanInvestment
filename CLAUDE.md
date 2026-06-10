@@ -2,7 +2,7 @@
 
 > 한국투자증권(KIS) OpenAPI 기반 주식 자동매매 + 수동매매 웹 서비스.
 > 현재 모의투자(VTS)로 운영 검증 중이며 **다중 사용자 서비스 출시 예정**.
-> Node.js 빌트인만 사용 (npm 의존성 0). 마지막 갱신: 2026-06-05.
+> Node.js 빌트인만 사용 (npm 의존성 0). 마지막 갱신: 2026-06-10.
 
 ## 1. 아키텍처
 
@@ -13,15 +13,17 @@ auto-trader.js    자동매매 엔진. 골든크로스+RSI 신호, 손절/익절
                   포지션 소유권 분리(botPositions), 미체결 가드, KST 시간대, 공휴일
 kis-realtime.js   KIS WebSocket 클라이언트 (RFC6455 직접 구현) → SSE 팬아웃.
                   무수신 watchdog(90초), LRU 구독 한도(40), 체결통보 AES 복호화, 유휴 피드 정리
-auth.js           멀티유저 인증 (users·sessions = SQLite/node:sqlite, WAL). scrypt 해시, 세션 토큰
+auth.js           멀티유저 인증 (users·sessions = SQLite/node:sqlite, WAL). scrypt 해시(**비동기** —
+                  로그인/가입 폭주에도 이벤트루프 비블로킹, 해시는 DB 트랜잭션 밖에서 계산), 세션 토큰
                   SHA-256 저장(원본키 폴백 없음), 동시 가입/로그인 무손실(트랜잭션). AES-256-GCM으로
                   유저별 KIS 설정 암호화(user-configs/ 파일 유지). DB=auth.db (env AUTH_DB). 레거시 JSON 자동 이관.
 order-journal.js  주문 저널 (SQLite/node:sqlite, WAL). 접수/부분체결/체결/취소, 잔고 대조 reconcile,
                   userId 격리. 각 연산이 단일 SQL/트랜잭션 → 멀티유저 동시 쓰기에도 기록 유실 없음.
                   DB=order-journal.db (env JOURNAL_DB로 재정의, 테스트는 임시 DB). 레거시 JSON 자동 1회 이관.
-data-fallback.js  "빈 화면 금지" 폴백. lastGood 영속 캐시(data-cache.json), 합성 호가 사다리, 환율 폴백
-app.html          단일 파일 프론트 (~3,900줄). 토스 모티브 다크 UI, Pretendard+tabular-nums
-tests/            engine(17)·realtime(20)·fallback(21)·journal(13) = 71개. node tests/xxx-test.js
+data-fallback.js  "빈 화면 금지" 폴백. lastGood 영속 캐시(data-cache.json), 합성 호가 사다리, 환율 폴백.
+                  cached 응답에 asOf(마지막 정상시각) 동봉 → 프론트 신선도 라벨("합성호가"/"마감·N분 전")
+app.html          단일 파일 프론트 (~4,600줄). 토스 모티브 다크 UI, Pretendard+tabular-nums. 라이트테마 토글, PWA
+tests/            engine(71)·realtime(23)·fallback(23)·journal(26)·auth(18) = 161개. node tests/xxx-test.js
 ```
 
 ## 2. 우분투 실행
@@ -49,6 +51,12 @@ node tests/engine-test.js && node tests/realtime-test.js && node tests/fallback-
 - **포지션 소유권 분리**: 엔진은 자기가 매수한 수량(`state.botPositions`)만 매도. 수동 매수분 불가침.
   설정 `safety.protectManual`(기본 ON). 계좌 갱신 때 실보유와 대조해 봇 지분 자동 축소.
   배경: 사용자가 수동으로 산 삼성전자를 엔진이 RSI 과매수로 팔아버린 사고.
+- **위험종목 자동매수 차단**: `safety.avoidWarnStocks`(기본 ON). BUY 후보에 한해 매수 직전
+  `deps.getStockFlags`(proxy `fetchStockFlags`→inquire-price)로 관리/투자경고·위험/거래정지/정리매매 판정,
+  blocked면 매수 스킵(`🚫` 로그). 조회 실패 시엔 막지 않음(과차단 방지 — KIS 주문거부가 2차 게이트).
+- **휴장일/단축장**: `auto-trader.js` `KRX_HOLIDAYS`(2026·2027) + `SHORTENED_SESSIONS`(수능 등 늦장개장
+  10:00~16:30). `isMarketOpen`이 `marketHours(date)`로 개장시간 판정 → 개장 전 헛주문 방지. ⚠️음력 기반
+  (설·부처님·추석)은 ±1일 오차 가능 — 매년 KRX 공식 캘린더로 확정. 테이블이 올해 미만이면 부팅 시 경고.
 - **멀티유저 격리**: 요청별 userId는 `AsyncLocalStorage`(proxy-server 상단 `_als`). 전역 변수 금지.
   cfg 객체에 `__userId` 각인 → `saveConfig`가 컨텍스트 없이도 올바른 유저 파일에 저장.
   저널은 userId 정확 일치만 매칭(레거시 무소유 엔트리는 전역 컨텍스트에서만 보임).
@@ -86,16 +94,25 @@ node tests/engine-test.js && node tests/realtime-test.js && node tests/fallback-
 11. **출시 최종 검증 (06-08)**: 6영역 심층+적대적 재검증 → 테스트 99→131. 저널 userId WHERE(odno충돌),
     unhandledRejection, 유령손익(_sellPending) 차단, 반응속도(prefetch 워밍·선페인트·병렬), 서버 입력검증.
     `QA-최종검증-20260608.md` 참고.
+12. **기능 추가 (06-08~09, 커밋)**: AI 세팅 비서(claude CLI, 추가비용 0)·라이트(화이트) 테마 토글·
+    포트폴리오 테이블 정렬·종목당 한도 500만·봇 한 종목 1회 진입(분할 몰빵 차단)·안드로이드 PWA.
+    **전수조사 1~5차**: 체결통보 다중체결 유실(CRITICAL)·주문 중복체결 방지·총자산 출렁·거래내역 시장가
+    체결가 ₩0 표시 보정 등. 테스트 131→151.
+13. **백로그 6종 일괄 처리 (06-10)**: ⓐ scrypt **비동기** 전환(이벤트루프 비블로킹) ⓑ 위험종목 자동매수
+    차단(avoidWarnStocks) ⓒ 호가 신선도 라벨(asOf·합성/마감) ⓓ 휴장일 2027 + 단축장(늦장개장) 메커니즘 +
+    갱신 경고 ⓔ 약관 제7조(로그·기록 보존) ⓕ 거래 페이지 슬림화(뉴스/수급 중복 탭 제거→대시보드 일원화,
+    /api/investor 백그라운드 부하 감소). 테스트 151→**161**. (장중 작업 — **장마감 후 배포** 원칙)
 
 ## 5. 백로그 (우선순위순)
 
-1. **출시 전 비기능**: 약관·투자 손실 고지·로그 보존 정책 (M6, 미착수)
-2. scrypt 동기 실행(로그인 폭주 시 이벤트 루프 블로킹) — 비동기 전환 검토
-3. 거래량 상위 자동매수에 투자경고/위험 종목 필터 없음
-4. 합성호가·오래된 lastGood 신선도 라벨(asOf) 노출
-5. 휴장일 테이블 연 1회 갱신(2027~), 임시휴장·단축장 미반영
-6. 주문/거래 페이지 슬림화(중복 탭 제거) — 역할: 정밀 수동주문+주문관리 전용으로 합의됨
+1. **휴장일 음력 추정 확정**: 2027 설(2/5·2/8)·부처님오신날(5/13)·추석(9/14~16)은 윤달 ±1일 오차 가능 —
+   KRX 공식 캘린더 공개 시 확정. 단축장(수능 2026-11-19 등) 실제 날짜·시간도 공식 발표로 재확인.
+2. 휴장일 테이블 연 1회 갱신(2028~). 임시휴장(거래소 조치)은 여전히 미반영(KIS 주문거부가 2차 방어).
+3. 거래 페이지에서 떼어낸 `loadNews`/`loadInvestor`(app.html)는 호출처 없는 고아 함수 — 추후 정리 가능.
 
+> ✅ **2026-06-10 백로그 6종 전부 처리됨** (위 4절 13번): scrypt 비동기·위험종목 필터·신선도 라벨·
+>   휴장일2027/단축장·약관 제7조(로그보존)·거래페이지 슬림화. 약관(제1~6조)·투자위험 고지·가입 동의는
+>   06-07~08에 이미 구현돼 있었음(M6의 로그 보존 조항만 06-10에 보강).
 > ✅ 9번(매도 접수=체결, 5분 묵은 손절, 부분체결 오삭감, 15:20 알림)·실시간 connecting 고착·
 >   멀티탭 체결통보·htsId·세션 폴백 등은 2026-06-07 최종 리뷰에서 수정됨 (`QA-최종점검-20260607.md`).
 

@@ -79,23 +79,37 @@ function decrypt(blob) {
   } catch(e) { return ''; }
 }
 
-// ── 비밀번호 해시 (scrypt) ──
-function hashPassword(password) {
+// ── 비밀번호 해시 (scrypt — 비동기) ──
+// scryptSync는 CPU를 ~수십~수백ms 점유하며 그동안 이벤트 루프 전체를 멈춘다.
+// 로그인/가입 폭주 시 모든 요청(시세·주문 포함)이 직렬로 밀리던 문제 → 비동기 scrypt로 전환.
+// crypto.scrypt는 libuv 스레드풀에서 실행돼 메인 루프를 막지 않는다(동시 호출은 스레드풀에 큐잉).
+function scryptAsync(password, salt, keylen) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, keylen, (err, dk) => err ? reject(err) : resolve(dk));
+  });
+}
+async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  const hash = (await scryptAsync(password, salt, 64)).toString('hex');
   return salt + ':' + hash;
 }
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
   if (!stored || !stored.includes(':')) return false;
   const [salt, hash] = stored.split(':');
-  const test = crypto.scryptSync(password, salt, 64).toString('hex');
+  const test = (await scryptAsync(password, salt, 64)).toString('hex');
   const a = Buffer.from(hash), b = Buffer.from(test);
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
 // 더미 검증 — 없는 아이디에도 scrypt를 돌려 응답시간을 맞춤 (유저 존재 여부 누설 차단)
-const _DUMMY_HASH = hashPassword('::dummy::');
-function dummyVerify(password) { try { verifyPassword(password || '', _DUMMY_HASH); } catch (_) {} }
+// 더미 해시는 최초 1회 지연 생성(모듈 로드 시 scrypt 블로킹 방지).
+let _DUMMY_HASH = null;
+async function dummyVerify(password) {
+  try {
+    if (!_DUMMY_HASH) _DUMMY_HASH = await hashPassword('::dummy::');
+    await verifyPassword(password || '', _DUMMY_HASH);
+  } catch (_) {}
+}
 
 // 세션 토큰은 SHA-256 해시로 저장 — DB 유출 시에도 원본 토큰 복원 불가
 function hashToken(token) { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
@@ -149,7 +163,7 @@ function loadUsers() {
 }
 
 // ── 회원가입 ── (첫 가입자 = admin). UNIQUE + 트랜잭션으로 동시 가입 레이스 방어.
-function register(username, password) {
+async function register(username, password) {
   username = (username || '').trim().toLowerCase();
   if (!username || !password) return { ok:false, message:'아이디와 비밀번호를 입력하세요' };
   if (username.length < 3) return { ok:false, message:'아이디는 3자 이상이어야 합니다' };
@@ -158,6 +172,8 @@ function register(username, password) {
   if (password.length < 8) return { ok:false, message:'비밀번호는 8자 이상이어야 합니다' }; // 실거래 서비스 — 무차별 대입 방어
   const userId = 'u_' + crypto.randomBytes(6).toString('hex');
   const createdAt = new Date().toISOString();
+  // ★ 해시는 트랜잭션 밖에서 — scrypt(수십~수백ms) 동안 DB 쓰기 락을 잡고 있으면 동시 가입/로그인이 막힌다.
+  const passwordHash = await hashPassword(password);
   try {
     db.exec('BEGIN IMMEDIATE');
     if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) {
@@ -166,7 +182,7 @@ function register(username, password) {
     const count = db.prepare('SELECT COUNT(*) c FROM users').get().c;
     const role = count === 0 ? 'admin' : 'user'; // 첫 가입자가 관리자
     db.prepare('INSERT INTO users (userId,username,passwordHash,createdAt,role) VALUES (?,?,?,?,?)')
-      .run(userId, username, hashPassword(password), createdAt, role);
+      .run(userId, username, passwordHash, createdAt, role);
     db.exec('COMMIT');
     return { ok:true, userId, username, role };
   } catch (e) {
@@ -177,11 +193,11 @@ function register(username, password) {
 }
 
 // ── 로그인 ──
-function login(username, password) {
+async function login(username, password) {
   username = (username || '').trim().toLowerCase();
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  if (!user) { dummyVerify(password); return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' }; }
-  if (!verifyPassword(password, user.passwordHash)) return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' };
+  if (!user) { await dummyVerify(password); return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' }; }
+  if (!(await verifyPassword(password, user.passwordHash))) return { ok:false, message:'아이디 또는 비밀번호가 틀렸습니다' };
   // 세션 발급 — 원본 토큰은 쿠키로만, DB엔 해시만 저장
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO sessions (tokenHash,userId,username,createdAt) VALUES (?,?,?,?)')

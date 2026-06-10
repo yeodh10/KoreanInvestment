@@ -412,6 +412,17 @@ td.mono,th.mono{font-family:var(--mono)}
       이용자는 관련 법령(자본시장법 등)을 준수할 책임이 있으며, 본 서비스 이용으로 발생하는 모든 거래·세금·손익은
       이용자 본인에게 귀속됩니다.
 
+      <p style="font-weight:700;color:var(--text-0);margin:14px 0 4px">제7조 (로그·기록의 보존)</p>
+      서비스 운영·장애 대응·분쟁 처리·부정사용 방지를 위해 아래 기록이 보관됩니다.
+      <ul style="margin:6px 0 0;padding-left:18px">
+        <li><b>주문·체결 기록</b>(주문저널): 거래 증빙·분쟁 대응 목적으로 보관합니다.</li>
+        <li><b>자동매매 로그</b>: 최근 활동 위주로 보관(계정별 약 500건 순환)되며 오래된 기록은 자동 삭제됩니다.</li>
+        <li><b>로그인 세션</b>: 발급 후 30일이 지나면 자동 만료·삭제됩니다.</li>
+        <li><b>KIS App Key/Secret 등 민감정보</b>는 서버에 암호화(AES-256-GCM)되어 저장됩니다.</li>
+      </ul>
+      위 기록은 서비스 제공 목적 범위에서만 이용하며, 회원 탈퇴 시 관련 법령상 보존 의무가 있는 항목을 제외하고
+      합리적인 기간 내 파기합니다.
+
       <p style="color:var(--text-3);margin-top:16px;font-size:11px">
         본 고지에 동의하지 않으시면 서비스를 이용하실 수 없습니다. 회원가입은 위 내용에 대한 동의로 간주됩니다.
       </p>
@@ -774,8 +785,7 @@ td.mono,th.mono{font-family:var(--mono)}
           <div style="display:flex;border-bottom:1px solid var(--border);flex-shrink:0">
             <button class="trading-tab active" id="ttab4" onclick="switchTradingTab('chart')">차트</button>
             <button class="trading-tab" id="ttab1" onclick="switchTradingTab('tick')">실시간 체결</button>
-            <button class="trading-tab" id="ttab3" onclick="switchTradingTab('investor')">외국인/기관</button>
-            <button class="trading-tab" id="ttab2" onclick="switchTradingTab('news')">뉴스/공시</button>
+            <!-- 뉴스/수급은 대시보드 전용으로 일원화 — 거래 페이지는 '정밀 수동주문 + 주문관리'에 집중(중복 탭 제거 + /api/investor 백그라운드 부하 감소) -->
           </div>
           <!-- 탭 본문 -->
           <div style="flex:1;overflow-y:auto">
@@ -784,20 +794,6 @@ td.mono,th.mono{font-family:var(--mono)}
               <table style="width:100%">
                 <thead><tr><th>시간</th><th>체결가</th><th>등락</th><th>수량</th><th>누적</th></tr></thead>
                 <tbody id="tickBody"><tr><td colspan="5" class="empty">종목 조회 시 체결 데이터가 표시됩니다</td></tr></tbody>
-              </table>
-            </div>
-            <!-- 뉴스 -->
-            <div id="tabNews" style="display:none">
-              <div id="newsBody" style="padding:8px">
-                <div class="empty">뉴스 불러오는 중...</div>
-              </div>
-            </div>
-            <!-- 외국인/기관 수급 -->
-            <div id="tabInvestor" style="display:none">
-              <div id="investorSummary" style="padding:10px 10px 0"></div>
-              <table style="width:100%">
-                <thead><tr><th>날짜</th><th>외국인 순매수</th><th>기관 순매수</th><th>개인 순매수</th></tr></thead>
-                <tbody id="investorBody"><tr><td colspan="4" class="empty">수급 정보 로딩 중...</td></tr></tbody>
               </table>
             </div>
             <!-- 차트 -->
@@ -2207,7 +2203,7 @@ async function refreshOB() {
   try {
     const r = await api(`/api/orderbook?code=${obCode}`);
     if (!r?.ok || !r.data) return;
-    renderOB(r.data.output1 || {}, { synthetic: !!r.synthetic, cached: !!r.cached });
+    renderOB(r.data.output1 || {}, { synthetic: !!r.synthetic, cached: !!r.cached, asOf: r.asOf });
   } finally { _obInflight = false; }
 }
 // 호가 렌더러 — REST(output1)와 실시간 스트림(SSE)이 공용 사용
@@ -2257,8 +2253,10 @@ function renderOB(d, opt) {
     </div>`;
   };
   const curPct = fmtPct(curPrice);
-  const obNote = (d.synthetic || opt.synthetic) ? '<span style="font-size:9px;color:var(--text-3);margin-left:6px">합성호가</span>'
-               : opt.cached ? '<span style="font-size:9px;color:var(--text-3);margin-left:6px">마감 호가</span>' : '';
+  // 신선도 라벨 — 합성호가는 실제 시장가 아님 경고색, 마감/직전 호가는 마지막 정상 시각(asOf) 경과시간 표시
+  const _ago = t => { if(!t) return ''; const m=Math.floor((Date.now()-t)/60000); return m<1?'방금':m<60?`${m}분 전`:`${Math.floor(m/60)}시간 전`; };
+  const obNote = (d.synthetic || opt.synthetic) ? '<span style="font-size:9px;color:var(--warn,#e3a008);margin-left:6px">⚠ 합성호가</span>'
+               : opt.cached ? `<span style="font-size:9px;color:var(--text-3);margin-left:6px">⏱ 마감/직전 호가${opt.asOf?' · '+_ago(opt.asOf):''}</span>` : '';
   // 현재가 색·박스는 등락 방향에 따라 (항상 빨강이던 것 → 하락 시 파랑/보합 중립, "수익=빨강/손실=파랑" 문법 일치)
   const curColor = curPct!==null ? pctColor(curPct) : 'var(--text-0)';
   const curDir = (curPct===null || Math.abs(parseFloat(curPct))<0.005) ? 'flat' : parseFloat(curPct)>0 ? 'up' : 'down';
@@ -2802,8 +2800,6 @@ async function loadTradingStock(code) {
   const activeId = document.querySelector('.trading-tab.active')?.id;
   loadOrderbook(code);
   if (!activeId || activeId === 'ttab1') loadTick(code);
-  else if (activeId === 'ttab2') loadNews(code);
-  else if (activeId === 'ttab3') loadInvestor(code);
   else if (activeId === 'ttab4') loadTradingChart(code, true);
 
   // ② 현재가 + 기본정보
@@ -2844,8 +2840,6 @@ async function loadTradingStock(code) {
   setTimeout(() => {
     if (seq !== tradingLoadSeq) return;
     if (activeId !== 'ttab1') loadTick(code);
-    if (activeId !== 'ttab2') loadNews(code);
-    if (activeId !== 'ttab3') loadInvestor(code);
     if (activeId !== 'ttab4') loadTradingChart(code, false);
   }, 700);
 }
@@ -2957,19 +2951,15 @@ function drawMiniCandles() {
 }
 
 // ── 탭 전환 ──
+// 거래 페이지 탭 — 정밀 수동주문 보조용으로 실시간 체결 + 차트만 (뉴스/수급은 대시보드 전용)
 function switchTradingTab(tab) {
-  ['tick','news','investor','chart'].forEach(t => {
+  const tabs = { tick: 'ttab1', chart: 'ttab4' };
+  Object.keys(tabs).forEach(t => {
     const el = $('tab' + t.charAt(0).toUpperCase() + t.slice(1));
     if (el) el.style.display = t === tab ? 'block' : 'none';
-  });
-  ['ttab1','ttab2','ttab3','ttab4'].forEach((id, i) => {
-    const el = $(id); if(!el) return;
-    const tabs = ['tick','news','investor','chart'];
-    el.className = 'trading-tab' + (tabs[i] === tab ? ' active' : '');
+    const btn = $(tabs[t]); if (btn) btn.className = 'trading-tab' + (t === tab ? ' active' : '');
   });
   const code = $('orderCode').value;
-  if (tab === 'news' && proxyOnline) loadNews(code);
-  if (tab === 'investor' && proxyOnline) loadInvestor(code);
   if (tab === 'chart') { tradingChartData.length ? drawMiniCandles() : loadTradingChart(code, true); }
 }
 

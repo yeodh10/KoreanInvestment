@@ -167,6 +167,35 @@ function mkTrader(deps) {
   await t.tick();
   ok('추세필터 ON → 하락추세 매수 0회', orders.filter(o => o.side === 'buy').length === 0);
 
+  // 7-1) 위험종목 필터 — 관리/투자경고/거래정지 종목 매수 차단
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t.deps.getStockFlags = async () => ({ blocked: true, reason: '관리종목' });
+  await t.tick();
+  ok('위험종목(blocked) 매수 0회', orders.filter(o => o.side === 'buy').length === 0);
+
+  // 7-2) 정상 종목(blocked=false)은 매수 진행
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t.deps.getStockFlags = async () => ({ blocked: false });
+  await t.tick();
+  ok('정상종목(blocked=false) 매수 진행', orders.filter(o => o.side === 'buy').length === 1);
+
+  // 7-3) avoidWarnStocks OFF → 필터 미적용(위험종목도 매수)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t.state.settings.safety.avoidWarnStocks = false;
+  t.deps.getStockFlags = async () => ({ blocked: true, reason: '관리종목' });
+  await t.tick();
+  ok('avoidWarnStocks OFF → 위험종목도 매수', orders.filter(o => o.side === 'buy').length === 1);
+
+  // 7-4) getStockFlags 조회 예외 → 차단 안 함(과차단 방지)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t.deps.getStockFlags = async () => { throw new Error('조회 실패'); };
+  await t.tick();
+  ok('getStockFlags 예외 시 매수 진행(과차단 방지)', orders.filter(o => o.side === 'buy').length === 1);
+
   // 8) 일일 손실 서킷브레이커 — 자본 -2% 도달 시 신규매수 정지
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
@@ -343,6 +372,17 @@ function mkTrader(deps) {
   ok('KST 19:00 → 장마감', t.getStatus().marketOpen === false);
   FIXED = new RealDate(RealDate.UTC(2026, 5, 6, 2, 0, 0)).getTime();
   ok('토요일 → 휴장', t.getStatus().marketOpen === false);
+
+  // 2027 휴장일 — 설 대체공휴일(2/8 월) 정오 → 휴장
+  FIXED = new RealDate(RealDate.UTC(2027, 1, 8, 3, 0, 0)).getTime(); // KST 12:00
+  ok('2027 설 대체공휴일 → 휴장', t.getStatus().marketOpen === false);
+  // 단축장(수능 2026-11-19, 10:00~16:30) — 늦장개장 전/중/연장마감 검증
+  FIXED = new RealDate(RealDate.UTC(2026, 10, 19, 0, 30, 0)).getTime(); // KST 09:30
+  ok('수능일 09:30(늦장개장 전) → 휴장', t.getStatus().marketOpen === false);
+  FIXED = new RealDate(RealDate.UTC(2026, 10, 19, 1, 30, 0)).getTime(); // KST 10:30
+  ok('수능일 10:30 → 장중', t.getStatus().marketOpen === true);
+  FIXED = new RealDate(RealDate.UTC(2026, 10, 19, 7, 0, 0)).getTime();  // KST 16:00
+  ok('수능일 16:00(연장 마감 전) → 장중', t.getStatus().marketOpen === true);
 
   quiet(false);
 

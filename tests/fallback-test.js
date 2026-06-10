@@ -40,6 +40,10 @@ function ok(name, cond) { cond ? (pass++, console.log('  ✅', name)) : (fail++,
   console.log('== lastGood 영속 캐시 ==');
   fb.save('test:tick', { output: [{ stck_prpr: '71900' }] });
   ok('저장 후 조회', fb.get('test:tick').output[0].stck_prpr === '71900');
+  // getEntry는 신선도 라벨(asOf)용 타임스탬프 t를 함께 반환
+  const ent = fb.getEntry('test:tick');
+  ok('getEntry → {t,v} (asOf 소스)', ent && typeof ent.t === 'number' && ent.t > 0 && ent.v.output[0].stck_prpr === '71900');
+  ok('없는 키 getEntry → null', fb.getEntry('test:none') === null);
   fb.flush(true);
   const raw = JSON.parse(fs.readFileSync(CACHE, 'utf8'));
   ok('디스크 영속화', raw['test:tick'].v.output[0].stck_prpr === '71900');

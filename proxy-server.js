@@ -589,6 +589,29 @@ async function fetchVolTop(cfg) {
   }, '거래량상위');
 }
 
+// ── 위험 종목 판정 (자동매수 차단용) ──
+// 거래량 상위 자동매수가 관리종목·투자경고/위험·거래정지 종목을 무차별로 사는 것을 막는다.
+// inquire-price(FHKST01010100)의 종목상태/시장경고 코드로 판정. 매수 직전 1회만 호출(BUY 후보에만).
+const _RISK_STAT = { '51':'관리종목', '52':'투자위험', '53':'투자경고', '58':'거래정지', '59':'단기과열' };
+async function fetchStockFlags(cfg, code) {
+  try {
+    const r = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+      FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code
+    }, 'high');
+    const o = r.body?.output || {};
+    const stat = String(o.iscd_stat_cls_code || '').trim();   // 51 관리·52 위험·53 경고·58 정지·59 과열
+    const warn = String(o.mrkt_warn_cls_code || '00').trim();  // 00 없음·01 주의·02 경고·03 위험
+    if (_RISK_STAT[stat]) return { blocked: true, reason: _RISK_STAT[stat] };
+    if (warn === '02') return { blocked: true, reason: '투자경고' };
+    if (warn === '03') return { blocked: true, reason: '투자위험' };
+    if (String(o.sltr_yn || '').trim() === 'Y') return { blocked: true, reason: '정리매매' };
+    return { blocked: false };
+  } catch (e) {
+    // 조회 실패 시 매수를 막지 않는다(과차단 방지). 진짜 거래정지면 KIS가 주문을 거부 — 2차 방어.
+    return { blocked: false };
+  }
+}
+
 // ── 멀티유저: 유저별 자동매매 엔진 ──
 const _traders = {}; // userId → AutoTrader
 function getTrader(userId) {
@@ -610,6 +633,7 @@ function getTrader(userId) {
     placeOrder:      (c, o) => executeOrder(c, { ...o, source: 'bot' }, userId), // 봇 주문 — source=bot 각인
     getAccount:      fetchAccount,     // (cfg)
     getVolTop:       fetchVolTop,      // (cfg)
+    getStockFlags:   fetchStockFlags,  // (cfg, code) → {blocked, reason} — 위험종목 자동매수 차단
     codeToName:      codeToNameLookup,
     sendTelegram:    sendTelegram,
     // 미체결(접수) 주문 목록 — 엔진의 중복매도 방지·매수한도 계산에 사용
@@ -957,8 +981,8 @@ async function refreshOrderbook(cfg, code, priority = 'low') {
     if (!fb.isOrderbookEmpty(result.body?.output1)) {
       fb.save('ob:' + code, result.body); resp = { data: result.body };
     } else {
-      const lastOb = fb.get('ob:' + code);
-      if (lastOb) resp = { data: lastOb, cached: true };
+      const lastObEnt = fb.getEntry('ob:' + code);
+      if (lastObEnt) resp = { data: lastObEnt.v, cached: true, asOf: lastObEnt.t }; // asOf=마지막 정상 호가 시각(신선도 라벨용)
       else {
         let basePrice = global._priceCache?.[code]?.data?.price || global._priceCache?.[code]?.data?.prev || 0;
         if (!basePrice) basePrice = (fb.get('stockinfo:' + code) || {}).price || 0;
@@ -1287,10 +1311,10 @@ async function handleRequest(req, res, session) {
     if (g.regs >= 10) { jsonRes(res, 429, { ok: false, message: '가입 시도 초과 — 내일 다시 시도하세요' }); return; } // 같은 IP 하루 10회 (NAT 공유 사용자 고려)
     if ((body.password || '').length < 8) { jsonRes(res, 400, { ok: false, message: '비밀번호는 8자 이상이어야 합니다' }); return; }
     g.regs++;
-    const r = auth.register(body.username, body.password);
+    const r = await auth.register(body.username, body.password);
     if (r.ok) {
       // 가입 후 자동 로그인
-      const lr = auth.login(body.username, body.password);
+      const lr = await auth.login(body.username, body.password);
       if (lr.ok) {
         res.setHeader('Set-Cookie', `session=${lr.token}; Max-Age=2592000; ${cookieFlags(req)}`);
         jsonRes(res, 200, { ok:true, username: lr.username, role: lr.role });
@@ -1308,7 +1332,7 @@ async function handleRequest(req, res, session) {
       jsonRes(res, 429, { ok: false, message: `로그인 시도 초과 — ${Math.ceil((g.lockUntil - Date.now()) / 60000)}분 후 다시 시도하세요` });
       return;
     }
-    const r = auth.login(body.username, body.password);
+    const r = await auth.login(body.username, body.password);
     if (!r.ok) {
       g.fails++;
       if (g.fails >= 5) { g.lockUntil = Date.now() + 5 * 60 * 1000; g.fails = 0; }
