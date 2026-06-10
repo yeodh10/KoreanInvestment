@@ -400,6 +400,23 @@ function mkTrader(deps) {
   FIXED = new RealDate(RealDate.UTC(2026, 10, 19, 7, 0, 0)).getTime();  // KST 16:00
   ok('수능일 16:00(연장 마감 전) → 장중', t.getStatus().marketOpen === true);
 
+  // 매도/관리 컷오프 = 세션 마감 10분 전 (단축장 자동 반영) — 손절 트리거 포지션으로 검증
+  const stopPos = () => ({ '005930': { qty:10, entry:60000, stop:75000, target:120000, atr:1000, initRisk:1000, hw:70000 } });
+  // 정규장 2026-06-04(목) 15:25 — 마감 15:30, 컷오프 15:20 지남 → 손절 관리 보류
+  orders.length = 0;
+  FIXED = new RealDate(RealDate.UTC(2026, 5, 4, 6, 25, 0)).getTime();
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
+  t.state.botPositions = stopPos();
+  await t.tick();
+  ok('정규장 15:25(컷오프 후) 손절 관리 보류', orders.filter(o => o.side === 'sell').length === 0);
+  // 단축장 2026-11-19(수능) 15:25 — 마감 16:30, 컷오프 16:20 전 → 아직 손절 관리 실행
+  orders.length = 0;
+  FIXED = new RealDate(RealDate.UTC(2026, 10, 19, 6, 25, 0)).getTime();
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
+  t.state.botPositions = stopPos();
+  await t.tick();
+  ok('단축장 15:25(컷오프 전) 손절 관리 실행', orders.filter(o => o.side === 'sell').length === 1);
+
   quiet(false);
 
   // 임시 유저 파일 정리

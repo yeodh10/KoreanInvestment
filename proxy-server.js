@@ -631,7 +631,14 @@ function getTrader(userId) {
     getCurrentPrice: fetchCurrentPrice,// (cfg, code)
     getMinuteBars:   fetchMinuteBars,  // (cfg, code) — 장중 반등 전략용 당일 분봉
     placeOrder:      (c, o) => executeOrder(c, { ...o, source: 'bot' }, userId), // 봇 주문 — source=bot 각인
-    getAccount:      fetchAccount,     // (cfg)
+    getAccount:      async (c) => {    // (cfg) — 잔고 조회 + _acctCache 워밍
+      // ★ 헤드리스(브라우저 미접속) 운영에서도 heldQtyOf가 동작하도록 봇 잔고를 _acctCache에 적재.
+      //   안 하면 봇 지정가 매수의 qtyBefore가 null로 기록돼 reconcile(잔고대조)이 영원히 건너뛰어
+      //   '접수'로 방치 → 미체결 잔량(pendBuyAmt) 과대계상으로 후속 매수가 과소사이징됨.
+      const r = await fetchAccount(c);
+      try { if (r && r.rt_cd === '0') (global._acctCache || (global._acctCache = {}))[userId] = { t: Date.now(), data: { ok: true, data: r } }; } catch (_) {}
+      return r;
+    },
     getVolTop:       fetchVolTop,      // (cfg)
     getStockFlags:   fetchStockFlags,  // (cfg, code) → {blocked, reason} — 위험종목 자동매수 차단
     codeToName:      codeToNameLookup,

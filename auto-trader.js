@@ -368,6 +368,10 @@ function isMarketOpen() {
   const h = marketHours(k.dateKey);              // 단축장(늦장개장) 반영 — 개장 전 헛주문 방지
   return k.min >= h.open && k.min <= h.close;
 }
+// 오늘 세션 기준 시각(분) — 단축장 대응. 정규장에선 open=540(09:00)/close=930(15:30)로 기존과 동일.
+function sessionOpenMin()  { return marketHours(kstParts().dateKey).open; }
+// 매도/포지션 관리 종료 = 마감 10분 전(동시호가 직전). 정규장 15:20, 수능 등 단축장은 16:20 자동.
+function manageCutoffMin() { return marketHours(kstParts().dateKey).close - 10; }
 
 // 휴장일 테이블 신선도 경고 — 등록된 최신 연도가 올해를 못 덮으면 부팅 시 1회 경고
 (function warnHolidayTableStale() {
@@ -682,7 +686,7 @@ class AutoTrader {
       // ── 1) 보유 포지션 관리: ATR 손절 / 트레일링 / R 익절 (항상 실행 — 리스크 축소는 정지와 무관) ──
       for (const code of Object.keys(heldPositions)) {
         const pos = heldPositions[code];
-        if (nowMin() > timeToMin('15:20')) continue;
+        if (nowMin() > manageCutoffMin()) continue; // 마감 10분 전 이후엔 신규 매도/관리 보류(단축장 자동 반영)
         if (this.inCooldown(code)) continue; // 방금 주문한 종목 건너뜀 (중복 매도 방지)
         if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
         const sellable = this._sellableQty(code, pos.qty, s); // ★ 수동 보유 보호: 봇이 산 수량만
@@ -713,13 +717,13 @@ class AutoTrader {
         if (exit) await this.sell(cfg, code, sellable, cur, exit, pos, exitMarket);
       }
 
-      // ── 15:20 미청산 봇 포지션 알림 (1일 1회) — 동시호가/오버나이트 방치 경고 ──
-      if (nowMin() >= timeToMin('15:20') && this.state.today !== this._eodNotifiedDay) {
+      // ── 마감 임박(마감 10분 전) 미청산 봇 포지션 알림 (1일 1회) — 동시호가/오버나이트 방치 경고 ──
+      if (nowMin() >= manageCutoffMin() && this.state.today !== this._eodNotifiedDay) {
         const open = Object.keys(this.state.botPositions || {});
         if (open.length) {
           const names = open.map(c => this.deps.codeToName(c) || c).join(', ');
-          this.log('safety', `⚠️ 15:20 미청산 봇 포지션 ${open.length}종목: ${names} — 동시호가/오버나이트 주의`);
-          if (this.deps.sendTelegram) { try { await this.deps.sendTelegram(cfg, `⚠️ <b>미청산 알림</b>\n15:20 현재 봇 보유 ${open.length}종목: ${names}`); } catch (_) {} }
+          this.log('safety', `⚠️ 마감 임박 미청산 봇 포지션 ${open.length}종목: ${names} — 동시호가/오버나이트 주의`);
+          if (this.deps.sendTelegram) { try { await this.deps.sendTelegram(cfg, `⚠️ <b>미청산 알림</b>\n마감 임박 봇 보유 ${open.length}종목: ${names}`); } catch (_) {} }
         }
         this._eodNotifiedDay = this.state.today;
       }
@@ -764,7 +768,7 @@ class AutoTrader {
           if (this.inCooldown(code)) continue; // 쿨다운 내 반복 매수 방지
           if (capital <= 0) continue;          // 자본 미파악 → 사이징 불가, 매수 보류
           const startMin = s.safety.avoidFirst30min
-            ? Math.max(timeToMin(s.safety.tradeStartTime), 9*60+30)
+            ? Math.max(timeToMin(s.safety.tradeStartTime), sessionOpenMin() + 30) // 개장 30분 회피 — 단축장 개장시간 기준
             : timeToMin(s.safety.tradeStartTime);
           const n = nowMin();
           if (n < startMin || n > timeToMin(s.safety.tradeEndTime)) continue;
@@ -818,7 +822,7 @@ class AutoTrader {
           if (pending[code]?.hasSell) continue; // 미체결 매도 진행 중 — 중복 매도 방지
           const sellable = this._sellableQty(code, held.qty, s); // ★ 수동 보유 보호
           if (sellable < 1) continue;
-          if (nowMin() <= timeToMin('15:20')) {
+          if (nowMin() <= manageCutoffMin()) {
             await this.sell(cfg, code, sellable, held.curPrice, signal.reason, held);
           }
         } else if (!signal && s.safety.intradayRebound && !buyingHalted) {
@@ -828,7 +832,7 @@ class AutoTrader {
           if (this.inCooldown(code)) continue;
           if (capital <= 0) continue;
           const startMin = s.safety.avoidFirst30min
-            ? Math.max(timeToMin(s.safety.tradeStartTime), 9*60+30) : timeToMin(s.safety.tradeStartTime);
+            ? Math.max(timeToMin(s.safety.tradeStartTime), sessionOpenMin() + 30) : timeToMin(s.safety.tradeStartTime);
           const n = nowMin();
           if (n < startMin || n > timeToMin(s.safety.tradeEndTime)) continue;
           if ((this.state.botPositions || {})[code]) continue; // 반등 전략도 이미 보유 종목엔 추가매수 안 함

@@ -2671,7 +2671,8 @@ function validateOrder(code, qty, price, type) {
   if (!/^\d{6}$/.test(String(code || ''))) return { err: '종목코드가 올바르지 않습니다' };
   if (!Number.isInteger(q) || q < 1 || String(qty).includes('.')) return { err: '수량은 1 이상의 정수여야 합니다' };
   if (p < 0) return { err: '가격이 올바르지 않습니다' };
-  if (type === '00' && p < 1) return { err: '지정가 주문은 가격을 입력하세요' };
+  // 지정가('00')·조건부지정가('05')는 가격 필수. 시장가('01')만 가격 없이 허용. ('05'가 빠져 ₩0 주문이 나가던 버그)
+  if ((type === '00' || type === '05') && p < 1) return { err: '지정가 주문은 가격을 입력하세요' };
   return { q, p };
 }
 function confirmOrder(side, code, q, p, type) {

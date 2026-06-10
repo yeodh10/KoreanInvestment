@@ -102,11 +102,14 @@ async function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(a, b);
 }
 // 더미 검증 — 없는 아이디에도 scrypt를 돌려 응답시간을 맞춤 (유저 존재 여부 누설 차단)
-// 더미 해시는 최초 1회 지연 생성(모듈 로드 시 scrypt 블로킹 방지).
+// 더미 해시는 모듈 로드 시 백그라운드로 미리 만든다(블로킹 없음). ★ 이렇게 안 하면 첫 로그인 실패 시
+// dummyVerify가 hashPassword+verifyPassword로 scrypt를 2번 돌려, 존재 유저(1회)와 응답시간이 달라져
+// "아이디 존재 여부"가 타이밍으로 누설됨. 워밍으로 항상 정확히 1회만 돌게 한다.
 let _DUMMY_HASH = null;
+hashPassword('::dummy::').then(h => { _DUMMY_HASH = h; }).catch(() => {});
 async function dummyVerify(password) {
   try {
-    if (!_DUMMY_HASH) _DUMMY_HASH = await hashPassword('::dummy::');
+    if (!_DUMMY_HASH) _DUMMY_HASH = await hashPassword('::dummy::'); // 워밍 전 첫 요청 폴백
     await verifyPassword(password || '', _DUMMY_HASH);
   } catch (_) {}
 }
