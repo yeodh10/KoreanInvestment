@@ -1186,6 +1186,7 @@ td.mono,th.mono{font-family:var(--mono)}
           <div class="form-row">
             <div class="form-group"><div class="form-label">거래당 위험 (자본%)</div><input class="form-input" type="number" step="0.1" id="sRisk" value="0.7"></div>
             <div class="form-group"><div class="form-label">종목당 한도 (자본%)</div><input class="form-input" type="number" id="sPerStk" value="20"></div>
+            <div class="form-group"><div class="form-label">종목당 한도 (원, 절대 상한)</div><input class="form-input" type="number" step="100000" id="sPerStkWon" value="0" title="0=미설정(%만 적용). 자본%와 이 절대금액 중 더 작은 쪽이 적용됩니다"></div>
           </div>
           <div class="form-row">
             <div class="form-group"><div class="form-label">손절 (ATR배수)</div><input class="form-input" type="number" step="0.1" id="sStopAtr" value="1.5"></div>
@@ -4047,7 +4048,7 @@ async function loadAutoStatus() {
   $('pRsiP').value=s.params.rsiPeriod; $('pRsiOs').value=s.params.rsiOversold; $('pRsiOb').value=s.params.rsiOverbought;
   $('pAtr').value=s.params.atrPeriod||14;
   const sf=s.safety;
-  $('sRisk').value=sf.riskPerTradePct; $('sPerStk').value=sf.maxPerStockPct;
+  $('sRisk').value=sf.riskPerTradePct; $('sPerStk').value=sf.maxPerStockPct; $('sPerStkWon').value=sf.maxPerStock||0;
   $('sStopAtr').value=sf.stopAtrMult; $('sTpR').value=sf.takeProfitR;
   $('sDayLossPct').value=sf.dailyLossLimitPct; $('sMaxExpo').value=sf.maxExposurePct;
   $('sMaxPos').value=sf.maxPositions; $('sConsec').value=sf.maxConsecLosses; $('sMaxTrades').value=sf.maxTradesPerDay;
@@ -4103,7 +4104,7 @@ function collectAutoSettings() {
     strategies:{goldenCross:$('togGC').classList.contains('on'), rsi:$('togRSI').classList.contains('on')},
     params:{maShort:+$('pMaS').value||5, maLong:+$('pMaL').value||20, rsiPeriod:+$('pRsiP').value||14, rsiOversold:+$('pRsiOs').value||30, rsiOverbought:+$('pRsiOb').value||70, atrPeriod:+$('pAtr').value||14},
     safety:{
-      riskPerTradePct:+$('sRisk').value||0.7, maxPerStockPct:+$('sPerStk').value||20,
+      riskPerTradePct:+$('sRisk').value||0.7, maxPerStockPct:+$('sPerStk').value||20, maxPerStock:+$('sPerStkWon').value||0,
       stopAtrMult:+$('sStopAtr').value||1.5, takeProfitR:+$('sTpR').value||2,
       dailyLossLimitPct:+$('sDayLossPct').value||-2, maxExposurePct:+$('sMaxExpo').value||60,
       maxPositions:+$('sMaxPos').value||5, maxConsecLosses:+$('sConsec').value||3, maxTradesPerDay:+$('sMaxTrades').value||20,

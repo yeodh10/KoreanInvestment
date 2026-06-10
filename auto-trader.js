@@ -40,6 +40,7 @@ const DEFAULT_SETTINGS = {
     // ── 리스크 기반 사이징 ──
     riskPerTradePct: 0.7,      // 거래당 위험 = 자본의 0.7% (손절까지 거리로 수량 역산)
     maxPerStockPct: 20,        // 종목당 최대 보유 = 자본의 20% (집중 방지)
+    maxPerStock: 0,            // 종목당 최대 보유 = 절대금액(원). 0=미설정(%만 적용). 설정 시 %와 함께 더 작은 쪽 적용
     // ── 변동성 기반 손절/익절 + 트레일링 ──
     stopAtrMult: 1.5,          // 손절 = 진입 − 1.5×ATR
     takeProfitR: 2.0,          // 익절 = +2R (손익비 2:1)
@@ -469,6 +470,7 @@ class AutoTrader {
     const num = (v, d, lo, hi) => { v = Number(v); if (!Number.isFinite(v)) v = d; return Math.min(hi, Math.max(lo, v)); };
     sf.riskPerTradePct   = num(sf.riskPerTradePct, 0.7, 0.05, 5);
     sf.maxPerStockPct    = num(sf.maxPerStockPct, 20, 1, 100);
+    sf.maxPerStock       = num(sf.maxPerStock, 0, 0, 1e10); // 0=미설정. 절대(원) 종목당 한도
     sf.stopAtrMult       = num(sf.stopAtrMult, 1.5, 0.3, 6);
     sf.takeProfitR       = num(sf.takeProfitR, 2.0, 0.5, 10);
     sf.trailAfterR       = num(sf.trailAfterR, 1.0, 0.1, 10);
@@ -795,7 +797,10 @@ class AutoTrader {
           // 종목당 한도(자본%) — 미체결·보유 합산 초과 방지
           const pendBuyAmt = pending[code]?.buyAmt || 0;
           const curHoldAmt = (held ? held.evalAmt : 0) + pendBuyAmt;
-          const perStockCap = capital * (s.safety.maxPerStockPct / 100);
+          // 종목당 한도 = 자본%(maxPerStockPct)와 절대금액(maxPerStock, 원) 중 더 작은 쪽.
+          //   ★ maxPerStock(절대)은 예전엔 무시돼 "500만 설정"이 실제로는 자본% 한도(~10%)까지 풀매수되던 버그 수정.
+          const perStockCap = Math.min(capital * (s.safety.maxPerStockPct / 100),
+                                       s.safety.maxPerStock > 0 ? s.safety.maxPerStock : Infinity);
           qty = Math.min(qty, Math.floor(Math.max(0, perStockCap - curHoldAmt) / price));
           // 총 노출 상한(자본%) — 현금버퍼 유지
           const expRoom = capital * (s.safety.maxExposurePct / 100) - this._botExposure(heldPositions) - pendBuyAmt;
@@ -866,7 +871,8 @@ class AutoTrader {
           if (!Number.isFinite(qty)) continue;
           const pendBuyAmt = pending[code]?.buyAmt || 0;
           const curHoldAmt = (held ? held.evalAmt : 0) + pendBuyAmt;
-          const perStockCap = capital * (s.safety.maxPerStockPct / 100);
+          const perStockCap = Math.min(capital * (s.safety.maxPerStockPct / 100),
+                                       s.safety.maxPerStock > 0 ? s.safety.maxPerStock : Infinity); // 자본%와 절대(원) 중 작은 쪽
           qty = Math.min(qty, Math.floor(Math.max(0, perStockCap - curHoldAmt) / price));
           const expRoom = capital * (s.safety.maxExposurePct / 100) - this._botExposure(heldPositions) - pendBuyAmt;
           qty = Math.min(qty, Math.floor(Math.max(0, expRoom) / price));

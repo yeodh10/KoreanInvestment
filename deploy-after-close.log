@@ -1,0 +1,14 @@
+===== [2026-06-10 15:35:03 KST] 배포 시작 (백로그 6종) =====
+  test engine: 결과: 71 통과 / 0 실패
+  test realtime: 결과: 23 통과 / 0 실패
+  test fallback: 결과: 23 통과 / 0 실패
+  test journal: 결과: 26 통과 / 0 실패
+  test auth: 결과: 18 통과 / 0 실패
+  service: active
+/home/ydh/KoreanInvestment/deploy-after-close.sh: 24: curl: not found
+  /auth/me: 
+/home/ydh/KoreanInvestment/deploy-after-close.sh: 25: curl: not found
+  /api/orderbook(005930) head: 
+  WS 최근로그: 
+===== 배포 종료 =====
+

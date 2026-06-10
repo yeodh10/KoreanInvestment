@@ -154,6 +154,22 @@ function mkTrader(deps) {
     const risk = bp.qty * (bp.entry - bp.stop); return risk <= 70000 * 1.05; // 70000=10M*0.7%
   })());
 
+  // 5-2) 종목당 절대 한도(원) — maxPerStock 설정 시 그 금액 이내로 사이징 (자본%보다 작으면 절대값이 바인딩)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t.state.settings.safety.maxPerStock = 1000000; // 절대 100만 한도 (자본20%=200만보다 작음 → 이게 바인딩)
+  await t.tick();
+  const absBuy = orders.find(o => o.side === 'buy');
+  ok('절대 종목당한도(100만) 이내로 매수', !!absBuy && absBuy.qty * absBuy.price <= 1000000);
+
+  // 5-3) 절대 한도 0(미설정) → 자본%(20%=200만)만 적용, 100만 초과 가능 (절대값이 비활성임을 확인)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t.state.settings.safety.maxPerStock = 0; // 미설정 → 자본 20% 한도(200만)만 적용
+  await t.tick();
+  const pctBuy = orders.find(o => o.side === 'buy');
+  ok('절대한도 0이면 %한도(200만)까지 허용', !!pctBuy && pctBuy.qty * pctBuy.price > 1000000 && pctBuy.qty * pctBuy.price <= 2000000);
+
   // 6) 포지션에 손절/목표 기록 (stop < 진입 < target)
   ok('포지션 손절<진입<목표 기록', (() => {
     const bp = t.state.botPositions['005930'];
