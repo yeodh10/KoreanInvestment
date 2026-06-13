@@ -318,8 +318,11 @@ td.mono,th.mono{font-family:var(--mono)}
      때문에 칸이 화면보다 넓어지고, 그 블로우아웃이 #main/#app까지 전파된다. 전 계층에 min-width:0 적용. */
   #app > *, #main, .page, .page-body, .page-body *{min-width:0}  /* #header 포함 — #app 직속 그리드 항목이 컬럼을 넓히는 것 차단 */
   .page, .page-body, .dash-grid > *, .dash-main, .dash-side, .panel{max-width:100%}
-  #sidebar{position:fixed;left:0;top:var(--header-h);bottom:0;width:200px;z-index:50;transform:translateX(-100%);transition:transform .2s;box-shadow:2px 0 16px rgba(0,0,0,.4)}
+  #sidebar{position:fixed;left:0;top:var(--header-h);bottom:0;width:200px;z-index:50;transform:translateX(-100%);transition:transform .2s;box-shadow:2px 0 16px rgba(0,0,0,.4);-webkit-overflow-scrolling:touch}
   #sidebar.open{transform:translateX(0)}
+  /* 드로어 백드롭 — 열렸을 때 본문을 덮어 바깥 탭으로 닫기(표준 모바일 UX) */
+  #navBackdrop{display:none;position:fixed;inset:var(--header-h) 0 0 0;background:rgba(0,0,0,.45);z-index:49;animation:fadeIn .15s ease}
+  #navBackdrop.show{display:block}
   #menuToggle{display:inline-flex !important}
   #header{padding:0 10px;gap:8px}
   .logo{width:auto !important}  /* 데스크톱은 사이드바 폭 고정이지만 폰에선 내용폭만(헤더 넘침 방지) */
@@ -345,6 +348,7 @@ td.mono,th.mono{font-family:var(--mono)}
   /* 터치 타깃: 네비/탭 충분히 크게 */
   .nav-item{padding:13px 14px}
 }
+#navBackdrop{display:none}  /* 데스크톱·기본: 항상 숨김 (모바일에서 .show일 때만 표시) */
 #menuToggle{display:none;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:none;color:var(--text-1);font-size:20px;cursor:pointer;border-radius:8px}
 #menuToggle:hover{background:var(--bg-2)}
 </style>
@@ -485,6 +489,7 @@ td.mono,th.mono{font-family:var(--mono)}
 </header>
 
 <!-- ══ 사이드바 ══ -->
+<div id="navBackdrop" onclick="closeSidebar()" aria-hidden="true"></div>
 <nav id="sidebar">
   <div class="nav-section">
     <div class="nav-label">메인</div>
@@ -1656,7 +1661,9 @@ document.addEventListener('click', e => {
 // 페이지 라우팅
 // ══════════════════════════════════════════════════════
 let currentPage = 'dashboard';
-function toggleSidebar(){ const s=$('sidebar'); if(s) s.classList.toggle('open'); }
+function openSidebar(){ const s=$('sidebar'); if(s) s.classList.add('open'); const b=$('navBackdrop'); if(b) b.classList.add('show'); }
+function closeSidebar(){ const s=$('sidebar'); if(s) s.classList.remove('open'); const b=$('navBackdrop'); if(b) b.classList.remove('show'); }
+function toggleSidebar(){ const s=$('sidebar'); (s && s.classList.contains('open')) ? closeSidebar() : openSidebar(); }
 // 로고 클릭 — 완전 새로고침 (F5와 동일). 진행 중 주문이 있으면 확인(부분집행 중단 방지).
 function goHome(){
   if ((typeof _orderInflight!=='undefined' && _orderInflight) || (typeof splitOrderRunning!=='undefined' && splitOrderRunning)) {
@@ -1674,7 +1681,7 @@ function applyModeBadge(el, mode){
   el.style.fontWeight = live ? '700' : '';
 }
 function showPage(id) {
-  const sb=$('sidebar'); if(sb) sb.classList.remove('open'); // 모바일: 메뉴 선택 시 사이드바 닫기
+  closeSidebar(); // 모바일: 메뉴 선택 시 사이드바·백드롭 닫기
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   const pg = $('page-'+id);

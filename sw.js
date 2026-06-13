@@ -1,7 +1,7 @@
 // AutoTrade KR — PWA 서비스워커
 // 금융 앱이라 데이터는 항상 최신이어야 한다 → API·SSE·POST는 절대 캐시하지 않고 네트워크 직결.
 // 정적 셸(/, 아이콘, manifest)만 "네트워크 우선, 실패 시 캐시"로 오프라인/순간단절에도 화면이 뜨게 한다.
-const CACHE = 'autotrade-shell-v7';
+const CACHE = 'autotrade-shell-v8';
 const SHELL = ['/', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => {
