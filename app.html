@@ -1805,9 +1805,14 @@ async function loadChart() {
     }
   }
   if (!data || !data.length) {
-    data = genSimData(120, dashPeriod);
-    setText('chartCount', '시뮬레이션');
-  } else {
+    // ★ 금융앱 안전: 실데이터 없으면 '가짜 시뮬레이션 차트'를 절대 그리지 않는다(현재가와 불일치 → 오인 위험).
+    //   빈 차트 + 정직한 안내로 대체. 캔버스 잔상도 제거.
+    dashData = [];
+    setText('chartCount', dashPeriod.startsWith('m') ? '분봉 데이터 없음 (KIS 연결 시 표시)' : '차트 데이터 없음');
+    const cv = $('mainCandle'); if (cv) { const c2 = cv.getContext('2d'); if (c2) c2.clearRect(0, 0, cv.width, cv.height); }
+    return;
+  }
+  {
     const isMin = dashPeriod.startsWith('m');
     setText('chartCount', `${data.length}봉 · ${isMin ? dashMinDays+'일' : dashYears+'년'}`);
   }

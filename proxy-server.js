@@ -1022,6 +1022,27 @@ async function fetchNaverChart(code, period, years) {
   } catch (e) { return null; }
 }
 
+// ── 무키 폴백: 네이버 분봉 → minchart output2 형태({date,time,open,high,low,close,vol}, 오래된→최신) ──
+async function fetchNaverMinChart(code, unit, days) {
+  if (!/^[0-9A-Z]{6}$/.test(code)) return [];
+  const u = [1, 3, 5, 10, 30, 60].includes(unit) ? unit : 5;
+  const perDay = Math.ceil(390 / u);
+  const count = Math.min(800, Math.max(perDay, perDay * (days || 1)));
+  try {
+    const r = await httpsRequest({ hostname: 'api.stock.naver.com',
+      path: `/chart/domestic/item/${code}/minute?minuteUnit=${u}&count=${count}`,
+      method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://m.stock.naver.com/' } });
+    const arr = Array.isArray(r.body) ? r.body : [];
+    return arr.map(d => {
+      const dt = String(d.localDateTime || '');
+      return { date: dt.slice(0, 8), time: dt.slice(8, 14),
+        open: Math.round(+d.openPrice || 0), high: Math.round(+d.highPrice || 0),
+        low: Math.round(+d.lowPrice || 0), close: Math.round(+d.currentPrice || 0),
+        vol: Math.round(+d.accumulatedTradingVolume || 0) };
+    }).filter(c => c.close > 0).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  } catch (e) { return []; }
+}
+
 // ── 무키 폴백: 네이버 종목 기본정보(전일·시가·고저·거래량·시총·52주·PER·EPS) → stockinfo data 형태 ──
 async function fetchNaverStockinfo(code) {
   if (!global._stockinfoCache) global._stockinfoCache = {};
@@ -1855,8 +1876,14 @@ async function handleRequest(req, res, session) {
       const mcKey = `${code}_${unit}_${days}`;
       const mcHit = global._minChartCache[mcKey];
       if (mcHit && Date.now() - mcHit.t < 60000) { jsonRes(res, 200, mcHit.resp); return; }
-      // 무키 유저 — 분봉은 KIS 전용(과거 일봉+당일 분봉 합성). 빈 응답으로 깔끔히(일봉 차트는 네이버 제공).
-      if (!cfg.appKey || !cfg.appSecret) { jsonRes(res, 200, { ok: true, data: { output1: null, output2: [], rt_cd: '0', count: 0, isMinute: true }, needConfig: true }); return; }
+      // 무키 유저 — 네이버 분봉(실데이터)으로 폴백. 키 입력 시 KIS 합성 경로로 자동 전환.
+      if (!cfg.appKey || !cfg.appSecret) {
+        const out2 = await fetchNaverMinChart(code, unit, days);
+        const mcResp = { ok: true, data: { output1: null, output2: out2, rt_cd: '0', count: out2.length, isMinute: true }, src: 'naver' };
+        if (out2.length) global._minChartCache[mcKey] = { t: Date.now(), resp: mcResp };
+        jsonRes(res, 200, mcResp);
+        return;
+      }
 
       let output1 = null;
       const allCandles = []; // 최종 분봉 목록 (과거→현재)
