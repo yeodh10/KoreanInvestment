@@ -946,6 +946,45 @@ async function refreshPrice(cfg, code, priority = 'low') {
   finally { if (priority === 'low') _bgRefreshing.price[code] = false; }
 }
 
+// ── 무키(미설정) 유저용 공용 시세 폴백: 네이버 금융 실시간 JSON (인증 불필요) ──
+// data-fallback의 환율 폴백(open.er-api.com)과 같은 사상 — KIS 키 없이도 '빈 화면 금지'.
+// 결과를 전역 가격캐시에 기록 → SWR_TTL이 자연 레이트리밋. 비공식 엔드포인트라 KIS가 주(主)·이건 보조.
+// ★ 키 있는 트래픽은 절대 네이버로 가지 않는다(호출부에서 무키일 때만 호출). 봇 매매 판정은
+//    여전히 live KIS(getCurrentPrice)를 쓰므로 캐시에 섞인 네이버값이 주문에 영향 주지 않는다.
+async function fetchNaverPrices(codes) {
+  const out = {};
+  const uniq = [...new Set((codes || []).filter(c => /^[0-9A-Z]{6}$/.test(c)))];
+  if (!uniq.length) return out;
+  if (!global._priceCache) global._priceCache = {};
+  const now = Date.now();
+  for (let i = 0; i < uniq.length; i += 20) { // 한 번에 20종목씩 배치
+    const chunk = uniq.slice(i, i + 20);
+    try {
+      const r = await httpsRequest({
+        hostname: 'polling.finance.naver.com',
+        path: '/api/realtime/domestic/stock/' + chunk.join(','),
+        method: 'GET',
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/' }
+      });
+      const datas = (r.body && r.body.datas) || [];
+      for (const d of datas) {
+        const code = d.itemCode;
+        const price = parseInt(d.closePriceRaw) || parseInt(String(d.closePrice || '').replace(/,/g, '')) || 0;
+        if (!code || !price) continue;
+        const chgPct = parseFloat(d.fluctuationsRatioRaw) || 0;
+        const sign = chgPct > 0 ? '2' : chgPct < 0 ? '5' : '3';
+        const prev = chgPct ? Math.round(price / (1 + chgPct / 100)) : price; // 등락률로 전일종가 역산(부호 이슈 회피)
+        const accVol = parseInt(d.accumulatedTradingVolumeRaw) || 0;
+        const data = { price, chgPct, sign, prev, accVol };
+        out[code] = data;
+        global._priceCache[code] = { t: now, data, src: 'naver' };
+      }
+    } catch (e) { /* 폴백 실패 — 조용히 무시(캐시/널로 처리) */ }
+  }
+  if (Object.keys(out).length) persistCachesSoon();
+  return out;
+}
+
 // ── 종목 기본정보 → global._stockinfoCache[code] 갱신 (SWR) ──
 async function refreshStockinfo(cfg, code, priority = 'low') {
   if (priority === 'low') { if (_bgRefreshing.stockinfo[code]) return global._stockinfoCache?.[code]?.resp || null; _bgRefreshing.stockinfo[code] = true; }
@@ -1554,26 +1593,39 @@ async function handleRequest(req, res, session) {
       const codes = (query.codes || '').split(',').filter(Boolean).slice(0, 30);
       if (!global._priceCache) global._priceCache = {};
       const now = Date.now();
+      const hasKey = !!(cfg.appKey && cfg.appSecret);
       const out = {};
       const missing = [];
+      const stale = [];
       for (const code of codes) {
         const cached = global._priceCache[code];
         if (cached) {
           out[code] = cached.data; // 즉시 반환(만료여도)
-          if (now - cached.t >= SWR_TTL.price) refreshPrice(cfg, code, 'low'); // 만료 → 백그라운드 갱신(대기 안 함)
+          if (now - cached.t >= SWR_TTL.price) {
+            if (hasKey) refreshPrice(cfg, code, 'low'); // 키 보유 → KIS 백그라운드 갱신
+            else stale.push(code);                      // 무키 → 네이버로 갱신
+          }
         } else {
           missing.push(code); // 캐시 전무 → 동기 fetch 필요
         }
       }
-      // 캐시 없는 종목: 앞 6개만 병렬 동기(첫 화면용), 나머지는 백그라운드 — 응답이 타임아웃에 걸리지 않게.
-      // 백그라운드 분은 다음 폴링(4~10초)에서 캐시로 채워져 점진 표시된다.
-      const syncFetch = missing.slice(0, 6);
-      const bgFetch = missing.slice(6);
-      await Promise.all(syncFetch.map(async c => {
-        try { out[c] = (await refreshPrice(cfg, c, 'high')) || null; } catch (_) { out[c] = null; }
-      }));
-      bgFetch.forEach(c => { try { refreshPrice(cfg, c, 'low'); } catch (_) {} });
-      jsonRes(res, 200, { ok: true, data: out, pending: bgFetch.length });
+      if (hasKey) {
+        // 캐시 없는 종목: 앞 6개만 병렬 동기(첫 화면용), 나머지는 백그라운드 — 응답이 타임아웃에 걸리지 않게.
+        // 백그라운드 분은 다음 폴링(4~10초)에서 캐시로 채워져 점진 표시된다.
+        const syncFetch = missing.slice(0, 6);
+        const bgFetch = missing.slice(6);
+        await Promise.all(syncFetch.map(async c => {
+          try { out[c] = (await refreshPrice(cfg, c, 'high')) || null; } catch (_) { out[c] = null; }
+        }));
+        bgFetch.forEach(c => { try { refreshPrice(cfg, c, 'low'); } catch (_) {} });
+        jsonRes(res, 200, { ok: true, data: out, pending: bgFetch.length });
+      } else {
+        // 무키(미설정) 유저 — 네이버 공용 시세 폴백. 캐시 없는 종목은 동기로 채워 첫 화면을 채우고,
+        // 만료 종목은 백그라운드로 갱신(다음 폴에서 신선). 키 입력 후엔 KIS 경로로 자동 전환.
+        if (missing.length) { const nv = await fetchNaverPrices(missing); for (const c of missing) out[c] = nv[c] || null; }
+        if (stale.length) { fetchNaverPrices(stale).catch(() => {}); }
+        jsonRes(res, 200, { ok: true, data: out, pending: 0, src: 'naver' });
+      }
       return;
     }
 
