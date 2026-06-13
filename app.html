@@ -331,6 +331,12 @@ td.mono,th.mono{font-family:var(--mono)}
   .hdr-right{gap:6px;margin-left:6px}
   .hdr-search{display:none}  /* 폰에선 헤더 검색 숨김(좁아서 못 씀) — 종목탐색 페이지로 검색 */
   .dash-grid{grid-template-columns:1fr;height:auto}
+  /* 주문/거래: 3열(호가|차트|주문) → 1열 스택. 인라인 스타일이라 !important로 덮음.
+     토스식 순서: 차트(맥락) → 주문폼(메인 액션) → 호가(참조) */
+  .trade-grid{grid-template-columns:1fr !important;height:auto !important}
+  .trade-grid > *:nth-child(1){order:3}  /* 호가창 → 맨 아래 */
+  .trade-grid > *:nth-child(2){order:1}  /* 차트 → 맨 위 */
+  .trade-grid > *:nth-child(3){order:2}  /* 주문폼 → 차트 바로 아래(강조) */
   .page-body{padding:12px}
   #acctSummary{grid-template-columns:repeat(2,1fr) !important}
 }
@@ -347,6 +353,12 @@ td.mono,th.mono{font-family:var(--mono)}
   .panel-head h2,.panel-head h3{font-size:14px}
   /* 터치 타깃: 네비/탭 충분히 크게 */
   .nav-item{padding:13px 14px}
+  /* ── 주문 폼 토스식: 큰 입력(16px=iOS 포커스 줌 방지)·강조 매수/매도·넉넉한 터치 ── */
+  .order-tab{padding:15px;font-size:15px}
+  .form-input{padding:13px 12px;font-size:16px}
+  .form-label{font-size:12px;margin-bottom:5px}
+  .qty-btn{padding:12px 0;font-size:13px}
+  .order-submit{padding:17px !important;font-size:17px !important;border-radius:12px}
 }
 #navBackdrop{display:none}  /* 데스크톱·기본: 항상 숨김 (모바일에서 .show일 때만 표시) */
 #menuToggle{display:none;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:none;color:var(--text-1);font-size:20px;cursor:pointer;border-radius:8px}
@@ -758,7 +770,7 @@ td.mono,th.mono{font-family:var(--mono)}
     </div>
 
     <!-- 메인 그리드: 호가창 | 중앙(체결/뉴스/주문내역) | 주문폼 -->
-    <div style="display:grid;grid-template-columns:260px 1fr 268px;gap:12px;height:calc(100% - 52px)">
+    <div class="trade-grid" style="display:grid;grid-template-columns:260px 1fr 268px;gap:12px;height:calc(100% - 52px)">
 
       <!-- ① 호가창 -->
       <div class="panel" style="display:flex;flex-direction:column;overflow:hidden">
