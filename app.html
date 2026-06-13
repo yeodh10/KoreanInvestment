@@ -320,6 +320,20 @@ td.mono,th.mono{font-family:var(--mono)}
   .page-body{padding:12px}
   #acctSummary{grid-template-columns:repeat(2,1fr) !important}
 }
+/* ── 폰(≤600px) 전용 다듬기 — 빽빽한 그리드 완화 + 넓은 표 가로 스크롤 + 밀도 ── */
+@media (max-width:600px){
+  .page-body{padding:8px}
+  #stockInfo{grid-template-columns:repeat(3,1fr) !important}  /* 종목 메타 6열→3열 */
+  .stock-meta{grid-template-columns:repeat(3,1fr)}            /* 5열→3열 */
+  .pf-stats{grid-template-columns:repeat(2,1fr) !important}   /* 통계 5열→2열 */
+  .mkt-stat-grid{grid-template-columns:repeat(2,1fr) !important}
+  .qty-btns{grid-template-columns:repeat(2,1fr)}
+  .panel{overflow-x:auto}                                     /* 래퍼 없는 넓은 표(포트폴리오 등)도 패널 안에서 가로 스크롤 */
+  table{font-size:11px}
+  .panel-head h2,.panel-head h3{font-size:14px}
+  /* 터치 타깃: 네비/탭 충분히 크게 */
+  .nav-item{padding:13px 14px}
+}
 #menuToggle{display:none;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:none;color:var(--text-1);font-size:20px;cursor:pointer;border-radius:8px}
 #menuToggle:hover{background:var(--bg-2)}
 </style>
