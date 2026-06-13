@@ -62,6 +62,16 @@ function addToMaster(code, name) {
   }
 }
 
+// ── 대시보드 관심종목(유저별, 서버 영속) — 기기 간 동기화. KIS 설정과 분리된 평문 파일(민감정보 아님). ──
+function watchFilePath(uid) { return path.join(__dirname, 'user-configs', 'watch-' + uid + '.json'); }
+function loadUserWatch(uid) {
+  try { const c = JSON.parse(fs.readFileSync(watchFilePath(uid), 'utf8')).codes; return Array.isArray(c) ? c : null; } catch (e) { return null; }
+}
+function saveUserWatch(uid, codes) {
+  try { if (!fs.existsSync(path.join(__dirname, 'user-configs'))) fs.mkdirSync(path.join(__dirname, 'user-configs'), { recursive: true });
+    fs.writeFileSync(watchFilePath(uid), JSON.stringify({ codes })); return true; } catch (e) { return false; }
+}
+
 // ── 설정 로드 (멀티유저) ──
 // _currentUserId가 있으면 그 유저 설정, 없으면 기존 전역 파일(하위호환/admin)
 function loadConfig() {
@@ -1602,6 +1612,21 @@ async function handleRequest(req, res, session) {
     } catch(e) {
       jsonRes(res, 500, { ok: false, message: '토큰 발급 실패: ' + e.message });
     }
+    return;
+  }
+
+  // ── 대시보드 관심종목 (유저별 서버 저장 — 기기 간 동기화). KIS 키 불필요 → 게이트 앞에 둔다. ──
+  if (pathname === '/api/watchlist' && req.method === 'GET') {
+    const codes = session ? loadUserWatch(session.userId) : null;
+    jsonRes(res, 200, { ok: true, codes: codes || [] }); // 빈 배열이면 프론트가 기본목록 사용
+    return;
+  }
+  if (pathname === '/api/watchlist' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const codes = Array.isArray(body.codes) ? [...new Set(body.codes.filter(c => /^[0-9A-Z]{6}$/.test(c)))].slice(0, 60) : null;
+    if (!codes) { jsonRes(res, 400, { ok: false, message: 'codes 배열이 필요합니다' }); return; }
+    if (session) saveUserWatch(session.userId, codes);
+    jsonRes(res, 200, { ok: true, codes });
     return;
   }
 
