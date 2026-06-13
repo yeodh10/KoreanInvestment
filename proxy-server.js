@@ -1613,7 +1613,7 @@ async function handleRequest(req, res, session) {
   const cfg = loadConfig();
   // 무키(미설정) 유저도 '공용 시세'(전역 캐시)는 볼 수 있게 — 빈 화면 금지. 키 없을 땐 KIS 호출이
   // 단락(NO_KIS_KEY)되어 캐시/폴백만 응답한다. 계좌·주문 등 민감/실호출 엔드포인트는 그대로 차단.
-  const PUBLIC_READ = new Set(['/api/prices','/api/chart','/api/stockinfo','/api/orderbook','/api/tick','/api/volume100','/api/market']);
+  const PUBLIC_READ = new Set(['/api/prices','/api/chart','/api/minchart','/api/stockinfo','/api/orderbook','/api/tick','/api/volume100','/api/market','/api/search']);
   if (!cfg.appKey || !cfg.appSecret) {
     if (!PUBLIC_READ.has(pathname)) {
       // 에러가 아니라 "설정 필요" 상태 — 200으로 응답해 키 입력 전 대시보드 콘솔이 503으로 도배되지 않게.
@@ -1840,6 +1840,8 @@ async function handleRequest(req, res, session) {
       const mcKey = `${code}_${unit}_${days}`;
       const mcHit = global._minChartCache[mcKey];
       if (mcHit && Date.now() - mcHit.t < 60000) { jsonRes(res, 200, mcHit.resp); return; }
+      // 무키 유저 — 분봉은 KIS 전용(과거 일봉+당일 분봉 합성). 빈 응답으로 깔끔히(일봉 차트는 네이버 제공).
+      if (!cfg.appKey || !cfg.appSecret) { jsonRes(res, 200, { ok: true, data: { output1: null, output2: [], rt_cd: '0', count: 0, isMinute: true }, needConfig: true }); return; }
 
       let output1 = null;
       const allCandles = []; // 최종 분봉 목록 (과거→현재)
