@@ -1189,6 +1189,21 @@ async function refreshMarket(cfg, priority = 'low') {
         if (r.body?.output) results[idx.name] = r.body.output;
       } catch (e) {}
     }
+    // 무키/KIS실패 시 네이버 지수 폴백(인증 불필요) — KIS 지수 형식(bstp_nmix_*)으로 정규화. 키 있으면 위에서 채워져 skip.
+    for (const sym of ['KOSPI', 'KOSDAQ']) {
+      if (results[sym]) continue;
+      try {
+        const nr = await httpsRequest({ hostname: 'polling.finance.naver.com', path: '/api/realtime/domestic/index/' + sym,
+          method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/' } });
+        const d = ((nr.body && nr.body.datas) || [])[0];
+        if (!d) continue;
+        const prpr = parseFloat(d.closePriceRaw) || parseFloat(String(d.closePrice || '').replace(/,/g, '')) || 0;
+        const ctrt = (d.fluctuationsRatioRaw != null) ? parseFloat(d.fluctuationsRatioRaw) : (parseFloat(d.fluctuationsRatio) || 0);
+        const vrss = parseFloat(d.compareToPreviousClosePriceRaw) || parseFloat(String(d.compareToPreviousClosePrice || '').replace(/,/g, '')) || 0;
+        if (prpr) results[sym] = { bstp_nmix_prpr: String(prpr), bstp_nmix_prdy_ctrt: String(ctrt),
+          bstp_nmix_prdy_vrss: String(Math.abs(vrss)), prdy_vrss_sign: ctrt > 0 ? '2' : ctrt < 0 ? '5' : '3', _src: 'naver' };
+      } catch (e) {}
+    }
     try {
       const fx = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
         FID_COND_MRKT_DIV_CODE: 'X', FID_INPUT_ISCD: 'FX@KRW'
