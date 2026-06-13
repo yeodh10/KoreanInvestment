@@ -9,6 +9,7 @@ const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
+const zlib  = require('zlib'); // 응답 gzip 압축 — Tailscale Funnel 등 느린 링크에서 큰 페이로드(차트·앱셸) 전송 가속
 const { execFile } = require('child_process'); // AI 세팅 어시스턴트(claude CLI 헤드리스 호출)용
 const auth  = require('./auth');
 
@@ -839,8 +840,18 @@ function authGuardOf(req) {
 
 // ── JSON 응답 ──
 function jsonRes(res, status, data) {
+  const json = JSON.stringify(data);
+  // 1KB 초과 + 클라 gzip 수용 시 압축(차트·계좌 등 큰 응답을 느린 링크에서 가속). 소형 응답은 그대로(압축 오버헤드 회피).
+  if (res._gz && json.length > 1024) {
+    try {
+      const gz = zlib.gzipSync(json);
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      res.end(gz);
+      return;
+    } catch (_) { /* 압축 실패 시 평문 폴백 */ }
+  }
   res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
+  res.end(json);
 }
 
 // ── 요청 바디 파싱 ──
@@ -880,7 +891,17 @@ function serveStatic(res, filepath) {
   const mime = mimeTypes[ext] || 'text/plain';
   try {
     const content = fs.readFileSync(filepath);
-    // no-cache: UI 업데이트가 새로고침만으로 즉시 반영되게 (캐시된 옛 화면 방지)
+    // 텍스트 자원(html/js/css/json/manifest)은 gzip — app.html 277KB→~60KB. png는 이미 압축이라 제외.
+    const compressible = /html|javascript|css|json|manifest/.test(mime);
+    if (res._gz && compressible && content.length > 1024) {
+      try {
+        const gz = zlib.gzipSync(content);
+        // no-cache: UI 업데이트가 새로고침만으로 즉시 반영되게 (캐시된 옛 화면 방지)
+        res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+        res.end(gz);
+        return;
+      } catch (_) { /* 압축 실패 시 평문 폴백 */ }
+    }
     res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
     res.end(content);
   } catch(e) {
@@ -1433,6 +1454,7 @@ const server = http.createServer((req, res) => {
 });
 async function handleRequest(req, res, session) {
   setCors(res, req);
+  res._gz = /\bgzip\b/.test(req.headers['accept-encoding'] || ''); // 클라가 gzip 수용하면 큰 응답 압축
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const parsed  = new URL(req.url, 'http://localhost');
