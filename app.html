@@ -150,8 +150,8 @@ button:active{transform:scale(.96)}            /* 토스 특유의 눌림감 */
 .panel-btn:hover{background:var(--bg-hover);color:var(--text-1)}
 
 /* ── 차트 영역 ── */
-.chart-wrap{position:relative;width:100%}
-.chart-canvas{cursor:crosshair;display:block}
+.chart-wrap{position:relative;width:100%;overflow:hidden}
+.chart-canvas{cursor:crosshair;display:block;max-width:100%}  /* renderChart가 인라인 px 폭을 박아도 컨테이너를 못 넘게(모바일 블로우아웃 차단) */
 .chart-tooltip{position:absolute;display:none;pointer-events:none;background:var(--bg-2);border:1px solid var(--border-2);border-radius:var(--radius-sm);padding:8px 10px;font-size:11px;font-family:var(--mono);z-index:20;min-width:150px;box-shadow:0 4px 16px rgba(0,0,0,.5)}
 .chart-toolbar{display:flex;align-items:center;gap:6px;padding:8px 14px;flex-wrap:wrap;border-bottom:1px solid var(--border)}
 .btn-grp{display:flex;gap:1px;background:var(--bg-2);border-radius:5px;padding:2px}
@@ -312,16 +312,21 @@ td.mono,th.mono{font-family:var(--mono)}
 /* ── 모바일/좁은 창 대응 — 3컬럼이 짓눌려 차트·호가·주문이 사용 불능이던 문제 ── */
 @media (max-width:900px){
   html,body{overflow-x:hidden;overflow-y:auto}  /* 가로 넘침 차단(세로만 스크롤) */
-  #app{grid-template-columns:1fr}
-  #main{overflow-x:hidden}
-  /* ★ 가로 넘침 핵심: 그리드/플렉스 자식은 기본 min-width:auto라 안 줄어든다 → 내용폭(넓은 표·nowrap 숫자)
-     때문에 칸이 화면보다 넓어짐. min-width:0으로 줄어들게 하고, 넘치는 내용은 패널 안에서 스크롤. */
-  .dash-grid > *, .dash-main, .dash-side, .panel, .page-body > *{min-width:0;max-width:100%}
+  #app{grid-template-columns:1fr;min-width:0;max-width:100vw}
+  #main{overflow-x:hidden;min-width:0}
+  /* ★ 가로 넘침 핵심: 그리드/플렉스 항목은 기본 min-width:auto라 안 줄어든다 → 내용폭(넓은 표·nowrap 숫자)
+     때문에 칸이 화면보다 넓어지고, 그 블로우아웃이 #main/#app까지 전파된다. 전 계층에 min-width:0 적용. */
+  #app > *, #main, .page, .page-body, .page-body *{min-width:0}  /* #header 포함 — #app 직속 그리드 항목이 컬럼을 넓히는 것 차단 */
+  .page, .page-body, .dash-grid > *, .dash-main, .dash-side, .panel{max-width:100%}
   #sidebar{position:fixed;left:0;top:var(--header-h);bottom:0;width:200px;z-index:50;transform:translateX(-100%);transition:transform .2s;box-shadow:2px 0 16px rgba(0,0,0,.4)}
   #sidebar.open{transform:translateX(0)}
   #menuToggle{display:inline-flex !important}
   #header{padding:0 10px;gap:8px}
+  .logo{width:auto !important}  /* 데스크톱은 사이드바 폭 고정이지만 폰에선 내용폭만(헤더 넘침 방지) */
   .mkt-pills{display:none}  /* 헤더 혼잡 제거 — 지수는 대시보드/시장현황에 있음 */
+  .hdr-right .conn-status{display:none}  /* 연결상태는 사이드바에도 있음 — 헤더 우측 공간 확보 */
+  .hdr-right{gap:6px;margin-left:6px}
+  .hdr-search{display:none}  /* 폰에선 헤더 검색 숨김(좁아서 못 씀) — 종목탐색 페이지로 검색 */
   .dash-grid{grid-template-columns:1fr;height:auto}
   .page-body{padding:12px}
   #acctSummary{grid-template-columns:repeat(2,1fr) !important}
