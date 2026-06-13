@@ -985,6 +985,75 @@ async function fetchNaverPrices(codes) {
   return out;
 }
 
+// ── 무키 폴백: 네이버 일/주/월봉 → KIS output2 형태로 정규화 ──
+async function fetchNaverChart(code, period, years) {
+  if (!/^[0-9A-Z]{6}$/.test(code)) return null;
+  const tf = period === 'W' ? 'week' : (period === 'M' || period === 'Y') ? 'month' : 'day';
+  const end = new Date();
+  const start = new Date(end.getTime() - (years || 1) * 365 * 86400000);
+  const fmt = d => d.toISOString().slice(0, 10).replace(/-/g, '');
+  try {
+    const r = await httpsRequest({
+      hostname: 'api.finance.naver.com',
+      path: `/siseJson.naver?symbol=${code}&requestType=1&startTime=${fmt(start)}&endTime=${fmt(end)}&timeframe=${tf}`,
+      method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/' }
+    });
+    const rows = JSON.parse(String(r.body).replace(/'/g, '"').replace(/[\r\n\t]/g, '').trim());
+    if (!Array.isArray(rows) || rows.length < 2) return null;
+    // [날짜,시가,고가,저가,종가,거래량,외국인]. 첫 행=헤더. 네이버=오래된순 → KIS형(최신순)으로 reverse.
+    let out2 = rows.slice(1).filter(c => Array.isArray(c) && c[0]).map(c => ({
+      stck_bsop_date: String(c[0]), stck_oprc: String(Math.round(+c[1] || 0)), stck_hgpr: String(Math.round(+c[2] || 0)),
+      stck_lwpr: String(Math.round(+c[3] || 0)), stck_clpr: String(Math.round(+c[4] || 0)), acml_vol: String(Math.round(+c[5] || 0))
+    })).reverse();
+    // 연봉: 월봉을 연 단위로 집계 (KIS 경로와 동일 규칙)
+    if (period === 'Y') {
+      const byYear = {};
+      out2.slice().reverse().forEach(r2 => {
+        const y = r2.stck_bsop_date.slice(0, 4);
+        if (!byYear[y]) byYear[y] = { o: r2.stck_oprc, h: +r2.stck_hgpr, l: +r2.stck_lwpr, c: r2.stck_clpr, v: 0 };
+        const b = byYear[y]; b.h = Math.max(b.h, +r2.stck_hgpr); b.l = Math.min(b.l, +r2.stck_lwpr); b.c = r2.stck_clpr; b.v += +r2.acml_vol;
+      });
+      out2 = Object.keys(byYear).sort().reverse().map(y => ({
+        stck_bsop_date: y + '1231', stck_oprc: byYear[y].o, stck_hgpr: String(byYear[y].h),
+        stck_lwpr: String(byYear[y].l), stck_clpr: byYear[y].c, acml_vol: String(byYear[y].v)
+      }));
+    }
+    return out2;
+  } catch (e) { return null; }
+}
+
+// ── 무키 폴백: 네이버 종목 기본정보(전일·시가·고저·거래량·시총·52주·PER·EPS) → stockinfo data 형태 ──
+async function fetchNaverStockinfo(code) {
+  if (!global._stockinfoCache) global._stockinfoCache = {};
+  const nv = await fetchNaverPrices([code]); // 가격/등락/거래량 + 가격캐시 워밍
+  const px = nv[code] || global._priceCache?.[code]?.data || {};
+  let name = codeToNameLookup(code) || code;
+  let open = 0, high = 0, low = 0, marketCap = 0, per = 0, pbr = 0, eps = 0, hi52 = 0, lo52 = 0;
+  try {
+    const r = await httpsRequest({ hostname: 'm.stock.naver.com', path: `/api/stock/${code}/integration`, method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/' } });
+    const j = r.body || {};
+    name = j.stockName || name;
+    const m = {}; for (const t of (j.totalInfos || [])) m[t.key] = String(t.value || '');
+    const intn = s => parseInt((s || '').replace(/[^0-9]/g, '')) || 0;
+    const num = s => parseFloat((s || '').replace(/[^0-9.\-]/g, '')) || 0;
+    open = intn(m['시가']); high = intn(m['고가']); low = intn(m['저가']);
+    per = num(m['PER']); eps = intn(m['EPS']); pbr = num(m['PBR']);
+    hi52 = intn(m['52주 최고']); lo52 = intn(m['52주 최저']);
+    // 시총 "1,885조 4,249억" → 억원 단위(KIS hts_avls와 동일)
+    const cap = m['시총'] || ''; let won = 0;
+    const jo = cap.match(/([\d,]+)\s*조/); if (jo) won += parseInt(jo[1].replace(/,/g, '')) * 1e12;
+    const eok = cap.match(/([\d,]+)\s*억/); if (eok) won += parseInt(eok[1].replace(/,/g, '')) * 1e8;
+    marketCap = Math.round(won / 1e8);
+  } catch (e) {}
+  const price = px.price || 0;
+  const data = { code, name, price, change: price - (px.prev || price), changePct: px.chgPct || 0, sign: px.sign || '3',
+    open, high, low, vol: px.accVol || 0, amount: 0, marketCap, per, pbr, eps, hi52, lo52, rt_cd: '0', src: 'naver' };
+  const resp = { data };
+  if (price > 0) { fb.save('stockinfo:' + code, data); global._stockinfoCache[code] = { t: Date.now(), resp }; }
+  return resp;
+}
+
 // ── 종목 기본정보 → global._stockinfoCache[code] 갱신 (SWR) ──
 async function refreshStockinfo(cfg, code, priority = 'low') {
   if (priority === 'low') { if (_bgRefreshing.stockinfo[code]) return global._stockinfoCache?.[code]?.resp || null; _bgRefreshing.stockinfo[code] = true; }
@@ -1660,8 +1729,17 @@ async function handleRequest(req, res, session) {
         jsonRes(res, 200, global._chartCache[cacheKey]);
         return;
       }
-      // 무키 유저 + 캐시 미스 — KIS 호출 불가. 빈 캔들로 깔끔히 응답(차트만 비고 화면은 유지).
-      if (!cfg.appKey || !cfg.appSecret) { jsonRes(res, 200, { ok: true, candles: [], needConfig: true }); return; }
+      // 무키 유저 + 캐시 미스 — KIS 불가. 네이버 일/주/월/년봉으로 폴백(실데이터).
+      if (!cfg.appKey || !cfg.appSecret) {
+        const out2 = await fetchNaverChart(code, period, years);
+        const response = { ok: true, data: { output1: null, output2: out2 || [], rt_cd: '0', count: (out2 || []).length }, src: 'naver' };
+        if (out2 && out2.length) {
+          global._chartCache[cacheKey] = response; persistCachesSoon();
+          const mid = setTimeout(() => { delete global._chartCache[cacheKey]; }, msToKstMidnight()); if (mid.unref) mid.unref();
+        }
+        jsonRes(res, 200, response);
+        return;
+      }
 
       // ── KIS는 날짜 범위를 넓게 줘도 한 번에 최대 ~600건 반환 ──
       // 일봉: 600건 ≈ 약 2.4년치 (영업일 기준)
@@ -1935,13 +2013,14 @@ async function handleRequest(req, res, session) {
     if (pathname === '/api/stockinfo') {
       const code = query.code || '005930';
       if (!global._stockinfoCache) global._stockinfoCache = {};
+      const siHasKey = !!(cfg.appKey && cfg.appSecret);
       const c = global._stockinfoCache[code];
       if (c) { // 캐시 있으면 0ms 응답, 만료면 백그라운드만 갱신
         jsonRes(res, 200, { ok: true, ...c.resp });
-        if (Date.now() - c.t >= SWR_TTL.stockinfo) refreshStockinfo(cfg, code, 'low');
+        if (Date.now() - c.t >= SWR_TTL.stockinfo) { if (siHasKey) refreshStockinfo(cfg, code, 'low'); else fetchNaverStockinfo(code).catch(() => {}); }
         return;
       }
-      const resp = await refreshStockinfo(cfg, code, 'high'); // 캐시 없을 때만 동기
+      const resp = siHasKey ? await refreshStockinfo(cfg, code, 'high') : await fetchNaverStockinfo(code); // 무키 → 네이버
       if (resp) jsonRes(res, 200, { ok: true, ...resp });
       else jsonRes(res, 500, { ok: false, message: '조회 실패' });
       return;
@@ -1964,6 +2043,18 @@ async function handleRequest(req, res, session) {
     if (pathname === '/api/orderbook') {
       const obc = query.code || '005930';
       if (!global._obCache) global._obCache = {};
+      // 무키 유저 — 실시간 10호가 depth는 KIS 전용. 현재가 기준 합성호가("합성" 라벨)로 채운다.
+      if (!cfg.appKey || !cfg.appSecret) {
+        const cc = global._obCache[obc];
+        if (cc && Date.now() - cc.t < SWR_TTL.ob) { jsonRes(res, 200, { ok: true, ...cc.resp }); return; }
+        let basePrice = global._priceCache?.[obc]?.data?.price || 0;
+        if (!basePrice) { const nv = await fetchNaverPrices([obc]); basePrice = nv[obc]?.price || 0; }
+        const ladder = basePrice ? fb.buildLadder(basePrice) : null;
+        const resp = ladder ? { data: { output1: ladder, rt_cd: '0' }, synthetic: true } : (cc ? cc.resp : { data: { rt_cd: '1' } });
+        if (ladder) global._obCache[obc] = { t: Date.now(), resp };
+        jsonRes(res, 200, { ok: true, ...resp });
+        return;
+      }
       const c = global._obCache[obc];
       if (c) {
         jsonRes(res, 200, { ok: true, ...c.resp });
