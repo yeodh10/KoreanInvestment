@@ -3891,10 +3891,10 @@ async function loadVol100() {
 // ══════════════════════════════════════════════════════
 const DEFAULT_WATCH = ['005930','000660','373220','207940','005380','000270','068270','005490','035420','035720',
   '051910','006400','105560','055550','086790','316140','032830','015760','034730','003550',
-  '017670','030200','012330','009150','066570','096770','028260','010130','011200','024110']; // 우량주 30
-let watchCodes = LS.getObj('watchCodes') || DEFAULT_WATCH;
-if (watchCodes.length <= 10) watchCodes = DEFAULT_WATCH; // 구버전 기본값(10개 이하) → 30개로 확장
-function saveWatchlist() { LS.setObj('watchCodes', watchCodes); }
+  '017670','030200','012330','009150','066570','096770','028260','010130','011200','024110','010950']; // 우량주 31(S-Oil 포함)
+// watchCodes는 init에서 유저별 키(uk)로 로드한다(아래 DOMContentLoaded). 전역 키를 쓰면 타 유저 관심종목이 샌다.
+let watchCodes = DEFAULT_WATCH;
+function saveWatchlist() { LS.setObj(uk('watchCodes'), watchCodes); }
 function onWlSearch() {
   const q=$('wlAddInput').value.trim(), dd=$('wlSearchDd');
   if(!q){dd.style.display='none';return;}
@@ -4548,7 +4548,7 @@ async function submitAuth() {
 }
 async function doLogout() {
   // 공유 브라우저 위생: 떠나는 유저의 계좌 스냅샷·설정 캐시를 지운다(타 유저 화면 오염 방지)
-  try { localStorage.removeItem(uk('acctSnap')); localStorage.removeItem(uk('kisConfig')); localStorage.removeItem('acctSnap'); localStorage.removeItem('kisConfig'); } catch(_) {}
+  try { localStorage.removeItem(uk('acctSnap')); localStorage.removeItem(uk('kisConfig')); localStorage.removeItem('acctSnap'); localStorage.removeItem('kisConfig'); localStorage.removeItem('watchCodes'); } catch(_) {}
   await apiPost('/api/auth/logout', {});
   location.reload();
 }
@@ -4574,8 +4574,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('app').style.display = 'grid';
   setText('hdrUsername', me.username + (me.role === 'admin' ? ' 👑' : ''));
   CURRENT_USER = me.username; // 이후 유저별 캐시 키(uk)의 스코프
-  // 레거시 전역 키 1회 청소 — 과거 버전이 남긴 유저 무구분 스냅샷이 타 유저 화면에 뜨는 것 차단
-  try { localStorage.removeItem('acctSnap'); localStorage.removeItem('kisConfig'); } catch(_) {}
+  // 이 유저의 관심종목 로드(유저별). 없으면 기본목록. (전역 키 'watchCodes'는 타 유저 것이라 안 씀)
+  watchCodes = LS.getObj(uk('watchCodes')) || DEFAULT_WATCH;
+  if (watchCodes.length <= 10) watchCodes = DEFAULT_WATCH; // 구버전 소형 목록 → 기본으로
+  // 레거시 전역 키 1회 청소 — 과거 버전이 남긴 유저 무구분 데이터가 타 유저 화면에 뜨는 것 차단
+  try { localStorage.removeItem('acctSnap'); localStorage.removeItem('kisConfig'); localStorage.removeItem('watchCodes'); } catch(_) {}
 
   // 캐시 우선 첫 페인트 — 서버 응답 전에 '이 유저의' 마지막 계좌 스냅샷으로 즉시 그린다 (이후 실데이터로 덮어씀)
   try { const snap = LS.getObj(uk('acctSnap')); if (snap) applyAccount(snap); } catch(_) {}
