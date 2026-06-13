@@ -1808,7 +1808,8 @@ async function handleRequest(req, res, session) {
       // ── 서버 캐시 (당일 유효) ──
       if (!global._chartCache) global._chartCache = {};
       const cacheKey = `${code}_${period}_${years}_${today.toISOString().slice(0,10)}`;
-      if (global._chartCache[cacheKey]) {
+      // 캐시는 '비어있지 않을 때만' 서빙 — 과거 빈 차트가 캐시에 남아 전 유저 빈화면이 되던 오염 방지.
+      if (global._chartCache[cacheKey] && global._chartCache[cacheKey].data?.output2?.length) {
         jsonRes(res, 200, global._chartCache[cacheKey]);
         return;
       }
@@ -1897,13 +1898,23 @@ async function handleRequest(req, res, session) {
         }));
       }
 
-      const response = { ok: true, data: { output1, output2: allRows, rt_cd:'0', count: allRows.length } };
-      // 캐시 저장 (장 마감 후 자정에 삭제) + 디스크 보존 — 재시작에도 차트 즉시
-      global._chartCache[cacheKey] = response;
-      persistCachesSoon();
-      const mid = setTimeout(() => { delete global._chartCache[cacheKey]; }, msToKstMidnight()); // KST 자정 — UTC 서버 호환
-      if (mid.unref) mid.unref();
-
+      let response;
+      if (allRows.length) {
+        response = { ok: true, data: { output1, output2: allRows, rt_cd:'0', count: allRows.length } };
+        // 캐시 저장 (장 마감 후 자정에 삭제) + 디스크 보존 — 재시작에도 차트 즉시. ★ 빈 차트는 캐시 금지(오염 방지)
+        global._chartCache[cacheKey] = response;
+        persistCachesSoon();
+        const mid = setTimeout(() => { delete global._chartCache[cacheKey]; }, msToKstMidnight()); // KST 자정 — UTC 서버 호환
+        if (mid.unref) mid.unref();
+      } else {
+        // KIS가 빈 응답(VTS 미지원 종목/기간 등) — 네이버로 폴백해 키 보유 유저도 차트가 뜨게 한다.
+        const out2 = await fetchNaverChart(code, period, years);
+        response = { ok: true, data: { output1: null, output2: out2 || [], rt_cd:'0', count: (out2||[]).length }, src: 'naver' };
+        if (out2 && out2.length) {
+          global._chartCache[cacheKey] = response; persistCachesSoon();
+          const mid = setTimeout(() => { delete global._chartCache[cacheKey]; }, msToKstMidnight()); if (mid.unref) mid.unref();
+        }
+      }
       jsonRes(res, 200, response);
       return;
     }
