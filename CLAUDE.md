@@ -112,6 +112,15 @@ node tests/engine-test.js && node tests/realtime-test.js && node tests/fallback-
     민감파일 scp 이관(.enckey·auth.db·order-journal.db·user-configs/·data-cache.json), Tailscale 노드명 `kis`
     이관으로 고정주소 유지. 옛 VM은 `kis-oldvm`·서비스 disable(이중봇 방지). 테스트 161→**165**(engine 71→75)
     전부 통과, KIS WS 연결·봇 3종 로드 검증. DEPLOY.md 운영 호스트 절 참고.
+15. **다중유저 서비스화 + 모바일 (06-13)**: 출시 대비 키 없는(테스트/신규) 유저 경험·모바일 완성.
+    ⓐ **무키 유저 공용 시세** — 게이트 PUBLIC_READ 예외 + **네이버 금융 폴백**(현재가/차트/종목정보/지수,
+      호가는 합성). `proxyOnline`을 'KIS연결'→'서버도달'로 분리(이게 핵심 — 무키면 전 데이터 로딩 차단됐던 버그).
+    ⓑ **차트 안전** — 가짜 시뮬레이션 차트(genSimData) 제거(실데이터 없으면 빈 차트), 빈 차트 캐시 오염 차단.
+    ⓒ **localStorage 유저별 격리** — acctSnap·kisConfig·watchCodes를 `uk()`로 분리(타 유저 데이터 노출 버그).
+    ⓓ **관심종목 서버 저장**(`/api/watchlist`, user-configs/watch-<uid>.json) — 기기 간 동기화.
+    ⓔ **모바일 PWA**(네이티브X) — 가로 넘침(그리드 min-width:0 블로우아웃) 수정, 사이드바 드로어 백드롭,
+      주문/거래 토스식(매수창 스택·큰 터치). gzip 응답 압축(앱셸 271→74KB). **헤드리스 크로미움(/tmp/pptr)으로
+      폰 390px 렌더링 측정**해 검증. 관련 메모: ~/.claude/.../memory/(aws-ec2-deploy·naver-keyless-fallback·mobile-pwa-and-watchlist).
 
 ## 5. 백로그 (우선순위순)
 
