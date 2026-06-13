@@ -261,6 +261,7 @@ async function pumpKis(key) {
 async function kisProxy(cfg, kispath, trId, queryParams, priority = 'high') {
   // 기본 high: 사용자 라우트·엔진 경로가 priority 누락으로 low 캡(10)에 걸려
   // 무작위 실패하던 문제 수정. 백그라운드(prefetch/SWR)는 호출부가 'low' 명시.
+  if (!cfg.appKey || !cfg.appSecret) throw new Error('NO_KIS_KEY'); // 무키 유저 — 큐 진입 전 단락. refresh*가 캐시/폴백으로 받음
   const host = cfg.txMode === 'vts' ? KIS_HOST_VTS : KIS_HOST_REAL;
   const [hostname, port] = host.split(':');
   const qs = new URLSearchParams(queryParams).toString();
@@ -321,6 +322,7 @@ async function getKisTokenReal(cfg) {
 }
 
 async function kisProxyReal(cfg, kispath, trId, queryParams, priority) {
+  if (!cfg.appKey || !cfg.appSecret) throw new Error('NO_KIS_KEY'); // 무키 유저 — 단락(호출부가 캐시/폴백 처리)
   const [hostname, port] = KIS_HOST_REAL.split(':');
   const qs = new URLSearchParams(queryParams).toString();
   const fullPath = kispath + (qs ? '?' + qs : '');
@@ -1501,10 +1503,16 @@ async function handleRequest(req, res, session) {
 
   // ── KIS API 프록시 ──
   const cfg = loadConfig();
+  // 무키(미설정) 유저도 '공용 시세'(전역 캐시)는 볼 수 있게 — 빈 화면 금지. 키 없을 땐 KIS 호출이
+  // 단락(NO_KIS_KEY)되어 캐시/폴백만 응답한다. 계좌·주문 등 민감/실호출 엔드포인트는 그대로 차단.
+  const PUBLIC_READ = new Set(['/api/prices','/api/chart','/api/stockinfo','/api/orderbook','/api/tick','/api/volume100','/api/market']);
   if (!cfg.appKey || !cfg.appSecret) {
-    // 에러가 아니라 "설정 필요" 상태 — 200으로 응답해 키 입력 전 대시보드 콘솔이 503으로 도배되지 않게.
-    jsonRes(res, 200, { ok: false, needConfig: true, message: 'KIS API 미설정. 설정에서 키를 입력하세요.', simulation: true });
-    return;
+    if (!PUBLIC_READ.has(pathname)) {
+      // 에러가 아니라 "설정 필요" 상태 — 200으로 응답해 키 입력 전 대시보드 콘솔이 503으로 도배되지 않게.
+      jsonRes(res, 200, { ok: false, needConfig: true, message: 'KIS API 미설정. 설정에서 키를 입력하세요.', simulation: true });
+      return;
+    }
+    // PUBLIC_READ 통과 — 아래 핸들러가 전역 캐시(또는 무키 폴백)로 응답
   }
 
   try {
@@ -1600,6 +1608,8 @@ async function handleRequest(req, res, session) {
         jsonRes(res, 200, global._chartCache[cacheKey]);
         return;
       }
+      // 무키 유저 + 캐시 미스 — KIS 호출 불가. 빈 캔들로 깔끔히 응답(차트만 비고 화면은 유지).
+      if (!cfg.appKey || !cfg.appSecret) { jsonRes(res, 200, { ok: true, candles: [], needConfig: true }); return; }
 
       // ── KIS는 날짜 범위를 넓게 줘도 한 번에 최대 ~600건 반환 ──
       // 일봉: 600건 ≈ 약 2.4년치 (영업일 기준)
