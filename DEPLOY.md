@@ -5,6 +5,14 @@
 
 **현재 고정 공개 주소: `https://kis.tail8eca6a.ts.net`** (재시작·재부팅에도 동일)
 
+### 🖥️ 운영 호스트 (2026-06-13~) — AWS EC2 상시 운영
+로컬 PC/VM은 꺼지면 같이 멈춰 장중 자동매매가 끊긴다(2026-06-11·12 실제 발생). 그래서 **AWS EC2로 이전**해 24시간 상시 운영한다.
+- **인스턴스**: 서울 `ap-northeast-2`, Ubuntu, `t3.micro`(프리티어), 퍼블릭IP `15.164.129.5`
+- **접속**: `ssh -i autotrade-key.pem ubuntu@15.164.129.5` (보안그룹 SSH=내 IP만, Tailscale SSH도 활성)
+- **경로/계정**: `/home/ubuntu/KoreanInvestment`, 실행계정 `ubuntu`, Node `/usr/bin/node`
+- **고정주소**: Tailscale 노드명 `kis`를 EC2로 이관 → 주소 그대로 유지 (옛 VM은 `kis-oldvm`로 개명·서비스 disable)
+- 로그: `sudo journalctl -u autotrade -f` (EC2는 파일로그 대신 journald 사용)
+
 ## ⚠️ 가장 중요한 주의사항
 - **첫 가입자가 관리자(admin)가 된다.** 공개 직후 *반드시 본인이 먼저 가입*할 것.
 - 공개 전 `users.json`이 없으면(=가입자 0명) 누구든 먼저 가입하면 admin이다.
@@ -36,25 +44,35 @@ sudo tailscale funnel --bg 3000        # 처음엔 승인 URL이 떠서 1회 승
 
 ## 2) 상시 운영 (재부팅에도 유지)
 
-Funnel은 부팅 시 tailscaled가 자동 복원한다. 서버만 systemd로 등록하면 끝:
+Funnel은 부팅 시 tailscaled가 자동 복원한다. 서버만 systemd로 등록하면 끝.
+아래는 **현재 EC2에 배포된 실제 설정**(로컬 PC면 `User`/경로만 본인 환경으로):
 
 `/etc/systemd/system/autotrade.service`:
 ```ini
 [Unit]
-Description=AutoTrade KR server
-After=network.target tailscaled.service
+Description=AutoTrade KR server (KIS 자동매매)
+After=network-online.target tailscaled.service
+Wants=network-online.target
 [Service]
-WorkingDirectory=/home/ydh/KoreanInvestment
-Environment=TZ=Asia/Seoul HOST=127.0.0.1 PORT=3000
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/KoreanInvestment
+Environment=TZ=Asia/Seoul
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=TRUSTED_PROXY=tailscale
 ExecStart=/usr/bin/node proxy-server.js
 Restart=always
+RestartSec=3
 [Install]
 WantedBy=multi-user.target
 ```
 ```bash
 sudo systemctl enable --now autotrade
 ```
-**운영 명령**: `systemctl restart autotrade`(코드 수정 반영) · `systemctl status autotrade` · `tail -f /var/log/autotrade.log`
+**운영 명령**: `systemctl restart autotrade`(코드 수정 반영) · `systemctl status autotrade` · `journalctl -u autotrade -f`
+⚠️ **이중 봇 금지**: 같은 KIS 계좌에 자동매매 서버가 둘 이상 붙으면 주문이 충돌한다. 다른 호스트(옛 VM 등)의
+`autotrade.service`는 반드시 `sudo systemctl disable --now autotrade` 로 꺼둘 것. EC2가 단일 운영 소스다.
 ⚠️ 서버를 systemd로 띄운 뒤엔 `./go-live.sh`를 다시 실행하지 말 것(포트 3000 충돌).
 
 ### 장중 자동 점검 (선택)
@@ -100,6 +118,7 @@ TRUSTED_PROXY=cloudflare ./go-live.sh   # ← IP 신뢰 헤더를 CF-Connecting-
 | `TZ`   | (시스템) | 로그 시간 표기용. `Asia/Seoul` 권장 |
 | `TRUSTED_PROXY` | `tailscale` | 클라이언트 IP 신뢰 헤더. `tailscale`=X-Forwarded-For, `cloudflare`=CF-Connecting-IP |
 
-## 보존해야 할 민감 파일 (.gitignore — 백업 대상)
-`users.json` · `sessions.json` · `.enckey`(없으면 user-configs 복호화 불가) ·
-`user-configs/` · `order-journal.json` · `data-cache.json`
+## 보존해야 할 민감 파일 (.gitignore — 백업/이전 대상)
+`auth.db`(계정·세션 SQLite) · `.enckey`(없으면 user-configs 복호화 불가) ·
+`user-configs/`(KIS 키·botPositions) · `order-journal.db`(주문 SQLite) · `data-cache.json`
+(WAL 사용 — 정지 후 복사하거나 `-wal`·`-shm` 사이드카까지 함께. 호스트 이전은 `scp`로 전송.)
