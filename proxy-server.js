@@ -794,10 +794,12 @@ function interpolateDayCandles(open, high, low, close, n) {
   return bars;
 }
 
-// ── CORS 헤더 (하드닝: 전체 허용 '*' → localhost 계열만) ──
+// ── CORS 헤더 ──
+// 앱은 서버 자신에서 서빙(동일 출처)되므로 평상시 CORS 불필요. 교차 출처 + 자격증명 반사는
+// CSRF/데이터 유출 벡터라 기본 차단한다. 개발 중 다른 localhost 포트에서 띄울 때만 DEV_CORS=1.
 function setCors(res, req) {
   const o = (req && req.headers.origin) || '';
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)) {
+  if (process.env.DEV_CORS === '1' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)) {
     res.setHeader('Access-Control-Allow-Origin', o);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -806,6 +808,20 @@ function setCors(res, req) {
   // 보안 헤더
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
+}
+
+// ── CSRF: 상태변경 요청은 동일 출처만 ──
+// 브라우저는 교차 출처 POST 에 Origin 헤더를 반드시 보낸다 → Origin 호스트가 우리 호스트와
+// 다르면 거부(쿠키 세션 도용 주문 방지). Origin 없는 요청(브라우저 외 클라이언트)은 CSRF 불가 → 통과.
+// 터널/리버스프록시가 Host 를 재작성하는 환경이면 APP_ORIGIN(예: kis.tail8eca6a.ts.net)을 지정한다.
+function csrfOk(req) {
+  const o = req.headers.origin;
+  if (!o) return true;
+  let host; try { host = new URL(o).host; } catch (_) { return false; }
+  if (host === req.headers.host) return true;
+  const extra = (process.env.APP_ORIGIN || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+  if (extra && host === extra) return true;
+  return false;
 }
 
 // ── 세션 쿠키 플래그 ──
@@ -1482,6 +1498,12 @@ async function handleRequest(req, res, session) {
   }
   if (pathname.endsWith('.html') || pathname.endsWith('.js') || pathname.endsWith('.css')) {
     jsonRes(res, 404, { ok: false, message: 'not found' }); return;
+  }
+
+  // ── CSRF 방어: 상태변경(GET/HEAD 외) /api 요청은 동일 출처만 허용 ──
+  if (pathname.startsWith('/api/') && req.method !== 'GET' && req.method !== 'HEAD' && !csrfOk(req)) {
+    jsonRes(res, 403, { ok: false, message: '교차 출처 요청이 차단되었습니다' });
+    return;
   }
 
   // ══════════════════════════════════════════
