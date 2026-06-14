@@ -178,6 +178,15 @@ function startFakeKis(onClientMsg) {
   await sleep(200);
   ok('멀티탭(탭2개)에서도 체결통보 1회만 확정', execCalls === 1);
 
+  // H4: 과대 프레임(64-bit 길이) 선언 → 파서가 거부하고 연결 차단(무한 버퍼/크래시 방지)
+  for (const sock of fake.socks) {
+    const big = Buffer.alloc(10); big[0] = 0x82; big[1] = 127; // FIN+binary, 64-bit 길이
+    big.writeBigUInt64BE(8n * 1024n * 1024n, 2); // 8 MiB 선언(MAX_FRAME 초과)
+    sock.write(big);
+  }
+  await sleep(250);
+  ok('과대 프레임 선언 시 연결 차단(_fail, 크래시/OOM 없음)', feed.connected === false);
+
   feed._closed = true; try { feed.ws.close(); } catch (_) {}
   fake.server.close();
 
