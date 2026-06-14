@@ -335,6 +335,56 @@ function mkTrader(deps) {
   t.tickCount = 0; await t.tick();
   ok('빈 잔고 3회 연속 — 청산 확정(봇 지분 제거)', !t.state.botPositions['005930']);
 
+  realLog('== 전수조사 테스트갭 보강 ==');
+
+  // G1) 일일 손실 한도 — 실제 손실 매도를 reconcile로 누적해 한도 돌파(직접 대입 아님)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 })); // 실보유 0 = 전량 체결
+  t.state.botPositions = {
+    '005930': { qty:10, entry:100000, stop:0, lastSellPrice:90000, _sellPending:10 }, // -10만/주 손실
+    '000660': { qty:10, entry:100000, stop:0, lastSellPrice:90000, _sellPending:10 }
+  };
+  t.tickCount = 0; await t.tick();
+  ok('G1 실제 손실 매도 누적으로 일일손실 한도 돌파 → 정지', t.state.stoppedByLoss === true);
+  ok('G1 한도 돌파 후 신규매수 0', orders.filter(o => o.side === 'buy').length === 0);
+  ok('G1 연속손실 2회(포지션 2개 완전종료, M-A)', t.state.consecLosses === 2);
+
+  // G2) 부분체결 손절 — 10주 손절 중 6주만 체결, 4주는 미체결로 잔존(체결분만 손익·연속손실 미집계)
+  orders.length = 0;
+  const partAcct = { rt_cd:'0',
+    output1: [{ pdno:'005930', hldg_qty:'4', pchs_avg_pric:'60000', prpr:'55000', evlu_pfls_rt:'-8.3', evlu_amt:'220000' }],
+    output2: [{ dnca_tot_amt:'10000000' }] };
+  t = mkTrader(mkDeps({ chart: flatChart, account: partAcct, price: 55000 }));
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0, lastSellPrice:55000, _sellPending:10 } };
+  t.deps.getPendingOrders = () => [{ code:'005930', side:'sell', qty:4, fillQty:0, price:55000 }]; // 4주 미체결 매도
+  t.tickCount = 0; await t.tick();
+  const g2cost = (55000 + 60000) * 6 * 0.0015;
+  ok('G2 부분 손절 — 체결 6주만 실현손익 계상', t.state.dailyRealizedPnl === (55000 - 60000) * 6 - g2cost);
+  ok('G2 부분 손절 — 봇 지분 4주로 축소', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 4);
+  ok('G2 부분 손절 — _sellPending 4주 잔존', t.state.botPositions['005930']._sellPending === 4);
+  ok('G2 미완결이라 연속손실 미집계(0)', (t.state.consecLosses || 0) === 0);
+
+  // G3) 총 노출 한도(maxExposurePct) — 노출이 자본 60%에 도달하면 신규매수 차단
+  orders.length = 0;
+  const expAcct = { rt_cd:'0',
+    output1: [{ pdno:'111111', hldg_qty:'1', pchs_avg_pric:'6000000', prpr:'6000000', evlu_pfls_rt:'0', evlu_amt:'6000000' }],
+    output2: [{ dnca_tot_amt:'4000000', nass_amt:'10000000' }] };
+  t = mkTrader(mkDeps({ chart: decChart, account: expAcct, price: 270000 }));
+  t.state.botPositions = { '111111': { qty:1, entry:6000000, stop:0 } }; // 노출 600만 = 자본 10M의 60%
+  t.tickCount = 0; await t.tick();
+  ok('G3 총 노출 한도 도달 → 신규매수 차단', orders.filter(o => o.side === 'buy').length === 0);
+
+  // G4) 엔진 멀티유저 격리 — 두 유저 트레이더가 상태(botPositions/연속손실/거래수)를 공유하지 않음
+  const tA = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000) }));
+  const tB = mkTrader(mkDeps({ chart: flatChart, account: cashAcct(10000000) }));
+  tA.state.botPositions = { 'AAAAAA': { qty:5, entry:1000 } };
+  tB.state.botPositions = { 'BBBBBB': { qty:7, entry:2000 } };
+  tA.state.consecLosses = 2; tA.state.tradesToday = 3;
+  await tA.tick(); await tB.tick();
+  ok('G4 유저A/B botPositions 독립', tB.state.botPositions['AAAAAA'] === undefined && tA.state.botPositions['BBBBBB'] === undefined);
+  ok('G4 유저별 연속손실/거래수 독립', (tB.state.consecLosses||0) === 0 && (tB.state.tradesToday||0) === 0 && tA.state.consecLosses === 2);
+  ok('G4 유저 식별자 분리(상태파일도 유저별)', tA.userId !== tB.userId && !!tA.userId);
+
   // 14) 부분체결: 미체결 매수 잔량이 있으면 봇 지분을 매도로 오삭감하지 않음
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 })); // 실보유 10
