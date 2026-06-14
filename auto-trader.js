@@ -561,6 +561,18 @@ class AutoTrader {
     }
     return sum;
   }
+  // 봇 보유분의 미실현 손익(현재가 - 진입가). 일일 손실 서킷이 실현손익만 보면
+  // 손절 발동 전 동반 급락(미실현 손실)에는 신규매수를 못 막는다 → 미실현도 합산해 판정.
+  _botUnrealized(held) {
+    let sum = 0; const bp = this.state.botPositions || {};
+    for (const c of Object.keys(bp)) {
+      const q = bp[c].qty || 0;
+      const entry = bp[c].entry || 0;
+      const cur = (held && held[c] && held[c].curPrice) || 0;
+      if (q > 0 && entry > 0 && cur > 0) sum += (cur - entry) * q;
+    }
+    return sum;
+  }
 
   // ── 스캔 목록 갱신: 거래량 상위 + watchList (10분마다) ──
   async updateScanList(cfg) {
@@ -658,7 +670,11 @@ class AutoTrader {
                   const basis = bot[c].entry || 0;
                   const sellPx = bot[c].lastSellPrice || heldPositions[c]?.curPrice || basis;
                   if (basis > 0 && sellPx > 0) {
-                    const realized = (sellPx - basis) * soldByBot;
+                    // 보수적 거래비용(매도세+수수료+슬리피지 왕복 추정)을 차감해 실현손익을 약간
+                    // 더 보수적으로(손실은 더 크게) 잡는다 → 일일 손실 한도가 늦게가 아니라 제때 발동.
+                    const COST_RATE = 0.0015;
+                    const cost = (sellPx + basis) * soldByBot * COST_RATE;
+                    const realized = (sellPx - basis) * soldByBot - cost;
                     this.state.dailyRealizedPnl += realized;
                     if (realized < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
                     else if (realized > 0) this.state.consecLosses = 0;
@@ -730,14 +746,25 @@ class AutoTrader {
 
       // ── 서킷브레이커: 신규매수 정지 판정 (포지션 관리/리스크 매도는 계속됨) ──
       const dailyLossLimit = capital > 0 ? capital * (s.safety.dailyLossLimitPct / 100) : -Infinity;
+      const unrealized = this._botUnrealized(heldPositions);
       let buyingHalted = false;
       if (this.state.stoppedByLoss) buyingHalted = true;
       else if (capital > 0 && this.state.dailyRealizedPnl <= dailyLossLimit) {
+        // 실현손익만으로 한도 도달 = 고착 정지(오늘 신규매수 영구 중지)
         this.state.stoppedByLoss = true; buyingHalted = true; this.save();
         this.log('safety', `🛑 일일 손실 한도 도달 (${Math.round(this.state.dailyRealizedPnl).toLocaleString()}원 ≤ 자본 ${s.safety.dailyLossLimitPct}% = ${Math.round(dailyLossLimit).toLocaleString()}원) — 오늘 신규매수 중지`);
       }
-      else if ((this.state.consecLosses || 0) >= s.safety.maxConsecLosses) buyingHalted = true;
-      else if ((this.state.tradesToday || 0) >= s.safety.maxTradesPerDay) buyingHalted = true;
+      else if (capital > 0 && (this.state.dailyRealizedPnl + unrealized) <= dailyLossLimit) {
+        // 실현+미실현 합산이 한도 이하 = 비고착 보류(깊은 평가손실 중 추가 진입 차단, 회복 시 재개)
+        buyingHalted = true;
+        if (!this._drawdownHalted) {
+          this._drawdownHalted = true;
+          this.log('safety', `⏸ 평가손실 포함 손실 한도 도달 (실현 ${Math.round(this.state.dailyRealizedPnl).toLocaleString()} + 평가 ${Math.round(unrealized).toLocaleString()} ≤ ${Math.round(dailyLossLimit).toLocaleString()}원) — 회복 시까지 신규매수 보류`);
+        }
+      }
+      else { this._drawdownHalted = false; }
+      if (!buyingHalted && (this.state.consecLosses || 0) >= s.safety.maxConsecLosses) buyingHalted = true;
+      else if (!buyingHalted && (this.state.tradesToday || 0) >= s.safety.maxTradesPerDay) buyingHalted = true;
 
       // ── 2) 스캔 목록 전체: 전략 신호 체크 (순차 처리, 딜레이 적용) ──
       const scanTarget = this.scanList.length > 0 ? this.scanList : (s.watchList || []);

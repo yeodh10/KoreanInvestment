@@ -223,6 +223,21 @@ function mkTrader(deps) {
   ok('일일손실 -2% 초과 → 신규매수 정지', orders.filter(o => o.side === 'buy').length === 0);
   ok('stoppedByLoss 플래그 set', t.state.stoppedByLoss === true);
 
+  // 8-1) 미실현 손실까지 더해 한도 도달 → 신규매수 비고착 보류(H3) — 실현손익 0이라도 평가손실이 크면 진입 차단
+  const uT = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  uT.state.botPositions = { '000660': { qty: 10, entry: 100000 } };
+  ok('_botUnrealized 평가손익(-300,000)', uT._botUnrealized({ '000660': { curPrice: 70000 } }) === -300000);
+  orders.length = 0;
+  const lossAcct = { rt_cd:'0',
+    output1: [{ pdno:'000660', hldg_qty:'10', pchs_avg_pric:'100000', prpr:'70000', evlu_pfls_rt:'-30', evlu_amt:'700000' }],
+    output2: [{ dnca_tot_amt:'9300000', nass_amt:'10000000' }] };
+  t = mkTrader(mkDeps({ chart: decChart, account: lossAcct, price: 270000 }));
+  t.state.botPositions = { '000660': { qty:10, entry:100000, stop:50000, target:500000, atr:1000, initRisk:1000, hw:100000 } };
+  t.tickCount = 0; // 잔고 갱신 틱
+  await t.tick();
+  ok('미실현 손실 포함 한도 도달 → 신규매수 보류', orders.filter(o => o.side === 'buy').length === 0);
+  ok('비고착 — stoppedByLoss는 set 안 됨(회복 시 재개)', t.state.stoppedByLoss === false);
+
   // 9) 연속손실 서킷브레이커 (균형=3패)
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
@@ -271,7 +286,9 @@ function mkTrader(deps) {
   t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0, lastSellPrice:66000, _sellPending:10 } };
   t.tickCount = 0; // 다음 틱에서 잔고 갱신(tickCount%5===1)
   await t.tick();
-  ok('잔고 대조로 체결 확정 — 실현손익 +60,000 계상', t.state.dailyRealizedPnl === 60000);
+  // gross +60,000 에서 왕복 거래비용(0.15%)을 차감해 보수적으로 계상
+  const cost13 = (66000 + 60000) * 10 * 0.0015; // 1,890
+  ok('잔고 대조로 체결 확정 — 실현손익(거래비용 차감) 계상', t.state.dailyRealizedPnl === 60000 - cost13);
   ok('체결 확정 후 봇 지분 제거', !t.state.botPositions['005930']);
 
   // 13-1) 부분체결 매수 후 잔여취소 → 미체결분이 '매도'로 오계상되지 않음(유령 손익 방지)
@@ -300,7 +317,8 @@ function mkTrader(deps) {
   t.state.botPositions = { '005930': { qty:10, entry:60000, stop:0, lastSellPrice:55000, _sellPending:10, _sellAt: FIXED - 7*60*1000 } };
   t.tickCount = 0;
   await t.tick();
-  ok('체결+_sellAt>6분 → 실현손실 -50,000 정상 계상(누수정리에 안 먹힘)', t.state.dailyRealizedPnl === -50000);
+  const cost133 = (55000 + 60000) * 10 * 0.0015; // 1,725 (왕복 거래비용)
+  ok('체결+_sellAt>6분 → 실현손실(거래비용 차감) 정상 계상(누수정리에 안 먹힘)', t.state.dailyRealizedPnl === -50000 - cost133);
   ok('연속손실 +1 반영', t.state.consecLosses === 1);
   ok('체결 확정 후 봇 지분 제거', !t.state.botPositions['005930']);
 
