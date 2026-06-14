@@ -1728,7 +1728,7 @@ async function loadStock(code) {
   currentCode = code; currentName = name;
   const seq = ++_stockSeq;
   _buyMaxQty = 0; // 종목 바뀌면 이전 종목 최대수량 초기화(새 조회 전까지 오표시 방지)
-  LS.set('lastStock', code); // 마지막 본 종목 기억 — 새로고침해도 차트 유지
+  LS.set(uk('lastStock'), code); // 마지막 본 종목 기억(유저별)
   showPage('dashboard');
 
   setText('dashStockName', name);
@@ -2431,7 +2431,7 @@ async function refreshWatchPrices() {
 // 계좌 / 포트폴리오
 // ══════════════════════════════════════════════════════
 async function loadAccount() {
-  if (!proxyOnline) return;
+  if (!kisConnected) return; // 키 없는 유저는 계좌 없음 — 헛요청·needConfig 폴링 방지
   const r = await api('/api/account');
   if (!r?.ok || !r.data) return;
   LS.setObj(uk('acctSnap'), r.data); // 마지막 계좌 스냅샷(유저별) — 다음 부팅 시 즉시 페인트용
@@ -2515,12 +2515,12 @@ function aiSaveHistory() {
   try {
     const box = $('aiMessages'); if (!box) return;
     const msgs = [...box.querySelectorAll('[data-role]')].map(d => ({ role: d.getAttribute('data-role'), text: d.getAttribute('data-text') || '' }));
-    localStorage.setItem(AI_HIST_KEY, JSON.stringify(msgs.slice(-50))); // 최근 50개만
+    localStorage.setItem(uk(AI_HIST_KEY), JSON.stringify(msgs.slice(-50))); // 최근 50개만(유저별)
   } catch (e) {}
 }
 function aiLoadHistory() {
   try {
-    const raw = localStorage.getItem(AI_HIST_KEY); if (!raw) return;
+    const raw = localStorage.getItem(uk(AI_HIST_KEY)); if (!raw) return;
     const msgs = JSON.parse(raw); if (!Array.isArray(msgs) || !msgs.length) return;
     const box = $('aiMessages'); if (!box) return;
     box.innerHTML = ''; // 기본 인사말 치우고 저장된 대화 복원
@@ -2582,7 +2582,7 @@ function sortPf(key) {
 }
 async function loadPortfolio() {
   const tbody = $('pfBody');
-  if (!proxyOnline) { tbody.innerHTML='<tr><td colspan="11" class="empty">프록시 미연결</td></tr>'; return; }
+  if (!kisConnected) { tbody.innerHTML='<tr><td colspan="11" class="empty">설정에서 KIS 키를 연결하면 보유 종목이 표시됩니다</td></tr>'; return; }
   if (!tbody.querySelector('tr td:nth-child(3)')) tbody.innerHTML='<tr><td colspan="11" class="empty">불러오는 중...</td></tr>';
   const r = await api('/api/account');
   if (!r?.ok) { tbody.innerHTML='<tr><td colspan="11" class="empty">조회 실패</td></tr>'; return; }
@@ -2690,7 +2690,7 @@ let _dashCurPrice = 0;    // 현재 보고 있는 종목의 현재가
 let _buyableTimer = null, _buyableSeq = 0;
 function refreshBuyableSoon(){ clearTimeout(_buyableTimer); _buyableTimer = setTimeout(refreshBuyable, 350); } // 가격 입력 디바운스
 async function refreshBuyable(){
-  if(!proxyOnline || !currentCode) return;
+  if(!kisConnected || !currentCode) return;
   const seq = ++_buyableSeq, code = currentCode;
   const price = parseInt($('dashOrderPrice')?.value||0) || 0; // 가격 없으면 시장가 기준(서버가 현재가로 계산)
   const r = await api(`/api/buyable?code=${code}${price>0?'&price='+price:''}`);
@@ -2771,7 +2771,7 @@ async function submitOrder() {
   }
 }
 async function refreshOrders() {
-  if (!proxyOnline) return;
+  if (!kisConnected) return; // 키 없으면 미체결 주문 없음
   const r = await api('/api/orders');
   if (!r?.ok) return;
   const orders = r.data?.output1 || r.data?.output || []; // KIS·저널 모두 output1 (기존 output 참조는 버그)
@@ -3276,12 +3276,12 @@ function initBtDates() {
 // ══════════════════════════════════════════════════════
 // 알림 시스템 (가격 도달)
 // ══════════════════════════════════════════════════════
-let alerts = LS.getObj('priceAlerts') || [];
-let alertHistory = LS.getObj('alertHistory') || [];
+let alerts = [];          // 유저별 — init에서 uk()로 로드(전역 키면 타 유저 알림이 샌다)
+let alertHistory = [];
 let alertCheckTimer = null;
 
-function saveAlerts() { LS.setObj('priceAlerts', alerts); }
-function saveAlertHistory() { LS.setObj('alertHistory', alertHistory); }
+function saveAlerts() { LS.setObj(uk('priceAlerts'), alerts); }
+function saveAlertHistory() { LS.setObj(uk('alertHistory'), alertHistory); }
 
 function addAlertModal() {
   const p = $('alertAddPanel');
@@ -3504,7 +3504,7 @@ function fmtNewsDate(raw) {
   return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 async function loadDashNews() {
-  if (!proxyOnline) return;
+  if (!kisConnected) return; // 뉴스는 KIS 전용 — 키 없으면 스킵(빈 패널)
   const code = currentCode;
   const r = await api(`/api/news?code=${code}`);
   if (code !== currentCode) return; // 종목 전환됨 → 옛 뉴스 렌더 금지
@@ -3552,7 +3552,7 @@ function fmtShares(n) {
   return s + a.toLocaleString();
 }
 async function loadDashInvestor() {
-  if (!proxyOnline) return;
+  if (!kisConnected) return; // 수급은 KIS 전용 — 키 없으면 스킵
   const code = currentCode;
   const r = await api(`/api/investor?code=${code}`);
   if (code !== currentCode) return; // 종목 전환됨 → 옛 수급 렌더 금지
@@ -4005,7 +4005,7 @@ function initHistDates() {
 }
 let _histRows = [];
 async function loadHistory() {
-  if(!proxyOnline){$('histBody').innerHTML='<tr><td colspan="10" class="empty">미연결</td></tr>';return;}
+  if(!kisConnected){$('histBody').innerHTML='<tr><td colspan="10" class="empty">설정에서 KIS 키를 연결하면 거래내역이 표시됩니다</td></tr>';return;}
   const from=($('histFrom').value||'').replace(/-/g,''), to=($('histTo').value||'').replace(/-/g,'');
   $('histBody').innerHTML='<tr><td colspan="10" class="empty">불러오는 중...</td></tr>';
   const r=await api(`/api/orders?startDate=${from}&endDate=${to}`);
@@ -4064,7 +4064,7 @@ function exportHistCSV() {
 // 성과분석
 // ══════════════════════════════════════════════════════
 async function loadPerformance() {
-  if(!proxyOnline){setText('perfDetail','프록시 미연결');return;}
+  if(!kisConnected){setText('perfDetail','설정에서 KIS 키를 연결하면 표시됩니다');return;}
   const r=await api('/api/account');
   if(!r?.ok){setText('perfDetail','조회 실패');return;}
   const s=(r.data?.output2&&r.data.output2[0])||{};
@@ -4621,6 +4621,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('app').style.display = 'grid';
   setText('hdrUsername', me.username + (me.role === 'admin' ? ' 👑' : ''));
   CURRENT_USER = me.username; // 이후 유저별 캐시 키(uk)의 스코프
+  // 이 유저의 알림(가격 알림·이력)을 유저별 키로 로드 (전역이면 타 유저에게 샌다)
+  try { alerts = LS.getObj(uk('priceAlerts')) || []; alertHistory = LS.getObj(uk('alertHistory')) || []; } catch(_) {}
   // 이 유저의 관심종목 — 로컬 캐시로 즉시 그린 뒤, 서버 권위값으로 동기화(기기 간 동일).
   watchCodes = LS.getObj(uk('watchCodes')) || DEFAULT_WATCH;
   if (watchCodes.length <= 10) watchCodes = DEFAULT_WATCH; // 구버전 소형 목록 → 기본으로
@@ -4631,7 +4633,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   }).catch(() => {});
   // 레거시 전역 키 1회 청소 — 과거 버전이 남긴 유저 무구분 데이터가 타 유저 화면에 뜨는 것 차단
-  try { localStorage.removeItem('acctSnap'); localStorage.removeItem('kisConfig'); localStorage.removeItem('watchCodes'); } catch(_) {}
+  try { ['acctSnap','kisConfig','watchCodes','priceAlerts','alertHistory','aiHistory','lastStock'].forEach(k=>localStorage.removeItem(k)); } catch(_) {}
 
   // 캐시 우선 첫 페인트 — 서버 응답 전에 '이 유저의' 마지막 계좌 스냅샷으로 즉시 그린다 (이후 실데이터로 덮어씀)
   try { const snap = LS.getObj(uk('acctSnap')); if (snap) applyAccount(snap); } catch(_) {}
@@ -4643,7 +4645,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // 기본 종목: ① 마지막 본 종목 → ② 없으면(첫 실행) 거래량 1위 — 새로고침마다 차트가 바뀌지 않게
   (async () => {
-    const remembered = LS.get('lastStock');
+    const remembered = LS.get(uk('lastStock'));
     if (remembered) {
       currentCode = remembered;
     } else {
