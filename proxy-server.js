@@ -842,10 +842,13 @@ function isAdminSession(session) {
 // 터널/리버스 프록시 뒤에서는 socket.remoteAddress가 항상 127.0.0.1이라
 // 모든 사용자가 한 IP로 합쳐진다 → 가입/로그인 제한이 전체에 걸리는 사고.
 // 어떤 헤더를 신뢰할지는 앞단 프록시 종류에 따라 다르다 (TRUSTED_PROXY env):
-//  - tailscale(기본): Funnel이 X-Forwarded-For를 진짜 IP로 "덮어씀" → XFF만 신뢰.
+//  - tailscale(기본): Funnel이 X-Forwarded-For에 진짜 IP를 넣는다 → 신뢰 홉이 추가한 값만 신뢰.
 //    CF-Connecting-IP는 방문자가 그대로 위조 가능하므로 절대 보면 안 됨(실측 확인, 2026-06-06).
 //  - cloudflare: CF가 CF-Connecting-IP를 덮어씀 → 그걸 우선 신뢰.
 // 서버는 127.0.0.1 바인딩이라 헤더 출처는 신뢰된 터널뿐.
+// ★ XFF는 '맨 오른쪽'(마지막=신뢰 홉이 추가) 값만 신뢰한다. 맨 왼쪽은 클라이언트가 위조해
+//   끼워넣을 수 있어, 그걸 보면 가짜 IP 회전으로 로그인 잠금/가입 제한을 우회당한다(프록시가
+//   append 하는 경우). Funnel이 덮어쓰는 경우엔 값이 하나라 좌=우로 동일하게 안전하다.
 const TRUSTED_PROXY = (process.env.TRUSTED_PROXY || 'tailscale').toLowerCase();
 function clientIp(req) {
   if (TRUSTED_PROXY === 'cloudflare') {
@@ -853,7 +856,10 @@ function clientIp(req) {
     if (cf) return cf.trim();
   }
   const xff = req.headers['x-forwarded-for'];
-  if (xff) return xff.split(',')[0].trim();
+  if (xff) {
+    const parts = xff.split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1]; // 맨 오른쪽(신뢰 홉) 값
+  }
   return (req.socket && req.socket.remoteAddress) || 'unknown';
 }
 
