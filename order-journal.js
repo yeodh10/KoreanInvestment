@@ -126,6 +126,17 @@ const _findFillAny = db.prepare(
 function _findFillByOdno(odno, userId) {
   return (userId ? _findFillUser.get(odno, userId) : _findFillAny.get(odno)) || null;
 }
+// ── odno 의 실제 주문 소유자(userId) ── 체결통보 라우팅용.
+// 피드가 appKey/계좌 단위로 공유될 때, 체결통보를 '첫 스트림 유저'가 아니라 그 주문을 낸 유저
+// 저널로 확정하기 위함. 미체결(접수/부분체결) 우선, 없으면 취소 아닌 최근 행.
+const _findOwnerPending = db.prepare(
+  `SELECT userId FROM orders WHERE odno = ? AND status IN ('접수','부분체결') ORDER BY id DESC LIMIT 1`);
+const _findOwnerAny = db.prepare(
+  `SELECT userId FROM orders WHERE odno = ? AND status != '취소' ORDER BY id DESC LIMIT 1`);
+function findOrderOwner(odno) {
+  const r = _findOwnerPending.get(odno) || _findOwnerAny.get(odno);
+  return r ? (r.userId || null) : null;
+}
 function markFilled(odno, qty, price, userId) {
   const e = _findFillByOdno(odno, userId);
   if (!e) return false;
@@ -273,4 +284,4 @@ function toKisFormat(entries, nameOf) {
   });
 }
 
-module.exports = { add, markFilled, markCancel, reconcile, todayList, pendingList, listRange, toKisFormat, lastBuySource, _kstDateKey };
+module.exports = { add, markFilled, markCancel, reconcile, todayList, pendingList, listRange, toKisFormat, lastBuySource, findOrderOwner, _kstDateKey };

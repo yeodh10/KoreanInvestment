@@ -1728,10 +1728,13 @@ async function handleRequest(req, res, session) {
           if (!global._priceCache) global._priceCache = {};
           global._priceCache[code] = { t: Date.now(), data };
         },
-        // 체결통보 → 해당 유저 저널만 확정 (실제 체결가·수량) — 타 유저 주문 오염 방지
+        // 체결통보 → odno 의 실제 주문 소유자 저널로 확정 (실제 체결가·수량).
+        // 피드가 같은 appKey/계좌로 공유될 때 '첫 스트림 유저'로 고정되던 오라우팅을 방지:
+        // 주문을 낸 유저를 odno 로 찾아 그 유저 저널에 기록한다(못 찾으면 스트림 소유자로 폴백).
         onExecution: (ex) => {
           if (!ex.filled || !ex.odno) return;
-          const okJ = orderJournal.markFilled(ex.odno, ex.qty, ex.price, streamUserId);
+          const owner = orderJournal.findOrderOwner(ex.odno) || streamUserId;
+          const okJ = orderJournal.markFilled(ex.odno, ex.qty, ex.price, owner);
           console.log(`[체결통보] ${ex.code} ${ex.qty}주 @${(ex.price || 0).toLocaleString()} (주문 ${ex.odno})${okJ ? ' — 저널 확정' : ''}`);
         }
       });

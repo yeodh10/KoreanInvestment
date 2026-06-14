@@ -496,7 +496,9 @@ let _clientSeq = 0;
 // ── 앱키별 피드 ──
 const _feeds = {};
 function getFeed(cfg) {
-  const key = cfg.appKey || '_global';
+  // appKey 단위 피드(= KIS WS 연결 1개). 키가 없으면 유저별로 분리해 '_global' 한 곳에
+  // 여러 무키 유저가 몰려 체결통보 라우팅이 섞이는 것을 방지(체결통보 소유자 라우팅과 이중 방어).
+  const key = cfg.appKey || ('_u_' + (cfg.__userId || 'global'));
   if (!_feeds[key]) _feeds[key] = new KisFeed(cfg);
   const f = _feeds[key];
   f.cfg = cfg;          // 최신 설정 반영

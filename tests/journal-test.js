@@ -114,6 +114,11 @@ ok('H8 취소 잔량 기록(7)', h8c.canceledRemainder === 7);
 const h8row = J.toKisFormat([h8c], c => c)[0];
 ok('H8 거래내역 체결수량=3, 취소표시 Y', h8row.tot_ccld_qty === '3' && h8row.cncl_yn === 'Y');
 
+// ── H1: 체결통보 라우팅 — odno 의 실제 소유자 조회(피드 공유 시 오라우팅 방지) ──
+J.add({ userId: 'own1', side: 'buy', code: '666666', qty: 5, price: 100, orderType: '00', odno: 'OWN', orgNo: '1', qtyBefore: 0 });
+ok('H1 odno 소유자 = 주문 낸 유저', J.findOrderOwner('OWN') === 'own1');
+ok('H1 없는 odno 소유자 null', J.findOrderOwner('NOPE') === null);
+
 [DB, DB + '-wal', DB + '-shm'].forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
 process.exit(fail ? 1 : 0);
