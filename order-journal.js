@@ -149,33 +149,54 @@ const _findCancelUser = db.prepare(
   `SELECT * FROM orders WHERE odno = ? AND status IN ('접수','부분체결') AND userId = ? ORDER BY id DESC LIMIT 1`);
 const _findCancelAny = db.prepare(
   `SELECT * FROM orders WHERE odno = ? AND status IN ('접수','부분체결') ORDER BY id DESC LIMIT 1`);
+// 원주문 수량(qty)은 보존한다 — 감사 추적("10주 주문 / 3체결 / 7취소")이 가능하도록.
+// 취소된 잔량은 canceledRemainder 에 수량으로 기록(과거엔 플래그 1로만 써 원수량이 소실됐다).
 const _updCancel = db.prepare(
-  `UPDATE orders SET status = ?, qty = ?, canceledRemainder = 1 WHERE id = ?`);
+  `UPDATE orders SET status = ?, canceledRemainder = ?, filledAt = ? WHERE id = ?`);
 function markCancel(odno, userId) {
   const e = userId ? _findCancelUser.get(odno, userId) : _findCancelAny.get(odno);
   if (!e) return false;
   // 일부라도 체결된 주문의 취소 = 잔량 취소. 체결 이력을 '취소'로 덮지 않는다.
-  const status = (e.fillQty > 0) ? '체결' : '취소';
-  const qty = (e.fillQty > 0) ? e.fillQty : e.qty; // 실제 체결 수량으로 확정
-  _updCancel.run(status, qty, e.id);
+  const filledQ = e.fillQty || 0;
+  const remainder = Math.max(0, e.qty - filledQ); // 취소된 잔량
+  const status = (filledQ > 0) ? '체결' : '취소';
+  _updCancel.run(status, remainder, filledQ > 0 ? Date.now() : null, e.id);
   return true;
 }
 
 // ── 체결 판정: 잔고 대조 ── holdings: { code: 보유수량 }
+// 부분체결(아직 잔량 남은 주문)도 완결 대상에 포함하고 id ASC(FIFO)로 정렬한다.
 const _selPending = db.prepare(
-  `SELECT * FROM orders WHERE status = '접수' AND qtyBefore IS NOT NULL`);
-const _markRecon = db.prepare(`UPDATE orders SET status = '체결', filledAt = ? WHERE id = ?`);
+  `SELECT * FROM orders WHERE status IN ('접수','부분체결') AND qtyBefore IS NOT NULL ORDER BY id ASC`);
+const _markRecon = db.prepare(`UPDATE orders SET status = '체결', fillQty = ?, filledAt = ? WHERE id = ?`);
+// 잔고 변화를 (userId, code, side) 그룹의 누적 임계로 판정한다.
+//  - 같은 종목·방향 주문이 둘 이상 동시에 열려 있고 각자 같은 qtyBefore 를 잡았을 때,
+//    주문마다 "현재 보유 ≥ qtyBefore + qty" 를 독립 적용하면 한 건만 체결돼도 전부 체결로 오판한다(이중 체결).
+//  - 대신 그룹의 가장 오래된 주문 시점 보유량을 기준(baseline)으로, FIFO 로 실제 변동량이
+//    허용하는 만큼만 차례로 체결 확정한다. 잔여 변동량이 다음 주문을 다 못 채우면 거기서 멈춘다.
 function reconcile(userId, holdings) {
-  const rows = _selPending.all();
+  const rows = _selPending.all(); // id ASC
+  const groups = new Map();
+  for (const e of rows) {
+    if (userId && e.userId !== userId) continue; // 타 유저 주문 제외(userId 없는 엔트리도 제외)
+    const key = (e.userId ?? '') + '|' + e.code + '|' + e.side;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e); // 이미 id ASC
+  }
   let changed = 0;
   db.exec('BEGIN');
   try {
-    for (const e of rows) {
-      if (userId && e.userId !== userId) continue; // 타 유저 주문 제외(userId 없는 엔트리도 제외)
-      const nowQty = parseInt(holdings[e.code] || 0);
-      const filled = (e.side === 'buy'  && nowQty >= e.qtyBefore + e.qty)
-                  || (e.side === 'sell' && nowQty <= e.qtyBefore - e.qty);
-      if (filled) { _markRecon.run(Date.now(), e.id); changed++; }
+    for (const list of groups.values()) {
+      const code = list[0].code, side = list[0].side;
+      const nowQty = parseInt(holdings[code] || 0);
+      let expected = list[0].qtyBefore; // 그룹이 채워지기 전(가장 오래된 주문 시점) 보유량
+      for (const e of list) {
+        expected += (side === 'buy' ? e.qty : -e.qty);
+        const reached = side === 'buy' ? (nowQty >= expected) : (nowQty <= expected);
+        if (!reached) break; // 누적 임계 미도달 → 이 주문과 이후 주문은 아직 미체결
+        _markRecon.run(e.qty, Date.now(), e.id); // 전량 체결 확정(부분체결분도 완결)
+        changed++;
+      }
     }
     db.exec('COMMIT');
   } catch (err) { db.exec('ROLLBACK'); throw err; }
@@ -238,10 +259,11 @@ function toKisFormat(entries, nameOf) {
       ord_dvsn_name: e.orderType === '01' ? '시장가' : '지정가',
       ord_qty: String(e.qty),
       ord_unpr: String(e.price),
-      tot_ccld_qty: filled ? String(e.qty) : partial ? String(e.fillQty || 0) : '0',
+      tot_ccld_qty: filled ? String(e.fillQty || e.qty) : partial ? String(e.fillQty || 0) : '0',
       avg_prvs: (filled || partial) ? String(e.fillPrice || e.price) : '0',
       rmn_qty: (filled || canceled) ? '0' : partial ? String(e.qty - (e.fillQty || 0)) : String(e.qty),
-      cncl_yn: canceled ? 'Y' : 'N',
+      // 전량취소(취소) 또는 부분체결 후 잔량취소(체결+canceledRemainder>0) 모두 취소 표시
+      cncl_yn: (canceled || e.canceledRemainder > 0) ? 'Y' : 'N',
       odno: e.odno || '',
       ord_gno_brno: e.orgNo || '',
       _journal: true,

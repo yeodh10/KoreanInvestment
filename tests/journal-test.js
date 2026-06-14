@@ -78,6 +78,42 @@ ok('멀티유저 대량 기록 무손실 A', J.todayList('mu_a').length === NU);
 ok('멀티유저 대량 기록 무손실 B', J.todayList('mu_b').length === NU);
 ok('유저 격리 — A는 B 주문 안 보임', J.todayList('mu_a').every(e => e.userId === 'mu_a'));
 
+// ── C1: 같은 종목·방향 다중 주문 동시 — 한 건만 체결되면 한 건만 확정(이중 체결 방지) ──
+J.add({ userId: 'c1', side: 'buy', code: '333333', qty: 10, price: 100, orderType: '00', odno: 'C1A', orgNo: '1', qtyBefore: 0 });
+J.add({ userId: 'c1', side: 'buy', code: '333333', qty: 10, price: 100, orderType: '00', odno: 'C1B', orgNo: '1', qtyBefore: 0 }); // 잔고 갱신 전이라 둘 다 qtyBefore=0
+let c1n = J.reconcile('c1', { '333333': 10 }); // 실제로는 10주만 체결
+ok('C1 이중 체결 방지 — 1건만 체결', c1n === 1);
+ok('C1 FIFO — 오래된 주문(C1A) 체결', J.todayList('c1').find(e => e.odno === 'C1A').status === '체결');
+ok('C1 나머지(C1B) 미체결 유지', J.todayList('c1').find(e => e.odno === 'C1B').status === '접수');
+J.reconcile('c1', { '333333': 20 }); // 잔량까지 도달
+ok('C1 잔량 도달 시 둘째도 체결', J.todayList('c1').find(e => e.odno === 'C1B').status === '체결');
+
+// ── C1(매도): 같은 종목 매도 둘, 한 건만 체결 ──
+J.add({ userId: 'c1s', side: 'sell', code: '333334', qty: 4, price: 100, orderType: '00', odno: 'C1S1', orgNo: '1', qtyBefore: 10 });
+J.add({ userId: 'c1s', side: 'sell', code: '333334', qty: 6, price: 100, orderType: '00', odno: 'C1S2', orgNo: '1', qtyBefore: 10 });
+let c1sn = J.reconcile('c1s', { '333334': 6 }); // 4주만 체결되어 10→6
+ok('C1 매도 이중 체결 방지 — 1건만', c1sn === 1 && J.todayList('c1s').find(e => e.odno === 'C1S1').status === '체결');
+ok('C1 매도 나머지 미체결', J.todayList('c1s').find(e => e.odno === 'C1S2').status === '접수');
+
+// ── H8: 부분체결 → 잔고대조로 완결(부분체결도 reconcile 대상) ──
+J.add({ userId: 'h8', side: 'buy', code: '444444', qty: 10, price: 100, orderType: '00', odno: 'H8A', orgNo: '1', qtyBefore: 0 });
+J.markFilled('H8A', 6, 100, 'h8'); // 6주 부분체결
+ok('H8 부분체결 상태', J.todayList('h8').find(e => e.odno === 'H8A').status === '부분체결');
+let h8n = J.reconcile('h8', { '444444': 10 });
+ok('H8 부분체결도 reconcile 완결', h8n === 1 && J.todayList('h8').find(e => e.odno === 'H8A').status === '체결');
+ok('H8 완결 시 fillQty=원수량(10)', J.todayList('h8').find(e => e.odno === 'H8A').fillQty === 10);
+
+// ── H8: 부분체결 후 취소 — 원주문 수량 보존 + 취소 잔량 기록 ──
+J.add({ userId: 'h8c', side: 'buy', code: '555555', qty: 10, price: 100, orderType: '00', odno: 'H8C', orgNo: '1', qtyBefore: 0 });
+J.markFilled('H8C', 3, 100, 'h8c'); // 3주 부분체결
+J.markCancel('H8C', 'h8c');         // 잔량 7주 취소
+const h8c = J.todayList('h8c').find(e => e.odno === 'H8C');
+ok('H8 취소 후 원주문 수량 보존(10)', h8c.qty === 10);
+ok('H8 부분체결분 보존(fillQty 3)', h8c.fillQty === 3);
+ok('H8 취소 잔량 기록(7)', h8c.canceledRemainder === 7);
+const h8row = J.toKisFormat([h8c], c => c)[0];
+ok('H8 거래내역 체결수량=3, 취소표시 Y', h8row.tot_ccld_qty === '3' && h8row.cncl_yn === 'Y');
+
 [DB, DB + '-wal', DB + '-shm'].forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
 process.exit(fail ? 1 : 0);
