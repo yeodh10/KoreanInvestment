@@ -60,6 +60,14 @@ const N = 150;
 await Promise.all(Array.from({ length: N }, (_, i) => A.register('user' + i, 'password123')));
 ok('대량 동시가입 무손실', Object.keys(A.loadUsers()).length === 2 + N);
 
+// H5: 설정 암호화 키 위생 — AES-GCM 라운드트립 + .enckey 32바이트(64 hex)
+const ENC = path.join(__dirname, '..', '.enckey');
+const enckeyPreexists = fs.existsSync(ENC);
+ok('AES-GCM 암복호화 라운드트립', A.decrypt(A.encrypt('appkey-secret-123')) === 'appkey-secret-123');
+ok('빈 입력은 빈 문자열', A.encrypt('') === '' && A.decrypt('') === '');
+ok('.enckey 32바이트(64 hex)', fs.existsSync(ENC) && fs.readFileSync(ENC, 'utf8').trim().length === 64);
+if (!enckeyPreexists) { try { fs.unlinkSync(ENC); } catch (_) {} } // 테스트가 만든 키만 정리(운영 키 보존)
+
 [DB, DB + '-wal', DB + '-shm'].forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
 process.exit(fail ? 1 : 0);

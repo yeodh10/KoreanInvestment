@@ -52,11 +52,20 @@ const KEY_FILE = path.join(__dirname, '.enckey');
 let ENC_KEY;
 function getEncKey() {
   if (ENC_KEY) return ENC_KEY;
-  try {
-    if (fs.existsSync(KEY_FILE)) { ENC_KEY = Buffer.from(fs.readFileSync(KEY_FILE, 'utf8'), 'hex'); return ENC_KEY; }
-  } catch(e) {}
-  ENC_KEY = crypto.randomBytes(32);
-  try { fs.writeFileSync(KEY_FILE, ENC_KEY.toString('hex'), { mode: 0o600 }); } catch(e) {}
+  if (fs.existsSync(KEY_FILE)) {
+    const key = Buffer.from(fs.readFileSync(KEY_FILE, 'utf8').trim(), 'hex');
+    // 손상/절단된 키로 진행하면 모든 user-configs 가 복호화 불가가 되므로 명확히 중단(무음 금지).
+    if (key.length !== 32) throw new Error(`.enckey 손상(${key.length}바이트, 32 필요) — 백업 키로 교체 필요. 새 키를 만들면 기존 KIS 설정 복호화가 영구 불가해집니다.`);
+    // 마이그레이션(scp/cp)으로 느슨해진 권한을 방어적으로 0600 재설정(마스터키는 전 유저 KIS키를 푼다).
+    try { fs.chmodSync(KEY_FILE, 0o600); } catch (_) {}
+    ENC_KEY = key;
+    return ENC_KEY;
+  }
+  // 신규 생성. ★ 쓰기 실패는 절대 무시하지 않는다 — 미영속 키로 운영하면 재시작 때 새 키가
+  //   생성돼 기존 user-configs 가 전부 영구 복호화 불가(무음 자격증명 전손)가 된다. 실패 시 기동 중단.
+  const key = crypto.randomBytes(32);
+  fs.writeFileSync(KEY_FILE, key.toString('hex'), { mode: 0o600 });
+  ENC_KEY = key;
   return ENC_KEY;
 }
 
