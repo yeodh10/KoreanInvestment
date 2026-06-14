@@ -2558,6 +2558,41 @@ async function handleRequest(req, res, session) {
 }
 
 // ════════════════════════════════════════
+// 단일 인스턴스 락 (같은 호스트 이중 기동 방지)
+// ════════════════════════════════════════
+// 같은 KIS 계좌에 봇 프로세스가 둘 뜨면 주문이 충돌한다(CLAUDE.md ⚠️ 이중 봇 금지).
+// 포트 점유만으로는 "다른 포트로 기동"·"start.sh + systemd 동시 기동"을 못 막으므로
+// 호스트 단위 PID 락으로 차단한다. (크로스 호스트는 운영상 옛 systemd disable로 별도 차단)
+const LOCK_FILE = path.join(__dirname, '.server.lock');
+(function acquireSingletonLock() {
+  if (process.env.SKIP_LOCK === '1') return; // 테스트/특수 상황 탈출구
+  try {
+    if (fs.existsSync(LOCK_FILE)) {
+      const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim());
+      if (pid && pid !== process.pid) {
+        let alive = false;
+        try { process.kill(pid, 0); alive = true; } catch (e) { alive = (e.code === 'EPERM'); }
+        if (alive) {
+          console.error(`\n[기동 중단] 이미 다른 인스턴스가 실행 중입니다 (PID ${pid}).`);
+          console.error(`  같은 KIS 계좌 이중 봇(주문 충돌) 방지를 위해 두 번째 기동을 막습니다.`);
+          console.error(`  → 의도된 재기동이면 기존 프로세스를 먼저 종료하거나 ${LOCK_FILE} 삭제 후 재시도.\n`);
+          process.exit(1);
+        }
+      }
+    }
+    fs.writeFileSync(LOCK_FILE, String(process.pid));
+    const release = () => {
+      try {
+        if (fs.existsSync(LOCK_FILE) && parseInt(fs.readFileSync(LOCK_FILE, 'utf8')) === process.pid) fs.unlinkSync(LOCK_FILE);
+      } catch (_) {}
+    };
+    process.on('exit', release);
+    process.on('SIGINT', () => { release(); process.exit(0); });
+    process.on('SIGTERM', () => { release(); process.exit(0); });
+  } catch (e) { console.error('[락] 단일 인스턴스 락 설정 실패(계속 진행):', e.message); }
+})();
+
+// ════════════════════════════════════════
 // 서버 시작
 // ════════════════════════════════════════
 server.listen(PORT, HOST, () => {

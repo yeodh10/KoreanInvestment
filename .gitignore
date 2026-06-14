@@ -24,6 +24,12 @@ order-journal.db
 order-journal.db-wal
 order-journal.db-shm
 order-journal.test.db*
+# 단일 인스턴스 락(런타임)
+.server.lock
+# 개인키·환경파일 (방어적 — 현재 추적 파일 없음)
+*.pem
+.env
+.env.*
 
 # Node
 node_modules/
