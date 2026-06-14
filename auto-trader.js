@@ -640,10 +640,12 @@ class AutoTrader {
           const prevHeld = this._lastHeld || {};
           const holdEmpty = Object.keys(holdMap).length === 0;
           // ★ rt_cd=0인데 output1이 비거나 누락된 "일시적 빈 잔고"가 봇 지분을 통째로 지우는 사고 방지:
-          //   직전엔 보유가 있었는데 갑자기 0이고 봇 포지션이 남아 있으면 한 틱 대조 보류(직전 잔고 유지)하고 재확인.
-          if (holdEmpty && Object.keys(prevHeld).length > 0 && Object.keys(bot).length > 0 && (this._emptyBalanceStreak||0) < 1) {
+          //   직전엔 보유가 있었는데 갑자기 0이고 봇 포지션이 남아 있으면 잔고 대조 보류(직전 잔고 유지)하고 재확인.
+          //   KIS는 정산/일시 구간에 rt_cd=0 + 빈 output1을 2회 이상 줄 수 있어(M-C) 유예를 2틱으로 둔다
+          //   → 3회 연속 빈 응답일 때만 청산 확정. (단발/2연속 블립에 전 포지션 무관리화 방지)
+          if (holdEmpty && Object.keys(prevHeld).length > 0 && Object.keys(bot).length > 0 && (this._emptyBalanceStreak||0) < 2) {
             this._emptyBalanceStreak = (this._emptyBalanceStreak||0) + 1;
-            this.log('error', '⚠️ 빈 잔고 응답(일시 의심) — 이번 틱 잔고 대조 보류, 직전 잔고 유지');
+            this.log('error', `⚠️ 빈 잔고 응답(일시 의심, ${this._emptyBalanceStreak}/2회 유예) — 이번 틱 잔고 대조 보류, 직전 잔고 유지`);
           } else {
             this._emptyBalanceStreak = holdEmpty ? (this._emptyBalanceStreak||0) + 1 : 0;
             this._lastHeld = heldPositions;
@@ -676,9 +678,10 @@ class AutoTrader {
                     const cost = (sellPx + basis) * soldByBot * COST_RATE;
                     const realized = (sellPx - basis) * soldByBot - cost;
                     this.state.dailyRealizedPnl += realized;
-                    if (realized < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
-                    else if (realized > 0) this.state.consecLosses = 0;
-                    this.log('sell', `🧾 체결 확정 ${this.deps.codeToName(c)||c} ${soldByBot}주 (실현손익 ${(realized>=0?'+':'')+Math.round(realized).toLocaleString()}원, 연속손실 ${this.state.consecLosses||0})`, { code:c, soldQty:soldByBot, realized });
+                    // 연속손실은 청크마다가 아니라 포지션 완전 종료 시 1회만 판정한다(M-A) →
+                    // 부분체결이 여러 틱/청크로 쪼개져도 한 매매가 연속손실로 중복 집계되지 않게 누적만.
+                    bot[c]._realizedAcc = (bot[c]._realizedAcc || 0) + realized;
+                    this.log('sell', `🧾 체결 확정 ${this.deps.codeToName(c)||c} ${soldByBot}주 (실현손익 ${(realized>=0?'+':'')+Math.round(realized).toLocaleString()}원)`, { code:c, soldQty:soldByBot, realized });
                   }
                   bot[c]._sellPending = (bot[c]._sellPending || 0) - soldByBot;
                 }
@@ -690,7 +693,15 @@ class AutoTrader {
                 //   미체결 매도가 없고(취소·전량체결) 6분 지난 잔여 _sellPending(지정가 미체결 취소분)만 정리.
                 bot[c]._sellPending = 0;
               }
-              if ((bot[c].qty || 0) <= 0 && (pending[c]?.buyQty || 0) <= 0) delete bot[c];
+              if ((bot[c].qty || 0) <= 0 && (pending[c]?.buyQty || 0) <= 0) {
+                // 포지션 완전 종료 — 누적 실현손익 부호로 연속손실 1회만 갱신(M-A)
+                const acc = bot[c]._realizedAcc;
+                if (acc !== undefined && acc !== 0) {
+                  if (acc < 0) this.state.consecLosses = (this.state.consecLosses || 0) + 1;
+                  else this.state.consecLosses = 0;
+                }
+                delete bot[c];
+              }
             }
             this.save();
           }
@@ -850,7 +861,11 @@ class AutoTrader {
           const sellable = this._sellableQty(code, held.qty, s); // ★ 수동 보유 보호
           if (sellable < 1) continue;
           if (nowMin() <= manageCutoffMin()) {
-            await this.sell(cfg, code, sellable, held.curPrice, signal.reason, held);
+            // 실시간 현재가로 지정가 청산 — 묵은 잔고가(held.curPrice, 최대 5분 전)로 내면
+            // 하락장에서 미체결로 손실 보유가 길어진다(M-B). 손절 경로처럼 라이브가 우선.
+            let sx = held.curPrice || 0;
+            try { const live = await this.deps.getCurrentPrice(cfg, code); if (live > 0) sx = live; } catch (_) {}
+            if (sx > 0) await this.sell(cfg, code, sellable, sx, signal.reason, held);
           }
         } else if (!signal && s.safety.intradayRebound && !buyingHalted) {
           // ── 장중 반등 모멘텀(분봉) — 일봉 신호가 전혀 없을 때만(SELL 신호 종목을 같은 틱에 사는 구멍 차단). ──

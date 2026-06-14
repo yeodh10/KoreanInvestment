@@ -322,7 +322,7 @@ function mkTrader(deps) {
   ok('연속손실 +1 반영', t.state.consecLosses === 1);
   ok('체결 확정 후 봇 지분 제거', !t.state.botPositions['005930']);
 
-  // 15-2) 빈 잔고 일시 유예 — 직전 보유가 있었는데 갑자기 빈 응답이면 한 틱 보류, 연속이면 청산 확정
+  // 15-2) 빈 잔고 일시 유예(M-C) — 직전 보유가 있었는데 빈 응답이면 2틱 보류, 3회 연속이면 청산 확정
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
   t.state.botPositions = { '005930': { qty:10, entry:60000, stop:50000, target:200000, atr:1000, initRisk:1000, hw:70000 } };
@@ -331,7 +331,9 @@ function mkTrader(deps) {
   t.tickCount = 0; await t.tick();
   ok('빈 잔고 1회 — 봇 지분 보존(유예)', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
   t.tickCount = 0; await t.tick();
-  ok('빈 잔고 연속 — 청산 확정(봇 지분 제거)', !t.state.botPositions['005930']);
+  ok('빈 잔고 2회 — 봇 지분 보존(유예)', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
+  t.tickCount = 0; await t.tick();
+  ok('빈 잔고 3회 연속 — 청산 확정(봇 지분 제거)', !t.state.botPositions['005930']);
 
   // 14) 부분체결: 미체결 매수 잔량이 있으면 봇 지분을 매도로 오삭감하지 않음
   orders.length = 0;
