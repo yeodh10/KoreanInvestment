@@ -869,6 +869,15 @@ function authGuardOf(req) {
   const ip = clientIp(req);
   return _authGuard[ip] || (_authGuard[ip] = { fails: 0, lockUntil: 0, regs: 0, regDay: '' });
 }
+// IP별 엔트리가 무한 증식하지 않도록 10분마다 청소 — 잠금 해제됐고 실패·가입 카운트가 0인(=의미있는 상태 없음) 엔트리만 제거.
+// 잠금 중(lockUntil>now)이거나 fails>0, regs>0 인 엔트리는 절대 삭제하지 않음(방어 상태 보존).
+setInterval(() => {
+  const now = Date.now();
+  for (const ip in _authGuard) {
+    const g = _authGuard[ip];
+    if (g.lockUntil < now && (g.fails || 0) === 0 && (g.regs || 0) === 0) delete _authGuard[ip];
+  }
+}, 10 * 60 * 1000).unref();
 
 // ── JSON 응답 ──
 function jsonRes(res, status, data) {
@@ -1286,7 +1295,7 @@ async function refreshMarket(cfg, priority = 'low') {
     } catch (e) {}
     // KIS 환율(FX@KRW)은 VTS/실전 모두 자주 미지원 → 공개 API 폴백 (open.er-api.com, 1시간 캐시)
     if (!results.USDKRW) {
-      try { const rate = await fb.fetchUsdKrw(); if (rate) results.USDKRW = { rate }; } catch (e) {}
+      try { const rate = await fb.fetchUsdKrw(); if (rate) results.USDKRW = fb.fetchUsdKrw.stale ? { rate, asOf: fb.fetchUsdKrw.asOf, stale: true } : { rate }; } catch (e) {}
     }
     const prevMkt = global._marketCache.data || fb.get('market'); // 서버 재시작 후에도 마지막 값 복원
     if (prevMkt) {
@@ -1741,6 +1750,7 @@ async function handleRequest(req, res, session) {
       if (!isAdminSession(session)) { jsonRes(res, 403, { ok: false, message: '관리자 전용' }); return; }
       const b = await parseBody(req);
       if (!b.path || !b.trId) { jsonRes(res, 400, { ok: false, message: 'path/trId 필요' }); return; }
+      if (!/^\/uapi\//.test(b.path) || /(\.\.|\/\/|@|\\|`)/.test(b.path)) { jsonRes(res, 400, { ok: false, message: '허용되지 않은 경로' }); return; }
       const r = await kisProxy(cfg, b.path, b.trId, b.params || {}, 'high');
       jsonRes(res, 200, { ok: true, data: r.body });
       return;
@@ -1773,7 +1783,7 @@ async function handleRequest(req, res, session) {
     // 캐시값이 있으면 만료 여부와 무관하게 즉시 반환하고, 만료된 종목만 백그라운드(low)로 갱신.
     // 캐시가 전혀 없는 종목만 동기(high)로 채운다 → 첫 화면 외에는 항상 0ms 체감.
     if (pathname === '/api/prices') {
-      const codes = (query.codes || '').split(',').filter(Boolean).slice(0, 30);
+      const codes = (query.codes || '').split(',').filter(c => /^[0-9A-Z]{6}$/.test(c)).slice(0, 30);
       if (!global._priceCache) global._priceCache = {};
       const now = Date.now();
       const hasKey = !!(cfg.appKey && cfg.appSecret);
@@ -1814,10 +1824,12 @@ async function handleRequest(req, res, session) {
 
     // GET /api/price?code=005930 — 현재가 조회
     if (pathname === '/api/price') {
+      const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       const trId = cfg.txMode === 'vts' ? 'FHKST01010100' : 'FHKST01010100';
       const result = await kisProxy(cfg, '/uapi/domestic-stock/v1/quotations/inquire-price', trId, {
         FID_COND_MRKT_DIV_CODE: 'J',
-        FID_INPUT_ISCD: query.code || '005930'
+        FID_INPUT_ISCD: code
       });
       jsonRes(res, 200, { ok: true, data: result.body });
       return;
@@ -1827,6 +1839,7 @@ async function handleRequest(req, res, session) {
     if (pathname === '/api/chart') {
       let period = (query.period || 'D').toUpperCase();
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       const market = query.market || 'J';
       const years = Math.min(30, Math.max(1, parseInt(query.years || '1')));
 
@@ -1956,6 +1969,7 @@ async function handleRequest(req, res, session) {
     // 과거 → 하루치 OHLCV를 장중 균등 분할해 분봉처럼 렌더링
     if (pathname === '/api/minchart') {
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       const unit = Math.max(1, Math.min(60, parseInt(query.unit) || 5)); // 1~60 범위 강제 — unit=0 무한루프 차단
       const days = Math.min(90, Math.max(1, parseInt(query.days) || 30)); // 최대 90일
       const market = query.market || 'J';
@@ -2145,6 +2159,7 @@ async function handleRequest(req, res, session) {
     // GET /api/stockinfo?code=005930 — 종목 기본 정보 (SWR: 캐시 즉시 + 백그라운드 갱신)
     if (pathname === '/api/stockinfo') {
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       if (!global._stockinfoCache) global._stockinfoCache = {};
       const siHasKey = !!(cfg.appKey && cfg.appSecret);
       const c = global._stockinfoCache[code];
@@ -2175,6 +2190,7 @@ async function handleRequest(req, res, session) {
     // GET /api/orderbook?code=005930 — 호가창 (SWR: 캐시 즉시 + 백그라운드 갱신, 빈 호가 폴백)
     if (pathname === '/api/orderbook') {
       const obc = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(obc)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       if (!global._obCache) global._obCache = {};
       // 무키 유저 — 실시간 10호가 depth는 KIS 전용. 현재가 기준 합성호가("합성" 라벨)로 채운다.
       if (!cfg.appKey || !cfg.appSecret) {
@@ -2408,6 +2424,7 @@ async function handleRequest(req, res, session) {
     // GET /api/tick?code=005930 — 당일 체결 내역 (SWR: 캐시 즉시 + 백그라운드 갱신)
     if (pathname === '/api/tick') {
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       if (!global._tickCache) global._tickCache = {};
       const c = global._tickCache[code];
       if (c) {
@@ -2446,6 +2463,7 @@ async function handleRequest(req, res, session) {
     // GET /api/news?code=005930 — 종목 뉴스 (SWR 캐시: 즉시 응답 + 5분 경과 시 백그라운드 갱신)
     if (pathname === '/api/news') {
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       const fallbackUrl = `https://finance.naver.com/item/news.naver?code=${code}`;
       if (!global._newsCache) global._newsCache = {};
       if (!global._newsRefreshing) global._newsRefreshing = {};
@@ -2472,6 +2490,7 @@ async function handleRequest(req, res, session) {
     // GET /api/investor?code=005930 — 외국인·기관 수급 (SWR 캐시 5분: 즉시 응답 + 백그라운드 갱신)
     if (pathname === '/api/investor') {
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       if (!global._invCache) global._invCache = {};
       if (!global._invRefreshing) global._invRefreshing = {};
       const fetchInvestor = async () => {
@@ -2510,6 +2529,7 @@ async function handleRequest(req, res, session) {
     // GET /api/financial?code=005930 — 재무 정보
     if (pathname === '/api/financial') {
       const code = query.code || '005930';
+      if (!/^[0-9A-Z]{6}$/.test(code)) { jsonRes(res, 400, { ok: false, message: '잘못된 종목코드' }); return; }
       const r = await withRetry(() =>
         kisProxy(cfg, '/uapi/domestic-stock/v1/finance/income-statement', 'FHKST66430200', {
           FID_DIV_CLS_CODE: '1', fid_cond_mrkt_div_code: 'J', fid_input_iscd: code

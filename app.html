@@ -2369,7 +2369,7 @@ function renderDashWatchlist() {
   }
   el.innerHTML = watchCodes.map(raw => {
     const code = esc(raw), name = esc(nameOf(raw));
-    return `<div class="watch-item" onclick="loadStock('${code}')">
+    return `<div class="watch-item" onclick="loadStock('${jsArg(raw)}')">
       <div>
         <div class="wname">${name}</div>
         <div class="wcode">${code}</div>
@@ -2608,7 +2608,7 @@ async function loadPortfolio() {
     const plRt=parseFloat(p.evlu_pfls_rt||0), u=pl>=0, w=((ev/evalSum)*100).toFixed(1);
     const cls = pl>0?'up':pl<0?'dn':'flat'; // 손익 0 = 흰색
     return `<tr>
-      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}${holderBadge(p.pdno)}</td>
+      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${jsArg(p.pdno)}')">${name}${holderBadge(p.pdno)}</td>
       <td class="mono" style="color:var(--text-3)">${code}</td>
       <td class="mono">${qty}</td>
       <td class="mono">₩${avg.toLocaleString()}</td>
@@ -2644,7 +2644,7 @@ function updateMiniPortfolio(data, total, pnl, cash, rate, up) {
     const name = esc(p.prdt_name || nameOf(p.pdno));
     const plRt = parseFloat(p.evlu_pfls_rt || 0);
     const u = plRt >= 0;
-    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-top:1px solid var(--border);cursor:pointer" onclick="loadStock('${p.pdno}')">
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-top:1px solid var(--border);cursor:pointer" onclick="loadStock('${jsArg(p.pdno)}')">
       <span style="font-size:11px;font-weight:600;color:var(--text-1)">${name}</span>
       <span style="font-size:11px;font-family:var(--mono)" class="${u?'up':'dn'}">${u?'+':''}${plRt.toFixed(1)}%</span>
     </div>`;
@@ -2799,7 +2799,7 @@ async function refreshOrders() {
     const time = (o.ord_tmd || '').replace(/(\d{2})(\d{2})(\d{2})/, '$1:$2:$3');
     return `<tr>
       <td class="mono" style="font-size:10px">${time}</td>
-      <td style="cursor:pointer;font-weight:600" onclick="loadStock('${code}')">${name}</td>
+      <td style="cursor:pointer;font-weight:600" onclick="loadStock('${jsArg(o.pdno||'')}')">${name}</td>
       <td>${side}</td>
       <td style="font-size:10px;color:var(--text-3)">${typeName}</td>
       <td class="mono">₩${oprc.toLocaleString()}</td>
@@ -2824,7 +2824,7 @@ function onTradingSearch() {
   const m = searchStocks(q);
   if (!m.length) { dd.style.display='none'; return; }
   dd.innerHTML = m.slice(0,10).map(s =>
-    `<div class="item" onclick="setTradingStock('${esc(s.code)}','${esc(s.name)}')">
+    `<div class="item" onclick="setTradingStock('${jsArg(s.code)}','${jsArg(s.name)}')">
       <span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span>
     </div>`
   ).join('');
@@ -3591,7 +3591,7 @@ async function loadDashVolTop() {
     const code = esc(raw), name = esc(d.hts_kor_isnm||nameOf(raw));
     const price = parseInt(d.stck_prpr||0), chg = parseFloat(d.prdy_ctrt||0), up = chg>=0;
     const flat = Math.abs(chg)<0.005; const cls = flat?'flat':(up?'up':'dn'); // 0.00% 보합 → 흰색
-    return `<div class="watch-item" onclick="loadStock('${code}')" style="padding:7px 10px">
+    return `<div class="watch-item" onclick="loadStock('${jsArg(raw)}')" style="padding:7px 10px">
       <div style="display:flex;align-items:center;gap:7px;min-width:0">
         <span class="mono" style="font-size:10px;color:var(--text-3);width:16px;flex-shrink:0">${i+1}</span>
         <div class="wname" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</div>
@@ -3627,7 +3627,7 @@ async function refreshDashHoldings(accountData) {
     const plRt = parseFloat(p.evlu_pfls_rt||0);
     const cur = parseInt(p.prpr||0);
     const u = plRt >= 0;
-    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer" onclick="loadStock('${esc(p.pdno)}')">
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer" onclick="loadStock('${jsArg(p.pdno)}')">
       <div style="min-width:0;margin-right:8px">
         <div style="font-size:12px;font-weight:600;color:var(--text-0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${name}${holderBadge(p.pdno)}</div>
         <div style="font-size:10px;color:var(--text-3);font-family:var(--mono)">${qty}주 · <span id="dh-${esc(p.pdno)}-cur">₩${cur.toLocaleString()}</span></div>
@@ -3795,12 +3795,12 @@ function renderMktTop(){
     const flat=Math.abs(chgPct)<0.005, cls=flat?'flat':(chgPct>0?'up':'dn');
     return `<tr>
       <td class="mono" style="color:var(--text-3)">${i+1}</td>
-      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}</td>
+      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${jsArg(raw)}')">${name}</td>
       <td class="mono ${cls}">₩${price.toLocaleString()}</td>
       <td class="mono ${cls}">${flat?'':(chgPct>0?'+':'')}${chgPct.toFixed(2)}%</td>
       <td class="mono">${fmtVol(parseInt(d.acml_vol||0))}</td>
       <td class="mono">${fmtAmt(parseInt(d.acml_tr_pbmn||0))}</td>
-      <td><button class="panel-btn" onclick="loadStock('${code}')">차트</button></td>
+      <td><button class="panel-btn" onclick="loadStock('${jsArg(raw)}')">차트</button></td>
     </tr>`;
   }).join('');
 }
@@ -3876,13 +3876,13 @@ function renderStocksList() {
     const inWatch = watchCodes.includes(raw);
     return `<tr>
       <td class="mono" style="color:var(--text-3)">${i+1}</td>
-      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}<span style="color:var(--text-3);font-size:10px;margin-left:4px">${code}</span></td>
+      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${jsArg(raw)}')">${name}<span style="color:var(--text-3);font-size:10px;margin-left:4px">${code}</span></td>
       <td class="mono ${cls}">₩${price.toLocaleString()}</td>
       <td class="mono ${cls}">${flat?'':(up?'+':'')}${chg.toFixed(2)}%</td>
       <td class="mono">${fmtVol(parseInt(d.acml_vol||0))}</td>
       <td class="mono">${fmtAmt(parseInt(d.acml_tr_pbmn||0))}</td>
-      <td><button class="panel-btn" onclick="toggleWatchFromList('${code}',this)" style="color:${inWatch?'var(--amber)':'var(--text-3)'}">${inWatch?'★':'☆'}</button></td>
-      <td><button class="panel-btn" onclick="loadStock('${code}')">차트</button></td>
+      <td><button class="panel-btn" onclick="toggleWatchFromList('${jsArg(raw)}',this)" style="color:${inWatch?'var(--amber)':'var(--text-3)'}">${inWatch?'★':'☆'}</button></td>
+      <td><button class="panel-btn" onclick="loadStock('${jsArg(raw)}')">차트</button></td>
     </tr>`;
   }).join('');
 }
@@ -3919,13 +3919,13 @@ async function loadVol100() {
     const price=parseInt(d.stck_prpr||0), chgPct=parseFloat(d.prdy_ctrt||0), up=chgPct>=0;
     return `<tr>
       <td class="mono" style="color:var(--text-3)">${i+1}</td>
-      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${code}')">${name}</td>
+      <td style="font-weight:600;cursor:pointer" onclick="loadStock('${jsArg(raw)}')">${name}</td>
       <td class="mono" style="color:var(--text-3)">${code}</td>
       <td class="mono ${up?'up':'dn'}">₩${price.toLocaleString()}</td>
       <td class="mono ${up?'up':'dn'}">${up?'+':''}${chgPct}%</td>
       <td class="mono">${fmtVol(parseInt(d.acml_vol||0))}</td>
       <td class="mono">${fmtAmt(parseInt(d.acml_tr_pbmn||0))}</td>
-      <td><button class="panel-btn" onclick="loadStock('${code}')">차트</button></td>
+      <td><button class="panel-btn" onclick="loadStock('${jsArg(raw)}')">차트</button></td>
     </tr>`;
   }).join('');
 }
@@ -3948,7 +3948,7 @@ function onWlSearch() {
   const m=searchStocks(q);
   if(!m.length){dd.style.display='none';return;}
   dd.innerHTML=m.slice(0,8).map(s=>
-    `<div class="item" onclick="addToWatchlist('${esc(s.code)}')"><span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span></div>`
+    `<div class="item" onclick="addToWatchlist('${jsArg(s.code)}')"><span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span></div>`
   ).join('');
   dd.style.display='block';
 }
@@ -3978,7 +3978,7 @@ async function renderWatchlistPage() {
     if(Array.isArray(raw)){ for(const it of raw) if(it&&it.code) map[it.code]=it; } else map=raw||{};
   }
   const rows = watchCodes.map(code => {
-    let row=`<tr><td style="font-weight:600;cursor:pointer" onclick="loadStock('${esc(code)}')">${esc(nameOf(code))}</td><td class="mono" style="color:var(--text-3)">${esc(code)}</td>`;
+    let row=`<tr><td style="font-weight:600;cursor:pointer" onclick="loadStock('${jsArg(code)}')">${esc(nameOf(code))}</td><td class="mono" style="color:var(--text-3)">${esc(code)}</td>`;
     const d = map[code];
     if(proxyOnline && d){
       const price=Number(d.price)||Number(d.prev)||0, chg=Number(d.chgPct)||0;
@@ -3987,8 +3987,8 @@ async function renderWatchlistPage() {
             <td class="mono ${cls}">${flat?'':(chg>0?'+':'')}${chg.toFixed(2)}%</td>
             <td class="mono">${fmtVol(Number(d.accVol)||0)}</td>`;
     } else { row+='<td>—</td><td>—</td><td>—</td>'; }
-    row+=`<td><button class="panel-btn" onclick="loadStock('${esc(code)}')">차트</button></td>
-          <td><button class="panel-btn" onclick="removeFromWatchlist('${esc(code)}')" style="color:var(--red)">삭제</button></td></tr>`;
+    row+=`<td><button class="panel-btn" onclick="loadStock('${jsArg(code)}')">차트</button></td>
+          <td><button class="panel-btn" onclick="removeFromWatchlist('${jsArg(code)}')" style="color:var(--red)">삭제</button></td></tr>`;
     return row;
   });
   tbody.innerHTML=rows.join('');
@@ -4027,7 +4027,7 @@ async function loadHistory() {
     const date=(o.ord_dt||'').replace(/(\d{4})(\d{2})(\d{2})/,'$1-$2-$3');
     return `<tr>
       <td class="mono" style="font-size:10px">${date}</td>
-      <td style="cursor:pointer" onclick="loadStock('${code}')">${name}${srcBadge}</td>
+      <td style="cursor:pointer" onclick="loadStock('${jsArg(o.pdno||'')}')">${name}${srcBadge}</td>
       <td>${side}</td>
       <td class="mono">${o.ord_dvsn_name||'지정가'}</td>
       <td class="mono">${oprc>0?'₩'+oprc.toLocaleString():(isMkt?'시장가':'—')}</td>
@@ -4046,11 +4046,13 @@ async function loadHistory() {
 function exportHistCSV() {
   if (!_histRows.length) { showToast('먼저 기간을 선택해 조회해주세요', 'err'); return; }
   const head = ['날짜','시간','종목','코드','구분','유형','주문가','수량','체결수량','상태'];
+  // CSV 수식 인젝션 방어: =,+,-,@,탭,CR로 시작하는 셀은 엑셀/시트가 수식으로 실행 → 앞에 ' 부착
+  const csvCell = v => { const s = String(v ?? ''); return /^[=+\-@\t\r]/.test(s) ? "'" + s : s; };
   const lines = [head.join(',')].concat(_histRows.map(o => {
     const filled = parseInt(o.tot_ccld_qty||0), qty = parseInt(o.ord_qty||0);
     const status = o._status || (o.cncl_yn==='Y' ? '취소' : filled>=qty ? '체결' : '미체결');
-    return [o.ord_dt||'', o.ord_tmd||'', (o.prdt_name||'').replace(/,/g,' '), o.pdno||'',
-      o.sll_buy_dvsn_cd==='02'?'매수':'매도', o.ord_dvsn_name||'', o.ord_unpr||0, qty, filled, status].join(',');
+    return [o.ord_dt||'', o.ord_tmd||'', csvCell((o.prdt_name||'').replace(/,/g,' ')), csvCell(o.pdno||''),
+      o.sll_buy_dvsn_cd==='02'?'매수':'매도', csvCell(o.ord_dvsn_name||''), o.ord_unpr||0, qty, filled, status].join(',');
   }));
   const blob = new Blob(['﻿'+lines.join('\n')], {type:'text/csv;charset=utf-8'}); // BOM — 엑셀 한글 호환
   const a = document.createElement('a');
@@ -4209,7 +4211,7 @@ function onWatchSearch(){
   if(!q){dd.style.display='none';return;}
   const m=searchStocks(q);
   if(!m.length){dd.style.display='none';return;}
-  dd.innerHTML=m.slice(0,8).map(s=>`<div class="item" onclick="addWatch('${esc(s.code)}')"><span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span></div>`).join('');
+  dd.innerHTML=m.slice(0,8).map(s=>`<div class="item" onclick="addWatch('${jsArg(s.code)}')"><span class="name">${esc(s.name)}</span><span class="code">${esc(s.code)}</span></div>`).join('');
   dd.style.display='block';
 }
 function addWatch(c){if(!autoWatchList.includes(c))autoWatchList.push(c);$('watchAddInput').value='';$('watchSearchDd').style.display='none';renderWatchChips();}

@@ -368,6 +368,14 @@ function isMarketOpen() {
   const h = marketHours(k.dateKey);              // 단축장(늦장개장) 반영 — 개장 전 헛주문 방지
   return k.min >= h.open && k.min <= h.close;
 }
+// 주말 외 KRX 휴장일 판정 — 외부 점검 스크립트(market-check.js)가 휴장일 거짓경보를
+// 막기 위해 재사용. 인자는 Date(KST 변환 전 UTC ms 기준) 또는 'YYYY-MM-DD' 문자열.
+function isHoliday(date) {
+  let dateKey;
+  if (typeof date === 'string') dateKey = date.slice(0, 10);
+  else { const d = date ? new Date(date) : new Date(); dateKey = new Date(d.getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10); }
+  return KRX_HOLIDAYS.has(dateKey);
+}
 // 오늘 세션 기준 시각(분) — 단축장 대응. 정규장에선 open=540(09:00)/close=930(15:30)로 기존과 동일.
 function sessionOpenMin()  { return marketHours(kstParts().dateKey).open; }
 // 매도/포지션 관리 종료 = 마감 10분 전(동시호가 직전). 정규장 15:20, 수능 등 단축장은 16:20 자동.
@@ -1055,4 +1063,4 @@ class AutoTrader {
   }
 }
 
-module.exports = { AutoTrader, getLogs, decideSignal, decideIntradayRebound, calcRSI, calcATR, sma, RISK_PRESETS };
+module.exports = { AutoTrader, getLogs, decideSignal, decideIntradayRebound, calcRSI, calcATR, sma, RISK_PRESETS, isMarketOpen, isHoliday };

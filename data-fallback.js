@@ -60,19 +60,30 @@ function _httpsGetJson(hostname, p) {
 let _fxFetcher = null; // 테스트 주입용
 function _setFxFetcher(f) { _fxFetcher = f; }
 
+// 신선도 메타데이터(asOf/stale) — 반환값은 기존대로 숫자(스칼라)를 유지하되,
+// 호가 경로(asOf 부착)와 동일한 신선도 라벨을 위해 마지막 호출 결과의 시각·정지여부를
+// 함수 속성으로 노출한다. (proxy-server 시장 패널이 이를 읽어 stale 표시)
 async function fetchUsdKrw() {
   const e = getEntry('fx:USDKRW');
-  if (e && Date.now() - e.t < 3600000) return e.v; // 1시간 캐시
+  if (e && Date.now() - e.t < 3600000) { // 1시간 캐시 — 신선
+    fetchUsdKrw.asOf = e.t; fetchUsdKrw.stale = false;
+    return e.v;
+  }
   try {
     const j = _fxFetcher ? await _fxFetcher() : await _httpsGetJson('open.er-api.com', '/v6/latest/USD');
     const rate = parseFloat(j?.rates?.KRW || 0);
     if (rate > 0) {
       const v = Math.round(rate * 10) / 10;
       save('fx:USDKRW', v);
+      fetchUsdKrw.asOf = Date.now(); fetchUsdKrw.stale = false;
       return v;
     }
   } catch (err) {}
-  return e ? e.v : null; // 갱신 실패 시 만료된 마지막 값이라도
+  // 갱신 실패 → 만료된 마지막 값 폴백. 신선도 신호(asOf=캐시 저장시각, stale=true)를 부착해
+  // 며칠 묵은 환율이 실시간처럼 보이지 않게 한다(호가 path의 asOf와 일관).
+  if (e) { fetchUsdKrw.asOf = e.t; fetchUsdKrw.stale = true; return e.v; }
+  fetchUsdKrw.asOf = null; fetchUsdKrw.stale = true;
+  return null;
 }
 
 // ── KRX 호가단위 (2023~ 기준) ──
