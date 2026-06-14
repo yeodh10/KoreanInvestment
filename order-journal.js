@@ -106,11 +106,12 @@ function add(e) {
   if (orderType === '01') { // 시장가 → 즉시 체결 확정
     _insFilled.run(t, e.userId ?? null, e.side ?? null, e.code ?? null, qty, price,
                    orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore, qty, price || null, t, source);
-    return { t, status: '체결', ...e, qty, price, qtyBefore, fillQty: qty };
+    // ...e 를 먼저 펼치고 확정 필드를 뒤에 둬, 호출부가 status 등을 넘겨도 권위값이 덮이지 않게.
+    return { t, ...e, status: '체결', qty, price, qtyBefore, fillQty: qty };
   }
   _ins.run(t, e.userId ?? null, e.side ?? null, e.code ?? null, qty, price,
            orderType, e.odno ?? null, e.orgNo ?? null, qtyBefore, source);
-  return { t, status: '접수', ...e, qty, price, qtyBefore };
+  return { t, ...e, status: '접수', qty, price, qtyBefore };
 }
 
 // ── 체결통보 기반 체결 처리 (실제 체결가·수량, 부분체결 누적) ──
@@ -140,10 +141,11 @@ function findOrderOwner(odno) {
 function markFilled(odno, qty, price, userId) {
   const e = _findFillByOdno(odno, userId);
   if (!e) return false;
-  const q = parseInt(qty) || 0;
+  const q = parseInt(qty, 10) || 0;
   let fillQty = (e.fillQty || 0) + q;            // 부분체결 누적 합산
-  const fillPrice = price ? parseInt(price) : (e.fillPrice ?? null);
-  const newPrice = price ? parseInt(price) : e.price;
+  const fillPrice = price ? parseInt(price, 10) : (e.fillPrice ?? null);
+  // 지정가 주문은 주문가(limit)를 보존한다. 시장가(주문가 0)만 체결가로 채워 거래내역 ₩0 표시 보정.
+  const newPrice = (e.price > 0) ? e.price : (price ? parseInt(price, 10) : e.price);
   let status;
   if (!q || fillQty >= e.qty) {                  // 수량 미상(구버전) 또는 전량 도달 = 체결 확정
     status = '체결';
@@ -245,6 +247,8 @@ const _selRangeAll = db.prepare(
 const _selRangeUser = db.prepare(
   `SELECT * FROM orders WHERE t >= ? AND t < ? AND userId = ? ORDER BY t DESC, id DESC`);
 function listRange(userId, fromYmd, toYmd) {
+  // 잘못된 날짜는 NaN 경계 → "주문 없음"으로 오인될 수 있어 명확히 빈 결과 반환
+  if (!/^\d{8}$/.test(String(fromYmd)) || !/^\d{8}$/.test(String(toYmd))) return [];
   const s = _ymdToKstStart(fromYmd);
   const e = _ymdToKstStart(toYmd) + 86400000; // to 당일 끝까지 포함
   return userId ? _selRangeUser.all(s, e, userId) : _selRangeAll.all(s, e);

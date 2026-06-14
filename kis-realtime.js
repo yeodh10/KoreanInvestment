@@ -402,8 +402,16 @@ class KisFeed {
     const m = parseKisMessage(text);
     if (m.type === 'pingpong') { this.ws.sendText(m.raw); return; } // 동일 페이로드 에코
     if (m.type === 'control') {
-      // 암호화 TR(체결통보) 구독 응답에 AES key/iv가 담겨 옴 — 보관
-      if (m.output && m.output.key && m.output.iv && m.trId) this.aes[m.trId] = { key: m.output.key, iv: m.output.iv };
+      // 암호화 TR(체결통보) 구독 응답에 AES key/iv가 담겨 옴 — 보관(길이 검증)
+      // AES-256-CBC는 key 32바이트·iv 16바이트여야 한다. 손상된 제어 프레임의 잘못된 길이 키를
+      // 그대로 보관하면 이후 모든 체결통보 복호화가 조용히 실패(체결 미확정)한다.
+      if (m.output && m.output.key && m.output.iv && m.trId) {
+        if (Buffer.byteLength(m.output.key, 'utf8') === 32 && Buffer.byteLength(m.output.iv, 'utf8') === 16) {
+          this.aes[m.trId] = { key: m.output.key, iv: m.output.iv };
+        } else {
+          this.log(`⚠️ 체결통보 키/IV 길이 오류 (key ${Buffer.byteLength(m.output.key, 'utf8')}, iv ${Buffer.byteLength(m.output.iv, 'utf8')}) — 무시`);
+        }
+      }
       if (m.rtCd && m.rtCd !== '0' && !/ALREADY/i.test(m.msg || ''))
         this.log(`⚠️ 구독 응답: ${m.msg || m.raw.slice(0, 120)}`);
       return;
@@ -425,7 +433,13 @@ class KisFeed {
           const b = i * stride;
           const odno = f[b + 2];
           if (!odno) continue;
-          const ev = { odno, code: f[b + 8], qty: parseInt(f[b + 9] || 0), price: parseInt(f[b + 10] || 0), filled: f[b + 13] === '2' };
+          const qty = parseInt(f[b + 9] || 0, 10);
+          const price = parseInt(f[b + 10] || 0, 10);
+          const filled = f[b + 13] === '2';
+          // 스트라이드 오정렬·손상 시 필드가 어긋날 수 있다. '체결'로 표시된 건 qty>0·price>0
+          //   일 때만 신뢰해 확정(markFilled)으로 보낸다 — 잘못된 수량/가격 확정 방지.
+          if (filled && (!(qty > 0) || !(price > 0))) continue;
+          const ev = { odno, code: f[b + 8], qty, price, filled };
           for (const fn of this.execHooks.values()) try { fn(ev); } catch (_) {}
         }
       } catch (e) { this.log('⚠️ 체결통보 복호화 실패: ' + e.message); }

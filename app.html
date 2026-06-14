@@ -766,7 +766,7 @@ td.mono,th.mono{font-family:var(--mono)}
         <span style="font-size:18px;font-weight:700;font-family:var(--mono)" id="tradingPrice">—</span>
         <span style="font-size:12px;font-family:var(--mono)" id="tradingPriceChg">—</span>
       </div>
-      <span style="margin-left:auto;font-size:11px;padding:3px 10px;border-radius:12px;background:var(--blue-dim);color:var(--blue)" id="tradingMode">모의투자</span>
+      <span style="margin-left:auto;font-size:11px;padding:3px 10px;border-radius:12px;background:var(--blue-dim);color:var(--blue)" id="tradingMode">확인 중…</span>
     </div>
 
     <!-- 메인 그리드: 호가창 | 중앙(체결/뉴스/주문내역) | 주문폼 -->
@@ -2728,7 +2728,9 @@ function validateOrder(code, qty, price, type) {
   const q = parseInt(qty, 10), p = parseInt(price, 10) || 0;
   if (!/^\d{6}$/.test(String(code || ''))) return { err: '종목코드가 올바르지 않습니다' };
   if (!Number.isInteger(q) || q < 1 || String(qty).includes('.')) return { err: '수량은 1 이상의 정수여야 합니다' };
+  if (q > 1e7) return { err: '수량이 너무 큽니다' }; // 핑거오류(과대 주문) 클라 차단 — 서버가 최종 게이트
   if (p < 0) return { err: '가격이 올바르지 않습니다' };
+  if (p > 1e9) return { err: '가격이 비정상적으로 큽니다' }; // 핑거오류(과대 가격) 클라 차단
   // 지정가('00')·조건부지정가('05')는 가격 필수. 시장가('01')만 가격 없이 허용. ('05'가 빠져 ₩0 주문이 나가던 버그)
   if ((type === '00' || type === '05') && p < 1) return { err: '지정가 주문은 가격을 입력하세요' };
   return { q, p };
@@ -4611,7 +4613,6 @@ async function checkAuth() {
 // ══════════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', async () => {
   applyTheme(localStorage.getItem('theme') === 'light'); // 저장된 테마(라이트/다크) 복원
-  aiLoadHistory();                                        // AI 대화 내용 복원
   // 1) 로그인 체크 + 프록시 연결 확인을 병렬로 (직렬 2왕복 → 1왕복, 원격 RTT 절감)
   const [me] = await Promise.all([checkAuth(), checkProxy()]);
   if (!me) {
@@ -4623,6 +4624,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('app').style.display = 'grid';
   setText('hdrUsername', me.username + (me.role === 'admin' ? ' 👑' : ''));
   CURRENT_USER = me.username; // 이후 유저별 캐시 키(uk)의 스코프
+  aiLoadHistory(); // AI 대화 내용 복원 — uk() 스코프가 필요하므로 CURRENT_USER 설정 이후에 호출
   // 이 유저의 알림(가격 알림·이력)을 유저별 키로 로드 (전역이면 타 유저에게 샌다)
   try { alerts = LS.getObj(uk('priceAlerts')) || []; alertHistory = LS.getObj(uk('alertHistory')) || []; } catch(_) {}
   // 이 유저의 관심종목 — 로컬 캐시로 즉시 그린 뒤, 서버 권위값으로 동기화(기기 간 동일).
