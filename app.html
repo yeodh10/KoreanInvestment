@@ -322,6 +322,9 @@ td.mono,th.mono{font-family:var(--mono)}
 @media (max-width:900px){
   html,body{overflow-x:hidden;overflow-y:auto}  /* 가로 넘침 차단(세로만 스크롤) */
   #app{grid-template-columns:1fr;grid-template-rows:var(--header-h) 1fr auto;min-width:0;max-width:100vw}
+  /* 모바일: .page fadeIn 의 transform 이 position:fixed 컨테이닝블록을 만들어 하단 고정 CTA가
+     스크롤에 밀리던 문제 → 모바일에선 페이지 전환 애니메이션 제거(시각 영향 미미) */
+  .page{animation:none !important}
   /* 하단 탭바: #app 마지막(auto) 행을 차지 → 본문을 가리지 않음. safe-area(홈 인디케이터) 보정 */
   #bottomNav{display:flex;background:var(--bg-1);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom,0);box-shadow:0 -1px 12px rgba(0,0,0,.22);z-index:48}
   /* 헤더 혼잡 완화: 자동매매 토글 줄바꿈 방지·사용자명 텍스트 숨김 */
@@ -353,6 +356,10 @@ td.mono,th.mono{font-family:var(--mono)}
   .trade-grid > *:nth-child(1){order:3}  /* 호가창 → 맨 아래 */
   .trade-grid > *:nth-child(2){order:1}  /* 차트 → 맨 위 */
   .trade-grid > *:nth-child(3){order:2}  /* 주문폼 → 차트 바로 아래(강조) */
+  /* 토스식 하단 고정 주문 CTA — 폼을 스크롤해도 매수/매도 버튼이 항상 보임.
+     #page-trading 비활성 시 조상 display:none 으로 고정 버튼도 함께 사라진다(트레이딩 탭에서만 노출). */
+  #page-trading #orderSubmit{position:fixed;left:10px;right:10px;bottom:calc(58px + env(safe-area-inset-bottom,0));width:auto;margin:0;z-index:55;box-shadow:0 6px 22px rgba(0,0,0,.4)}
+  #page-trading .trade-grid{padding-bottom:88px}  /* 고정 CTA가 마지막 콘텐츠(호가) 가리지 않게 — 스크롤 컨테이너인 grid 에 여백 */
   .page-body{padding:12px}
   #acctSummary{grid-template-columns:repeat(2,1fr) !important}
   /* 토스식: 총 자산 카드를 풀폭 히어로로 — 나머지(예수금/매수가능/매입원금/보유) 2열 */
