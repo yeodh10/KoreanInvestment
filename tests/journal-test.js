@@ -119,6 +119,19 @@ J.add({ userId: 'own1', side: 'buy', code: '666666', qty: 5, price: 100, orderTy
 ok('H1 odno 소유자 = 주문 낸 유저', J.findOrderOwner('OWN') === 'own1');
 ok('H1 없는 odno 소유자 null', J.findOrderOwner('NOPE') === null);
 
+// ── 체결가/수량 타당성 가드 (전수조사 LOW: 스트라이드 오정렬 거대 양수 방어 2차) ──
+// 거대 양수가 단가/수량 슬롯에 얹혀 와도 fillPrice·실현손익이 오염되지 않게 거부 → 잔고대조로 위임.
+J.add({ userId: 'pg', side: 'buy', code: '777777', qty: 10, price: 50000, orderType: '00', odno: 'PG1', orgNo: '1', qtyBefore: 0 });
+ok('가드: 비현실적 체결가(주문가 3배 초과) 거부', J.markFilled('PG1', 1, 999999999, 'pg') === false);
+ok('가드 거부 후 주문은 접수 유지(잔고대조로 위임)', J.todayList('pg').find(e => e.odno === 'PG1').status === '접수');
+ok('가드: 주문수량(10) 초과 통보 거부', J.markFilled('PG1', 9999, 50000, 'pg') === false);
+ok('가드: 정상 범위 체결가/수량은 정상 확정', J.markFilled('PG1', 10, 49950, 'pg') === true);
+const pg = J.todayList('pg').find(e => e.odno === 'PG1');
+ok('정상 확정 시 실제 체결가(49950) 기록', pg.status === '체결' && pg.fillPrice === 49950);
+// 주문가 0(기준 없음 — 시장가/콜드캐시)은 체결가 비교 기준이 없어 가격 검증을 건너뛴다(큰 체결가도 정상 기록).
+J.add({ userId: 'pg', side: 'buy', code: '888888', qty: 1, price: 0, orderType: '00', odno: 'PG2', orgNo: '1', qtyBefore: 0 });
+ok('가드: 주문가 0(기준없음)은 가격검증 제외', J.markFilled('PG2', 1, 700000, 'pg') === true);
+
 [DB, DB + '-wal', DB + '-shm'].forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
 process.exit(fail ? 1 : 0);

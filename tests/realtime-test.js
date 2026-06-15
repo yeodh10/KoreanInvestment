@@ -150,6 +150,26 @@ function startFakeKis(onClientMsg) {
   await sleep(200);
   ok('체결통보 복호화·파싱', !!execGot && execGot.odno === '0000099999' && execGot.code === '035720' && execGot.price === 42000 && execGot.filled === true);
 
+  // ── 스트라이드 오정렬 방어 (전수조사 LOW) ──
+  // count=2 인데 필드 수가 홀수(=정확한 배수 아님)면 Math.floor(f.length/count) 스트라이드가 어긋난다.
+  // 그 경우 누적거래량/타임스탬프 같은 거대 양수가 둘째 레코드의 단가 슬롯(f[b+10])에 얹혀
+  // 999,999,999 같은 비현실적 체결가가 '체결'로 확정되던 케이스. 정렬 불일치 → 첫(정렬 보장)
+  // 레코드만 단일 처리해야 하고, 거대 양수 체결은 절대 전달되면 안 된다.
+  const execAll = [];
+  feed.execHooks.set(client.id, ex => execAll.push(ex));
+  const mis = Array(41).fill('0');                  // 필드 41개(홀수) ÷ count 2 = 비배수
+  mis[2]='0000077777'; mis[8]='005930'; mis[9]='1'; mis[10]='71000'; mis[13]='2'; // 레코드0(정상)
+  // stride=Math.floor(41/2)=20 이면 레코드1은 b=20: 수량=f[29], 단가=f[30], 체결=f[33].
+  // 거대 양수를 그 슬롯에 심어, 구버전(분할 신뢰)이라면 절대단가로 확정되도록 함정을 둔다.
+  mis[22]='0000088888'; mis[28]='005930'; mis[29]='5'; mis[30]='999999999'; mis[33]='2';
+  const ciphM = crypto.createCipheriv('aes-256-cbc', Buffer.from(aesKey), Buffer.from(aesIv));
+  const encM = Buffer.concat([ciphM.update(Buffer.from(mis.join('^'), 'utf8')), ciphM.final()]).toString('base64');
+  fake.sendText('1|H0STCNI9|002|' + encM);          // count=2 선언 + 필드 41개(정렬 불일치)
+  await sleep(200);
+  ok('스트라이드 오정렬 시 단일 레코드만 처리(거대 양수 체결가 미확정)',
+     execAll.length === 1 && execAll[0].odno === '0000077777' && execAll[0].price === 71000
+     && !execAll.some(e => e.price === 999999999 || e.odno === '0000088888'));
+
   // 재연결 + 재구독
   fake.received.length = 0;
   fake.killAll();

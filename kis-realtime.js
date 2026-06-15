@@ -428,8 +428,17 @@ class KisFeed {
         //   둘째 레코드부터의 체결이 영구 유실되어 보유수량·실현손익이 어긋난다(CRITICAL). count로 분할 처리.
         // 체결통보 필드(레코드 기준): [2]주문번호 [8]종목코드 [9]체결수량 [10]체결단가 [13]체결여부('2'=체결)
         const count = m.count || 1;
-        const stride = count > 1 ? Math.floor(f.length / count) : f.length;
-        for (let i = 0; i < count; i++) {
+        // ★ 다중 레코드 분할은 필드 수가 count의 정확한 배수일 때만 신뢰한다. 배수가 아니면
+        //   (레코드별 필드수 상이·KIS 프레이밍 오프바이원) Math.floor 스트라이드가 어긋나,
+        //   누적거래량·타임스탬프 같은 거대 양수가 단가(f[b+10])/수량(f[b+9]) 슬롯에 얹혀
+        //   엉뚱한 거대 체결가로 확정될 수 있다(거래내역·일일손익 오염). 정렬 불일치 시
+        //   첫(정렬 보장) 레코드만 단일 처리하고 어긋난 꼬리는 버린다 — 후속은 잔고대조로 확정.
+        const aligned = count > 1 && f.length % count === 0;
+        if (count > 1 && !aligned)
+          this.log(`⚠️ 체결통보 다중레코드 정렬 불일치 (필드 ${f.length} / count ${count}) — 단일 레코드로만 처리`);
+        const recs = aligned ? count : 1;
+        const stride = aligned ? f.length / count : f.length;
+        for (let i = 0; i < recs; i++) {
           const b = i * stride;
           const odno = f[b + 2];
           if (!odno) continue;
@@ -438,6 +447,8 @@ class KisFeed {
           const filled = f[b + 13] === '2';
           // 스트라이드 오정렬·손상 시 필드가 어긋날 수 있다. '체결'로 표시된 건 qty>0·price>0
           //   일 때만 신뢰해 확정(markFilled)으로 보낸다 — 잘못된 수량/가격 확정 방지.
+          //   (체결가 크기 타당성 — 주문가 대비 비현실적 단가 — 은 주문 컨텍스트가 있는
+          //    order-journal.markFilled 에서 2차 방어한다.)
           if (filled && (!(qty > 0) || !(price > 0))) continue;
           const ev = { odno, code: f[b + 8], qty, price, filled };
           for (const fn of this.execHooks.values()) try { fn(ev); } catch (_) {}

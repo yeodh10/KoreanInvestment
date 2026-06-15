@@ -138,10 +138,24 @@ function findOrderOwner(odno) {
   const r = _findOwnerPending.get(odno) || _findOwnerAny.get(odno);
   return r ? (r.userId || null) : null;
 }
+// 체결가/수량 타당성 허용폭. 스트라이드 오정렬 등으로 누적거래량·타임스탬프 같은 거대 양수가
+// 단가/수량 슬롯에 얹혀 들어와도 fillPrice·거래내역 평균가(avg_prvs)가 오염되지 않게 막는 2차 방어.
+// 실거래 체결가는 ±30%(상/하한가) 밴드 안이라 '주문가의 몇 배'는 정상 체결엔 절대 걸리지 않는다.
+const FILL_PRICE_BAND = 3;     // 지정가 주문가 대비 허용 배수(양방향). 시장가(주문가 0)는 가격 검증 제외.
 function markFilled(odno, qty, price, userId) {
   const e = _findFillByOdno(odno, userId);
   if (!e) return false;
   const q = parseInt(qty, 10) || 0;
+  // ── 오정렬·손상 통보 방어: 비현실적 체결가/수량은 확정하지 않고 거부 → 잔고대조(reconcile)로 위임 ──
+  const rp = price ? parseInt(price, 10) : 0; // 통보된 체결가
+  if (e.price > 0 && rp > 0 && (rp > e.price * FILL_PRICE_BAND || rp * FILL_PRICE_BAND < e.price)) {
+    console.warn(`[저널] 체결통보 단가 비현실적 — 거부 odno=${odno} 통보가=${rp} 주문가=${e.price} (잔고대조로 위임)`);
+    return false;
+  }
+  if (q > 0 && e.qty > 0 && q > e.qty) {
+    console.warn(`[저널] 체결통보 수량 초과 — 거부 odno=${odno} 통보수량=${q} 주문수량=${e.qty} (잔고대조로 위임)`);
+    return false;
+  }
   let fillQty = (e.fillQty || 0) + q;            // 부분체결 누적 합산
   const fillPrice = price ? parseInt(price, 10) : (e.fillPrice ?? null);
   // 지정가 주문은 주문가(limit)를 보존한다. 시장가(주문가 0)만 체결가로 채워 거래내역 ₩0 표시 보정.
