@@ -156,6 +156,11 @@ function markFilled(odno, qty, price, userId) {
     console.warn(`[저널] 체결통보 수량 초과 — 거부 odno=${odno} 통보수량=${q} 주문수량=${e.qty} (잔고대조로 위임)`);
     return false;
   }
+  // ⚠️ 멱등성 주의(전수조사 적대테스트 medium): 같은 체결통보가 중복 도착하면 q가 다시 더해진다.
+  //   영향은 표시(거래내역 체결수량)에 국한된다 — fillQty는 아래에서 e.qty로 캡되고, 봇 손익/포지션은
+  //   체결통보가 아니라 잔고대조(reconcile, 멱등)로 확정되므로 자금 진실이 자가교정된다. 또 VTS는
+  //   체결통보가 없어 이 경로를 안 탄다. 실전에서 KIS가 동일 부분체결 프레임을 재전송하는지는 미입증.
+  //   → KIS 체결통보의 누계/증분 의미를 운영 데이터로 확인되면 (odno,누계) 기반 dedup으로 정밀화할 것.
   let fillQty = (e.fillQty || 0) + q;            // 부분체결 누적 합산
   const fillPrice = price ? parseInt(price, 10) : (e.fillPrice ?? null);
   // 지정가 주문은 주문가(limit)를 보존한다. 시장가(주문가 0)만 체결가로 채워 거래내역 ₩0 표시 보정.
