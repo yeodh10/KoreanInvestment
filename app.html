@@ -2725,8 +2725,12 @@ function setRatio(ratio) {
 // ── 주문 공통 안전장치: 입력 검증 + 확인창 + 중복제출 방지 ──
 let _orderInflight = false;
 function validateOrder(code, qty, price, type) {
+  const qRaw = String(qty ?? '').trim(), pRaw = String(price ?? '').trim();
   const q = parseInt(qty, 10), p = parseInt(price, 10) || 0;
   if (!/^\d{6}$/.test(String(code || ''))) return { err: '종목코드가 올바르지 않습니다' };
+  // parseInt('1e7')===1 우회 차단: 원문이 숫자만으로 이뤄졌는지 먼저 검사 (지수표기·소수점·기호 거부)
+  if (!/^\d+$/.test(qRaw)) return { err: '수량은 숫자만 입력하세요' };
+  if (pRaw !== '' && !/^\d+$/.test(pRaw)) return { err: '가격은 숫자만 입력하세요' };
   if (!Number.isInteger(q) || q < 1 || String(qty).includes('.')) return { err: '수량은 1 이상의 정수여야 합니다' };
   if (q > 1e7) return { err: '수량이 너무 큽니다' }; // 핑거오류(과대 주문) 클라 차단 — 서버가 최종 게이트
   if (p < 0) return { err: '가격이 올바르지 않습니다' };
@@ -4048,13 +4052,20 @@ async function loadHistory() {
 function exportHistCSV() {
   if (!_histRows.length) { showToast('먼저 기간을 선택해 조회해주세요', 'err'); return; }
   const head = ['날짜','시간','종목','코드','구분','유형','주문가','수량','체결수량','상태'];
-  // CSV 수식 인젝션 방어: =,+,-,@,탭,CR로 시작하는 셀은 엑셀/시트가 수식으로 실행 → 앞에 ' 부착
-  const csvCell = v => { const s = String(v ?? ''); return /^[=+\-@\t\r]/.test(s) ? "'" + s : s; };
+  // CSV 인젝션 + RFC4180 방어:
+  //  1) =,+,-,@,탭,CR로 시작하는 셀은 엑셀/시트가 수식으로 실행 → 앞에 ' 부착 (개행 뒤 새 물리행이 수식이 되는 우회도 차단)
+  //  2) 큰따옴표·콤마·개행(\n,\r)이 들어가면 필드 전체를 "..."로 감싸고 내부 "는 ""로 이스케이프 (콤마/개행이 열·행을 깨뜨리는 것 방지)
+  const csvCell = v => {
+    let s = String(v ?? '');
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // 수식 방어 (감싸기 전에 적용)
+    if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"'; // RFC4180 따옴표 감싸기
+    return s;
+  };
   const lines = [head.join(',')].concat(_histRows.map(o => {
     const filled = parseInt(o.tot_ccld_qty||0), qty = parseInt(o.ord_qty||0);
     const status = o._status || (o.cncl_yn==='Y' ? '취소' : filled>=qty ? '체결' : '미체결');
-    return [o.ord_dt||'', o.ord_tmd||'', csvCell((o.prdt_name||'').replace(/,/g,' ')), csvCell(o.pdno||''),
-      o.sll_buy_dvsn_cd==='02'?'매수':'매도', csvCell(o.ord_dvsn_name||''), o.ord_unpr||0, qty, filled, status].join(',');
+    return [csvCell(o.ord_dt||''), csvCell(o.ord_tmd||''), csvCell(o.prdt_name||''), csvCell(o.pdno||''),
+      csvCell(o.sll_buy_dvsn_cd==='02'?'매수':'매도'), csvCell(o.ord_dvsn_name||''), csvCell(o.ord_unpr||0), csvCell(qty), csvCell(filled), csvCell(status)].join(',');
   }));
   const blob = new Blob(['﻿'+lines.join('\n')], {type:'text/csv;charset=utf-8'}); // BOM — 엑셀 한글 호환
   const a = document.createElement('a');

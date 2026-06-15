@@ -9,8 +9,8 @@ const http = require('http'), https = require('https'), dns = require('dns'), fs
 // KRX 휴장일 판정을 auto-trader.js의 권위 테이블(KRX_HOLIDAYS)에서 재사용 —
 // 평일이라도 휴장일이면 WS/시세 피드가 정상적으로 멈추므로 거짓 '🔴 연결 끊김/피드 정지'
 // 경보(텔레그램 스팸)를 막는다. require는 부작용 없음(엔진은 클래스로만 기동).
-let isHoliday = () => false;
-try { ({ isHoliday } = require('./auto-trader.js')); } catch (_) {}
+let isHoliday = () => false, isMarketOpen = () => false;
+try { ({ isHoliday, isMarketOpen } = require('./auto-trader.js')); } catch (_) {}
 const KST = 9 * 3600 * 1000;
 const PUBLIC_HOST = (() => { try { return fs.readFileSync(path.join(__dirname, 'CURRENT-URL.txt'), 'utf8').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, ''); } catch (_) { return 'kis.tail8eca6a.ts.net'; } })();
 const PORT = process.env.PORT || 3000;
@@ -80,9 +80,10 @@ const ok2 = r => !r.err && r.status === 200;
   // ── 시장 지수 · 환율 + 시세 피드 신선도 (캐시) ──
   let idx = '', feedStale = false;
   const km = new Date(Date.now() + KST), kmm = km.getUTCHours() * 60 + km.getUTCMinutes();
-  // 평일·정규장 시간대 + KRX 휴장일 아님 → 개장. 휴장일이면 WS/피드 정지가 정상이라
-  // 주말과 동일하게 '장외'로 처리(거짓 🔴 경보 차단). isHoliday는 auto-trader.js 권위 테이블.
-  const openMkt = km.getUTCDay() >= 1 && km.getUTCDay() <= 5 && kmm >= 540 && kmm <= 930 && !isHoliday(now);
+  // 개장 여부는 auto-trader의 권위 isMarketOpen()으로 판정 — 휴장일뿐 아니라 단축장(수능 등
+  // 늦장개장)도 반영한다. 휴장/장외/단축장 개장 전이면 WS·피드 정지가 정상이라 거짓 🔴 경보를 막는다.
+  // (manual 09:00~15:30 윈도우는 단축장 늦장개장을 몰라 09:05 점검에서 거짓 경보를 냈음.)
+  const openMkt = isMarketOpen();
   try {
     const c = JSON.parse(fs.readFileSync(path.join(__dirname, 'data-cache.json'), 'utf8'));
     const m = c['market'] && (c['market'].v || c['market']);

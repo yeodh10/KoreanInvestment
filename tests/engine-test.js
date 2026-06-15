@@ -227,6 +227,8 @@ function mkTrader(deps) {
   const uT = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
   uT.state.botPositions = { '000660': { qty: 10, entry: 100000 } };
   ok('_botUnrealized 평가손익(-300,000)', uT._botUnrealized({ '000660': { curPrice: 70000 } }) === -300000);
+  // A5: 현재가 미상(prpr=0)이면 계좌 손익률로 현재가 추정 → 평가손실 누락(서킷 우회) 방지
+  ok('_botUnrealized prpr=0 폴백(손익률 추정 -300,000)', Math.round(uT._botUnrealized({ '000660': { curPrice: 0, avgPrice: 100000, pnlPct: -30 } })) === -300000);
   orders.length = 0;
   const lossAcct = { rt_cd:'0',
     output1: [{ pdno:'000660', hldg_qty:'10', pchs_avg_pric:'100000', prpr:'70000', evlu_pfls_rt:'-30', evlu_amt:'700000' }],

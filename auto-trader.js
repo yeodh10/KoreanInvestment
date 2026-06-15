@@ -576,7 +576,13 @@ class AutoTrader {
     for (const c of Object.keys(bp)) {
       const q = bp[c].qty || 0;
       const entry = bp[c].entry || 0;
-      const cur = (held && held[c] && held[c].curPrice) || 0;
+      const h = (held && held[c]) || null;
+      // 현재가가 0/미상(거래정지·데이터 누락)이면 평가손실이 누락돼 서킷이 우회될 수 있다.
+      // 폴백: 계좌가 보고한 손익률로 현재가 추정(avgPrice*(1+pnlPct/100)), 없으면 avgPrice.
+      let cur = (h && h.curPrice) || 0;
+      if (!(cur > 0) && h && h.avgPrice > 0) {
+        cur = Number.isFinite(h.pnlPct) ? h.avgPrice * (1 + h.pnlPct / 100) : h.avgPrice;
+      }
       if (q > 0 && entry > 0 && cur > 0) sum += (cur - entry) * q;
     }
     return sum;
