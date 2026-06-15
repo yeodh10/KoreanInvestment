@@ -373,6 +373,10 @@ td.mono,th.mono{font-family:var(--mono)}
   .trade-grid.mt-order > *:nth-child(1),.trade-grid.mt-order > *:nth-child(2){display:none !important}
   .trade-grid.mt-ob > *:nth-child(2),.trade-grid.mt-ob > *:nth-child(3){display:none !important}
   .trade-grid{height:auto !important}
+  /* 대시보드 영역 탭 (자식: 1=dash-main 자산+차트, 2=봇 로그, 3=dash-side 보유+시세) */
+  .dash-grid.dt-home > *:nth-child(2),.dash-grid.dt-home > *:nth-child(3){display:none !important}
+  .dash-grid.dt-hold > *:nth-child(1),.dash-grid.dt-hold > *:nth-child(2){display:none !important}
+  .dash-grid.dt-bot  > *:nth-child(1),.dash-grid.dt-bot  > *:nth-child(3){display:none !important}
   .page-body{padding:12px}
   #acctSummary{grid-template-columns:repeat(2,1fr) !important}
   /* 토스식: 총 자산 카드를 풀폭 히어로로 — 나머지(예수금/매수가능/매입원금/보유) 2열 */
@@ -603,7 +607,13 @@ td.mono,th.mono{font-family:var(--mono)}
 <!-- ─ 대시보드 ─ -->
 <div class="page active" id="page-dashboard">
   <div class="page-body" style="height:100%">
-    <div class="dash-grid">
+    <!-- 모바일 전용: 대시보드 영역 탭(자산·차트 / 보유·시세 / 봇) — 데스크톱 숨김 -->
+    <div class="trade-mtabs" id="dashMtabs">
+      <button class="tmt active" data-v="home" onclick="setDashView('home')">홈</button>
+      <button class="tmt" data-v="hold" onclick="setDashView('hold')">보유·시세</button>
+      <button class="tmt" data-v="bot" onclick="setDashView('bot')">봇 로그</button>
+    </div>
+    <div class="dash-grid dt-home">
       <div class="dash-main">
         <!-- 계좌 종합 (최상단) -->
         <div class="pf-stats" id="acctSummary" style="grid-template-columns:1.7fr 1fr 1fr 1fr 0.8fr">
@@ -3099,6 +3109,14 @@ function drawMiniCandles() {
 // ── 탭 전환 ──
 // 거래 페이지 탭 — 정밀 수동주문 보조용으로 실시간 체결 + 차트만 (뉴스/수급은 대시보드 전용)
 // 모바일 영역 탭 — 주문 페이지를 차트/주문/호가 한 화면씩으로 분리(데스크톱 무영향)
+// 모바일 대시보드 영역 탭 — 자산·차트 / 보유·시세 / 봇 로그 한 화면씩(데스크톱 무영향)
+function setDashView(v) {
+  const g = document.querySelector('#page-dashboard .dash-grid');
+  if (g) { g.classList.remove('dt-home', 'dt-hold', 'dt-bot'); g.classList.add('dt-' + v); }
+  document.querySelectorAll('#dashMtabs .tmt').forEach(b => b.classList.toggle('active', b.dataset.v === v));
+  // 차트는 숨김 상태에서 캔버스 0크기였을 수 있으니 홈(차트 포함) 표시될 때 재렌더
+  if (v === 'home') { try { if (typeof renderChart === 'function') renderChart(); } catch (_) {} }
+}
 function setTradeView(v) {
   const tg = document.querySelector('#page-trading .trade-grid');
   if (tg) tg.className = 'trade-grid mt-' + v;
