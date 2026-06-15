@@ -309,10 +309,26 @@ td.mono,th.mono{font-family:var(--mono)}
 .kiss-msg.ok{background:var(--green-dim);color:var(--green)}
 .kiss-msg.err{background:var(--red-dim);color:var(--red)}
 .kiss-msg.info{background:var(--blue-dim);color:var(--blue)}
+/* ── 모바일 하단 탭바 (토스식) — 기본 숨김, 모바일에서만 #app 그리드 마지막 행으로 표시 ── */
+#bottomNav{display:none}
+.bn-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:7px 0 6px;border:none;background:none;cursor:pointer;color:var(--text-3);font-size:10px;font-weight:700;min-height:50px;font-family:var(--font);position:relative}
+.bn-item .bn-ico{font-size:19px;line-height:1;opacity:.6;transition:opacity .12s,transform .12s}
+.bn-item.active{color:var(--blue)}
+.bn-item.active .bn-ico{opacity:1;transform:translateY(-1px)}
+.bn-item .bn-dot{position:absolute;top:6px;right:calc(50% - 16px);width:7px;height:7px;border-radius:50%;background:var(--red);display:none}
+.bn-item.has-alert .bn-dot{display:block}
+
 /* ── 모바일/좁은 창 대응 — 3컬럼이 짓눌려 차트·호가·주문이 사용 불능이던 문제 ── */
 @media (max-width:900px){
   html,body{overflow-x:hidden;overflow-y:auto}  /* 가로 넘침 차단(세로만 스크롤) */
-  #app{grid-template-columns:1fr;min-width:0;max-width:100vw}
+  #app{grid-template-columns:1fr;grid-template-rows:var(--header-h) 1fr auto;min-width:0;max-width:100vw}
+  /* 하단 탭바: #app 마지막(auto) 행을 차지 → 본문을 가리지 않음. safe-area(홈 인디케이터) 보정 */
+  #bottomNav{display:flex;background:var(--bg-1);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom,0);box-shadow:0 -1px 12px rgba(0,0,0,.22);z-index:48}
+  /* 헤더 혼잡 완화: 자동매매 토글 줄바꿈 방지·사용자명 텍스트 숨김 */
+  #botStatus{white-space:nowrap}
+  .bot-toggle{padding:5px 10px;white-space:nowrap;flex-shrink:0}
+  #hdrUsername{display:none}
+  .hdr-right > div:last-child{padding-left:6px;gap:4px}
   #main{overflow-x:hidden;min-width:0}
   /* ★ 가로 넘침 핵심: 그리드/플렉스 항목은 기본 min-width:auto라 안 줄어든다 → 내용폭(넓은 표·nowrap 숫자)
      때문에 칸이 화면보다 넓어지고, 그 블로우아웃이 #main/#app까지 전파된다. 전 계층에 min-width:0 적용. */
@@ -1461,6 +1477,15 @@ td.mono,th.mono{font-family:var(--mono)}
 </div>
 
 </main>
+
+<!-- ══ 모바일 하단 탭바 (토스식) — 한손 조작용 주요 내비. 데스크톱은 숨김 ══ -->
+<nav id="bottomNav" aria-label="하단 내비게이션">
+  <button class="bn-item active" id="bnav-dashboard" onclick="showPage('dashboard')"><span class="bn-ico">🏠</span><span class="bn-lbl">홈</span></button>
+  <button class="bn-item" id="bnav-trading" onclick="showPage('trading')"><span class="bn-ico">💹</span><span class="bn-lbl">주문</span></button>
+  <button class="bn-item" id="bnav-watchlist" onclick="showPage('watchlist')"><span class="bn-ico">👁</span><span class="bn-lbl">관심</span></button>
+  <button class="bn-item" id="bnav-history" onclick="showPage('history')"><span class="bn-ico">📋</span><span class="bn-lbl">내역</span></button>
+  <button class="bn-item" id="bnav-menu" onclick="toggleSidebar()"><span class="bn-ico">☰</span><span class="bn-lbl">메뉴</span><span class="bn-dot" id="bnavAlertDot"></span></button>
+</nav>
 </div>
 <script>
 'use strict';
@@ -1700,6 +1725,10 @@ function showPage(id) {
   if (pg) pg.classList.add('active');
   const nav = $('nav-'+id);
   if (nav) nav.classList.add('active');
+  // 모바일 하단 탭바 active 동기화 (매핑된 탭만; 그 외 페이지는 메뉴 경유)
+  document.querySelectorAll('.bn-item').forEach(b => b.classList.remove('active'));
+  const bnav = $('bnav-'+id);
+  if (bnav) bnav.classList.add('active');
   currentPage = id;
   // 페이지별 초기화
   if (id === 'portfolio') loadPortfolio();
