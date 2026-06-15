@@ -378,6 +378,19 @@ td.mono,th.mono{font-family:var(--mono)}
   .mkt-stat-grid{grid-template-columns:repeat(2,1fr) !important}
   .qty-btns{grid-template-columns:repeat(2,1fr)}
   .panel{overflow-x:auto}                                     /* 래퍼 없는 넓은 표(포트폴리오 등)도 패널 안에서 가로 스크롤 */
+  /* ── 토스식: 보유종목 11컬럼 표를 폰에선 카드 리스트로(가로 스크롤 제거, 라벨:값) ── */
+  .pf-holdings{display:block}
+  .pf-holdings thead{display:none}
+  .pf-holdings tbody,.pf-holdings tr{display:block;width:100%}
+  .pf-holdings tr{border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:10px;background:var(--bg-1)}
+  .pf-holdings td{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0;border:none !important;text-align:right;font-size:13px}
+  .pf-holdings td::before{content:attr(data-label);color:var(--text-3);font-size:11px;font-weight:500;text-align:left;white-space:nowrap}
+  .pf-holdings td:first-child{justify-content:flex-start;font-size:15px;padding:0 0 9px;margin-bottom:5px;border-bottom:1px solid var(--border) !important}
+  .pf-holdings td:first-child::before,.pf-holdings td:last-child::before{content:none}
+  .pf-holdings td:last-child{padding-top:9px}
+  .pf-holdings td:last-child button{width:100%;padding:11px;font-size:14px;border-radius:10px}
+  .pf-holdings td.empty{justify-content:center;text-align:center;color:var(--text-3);padding:18px 0}
+  .pf-holdings .progress{width:90px !important}
   table{font-size:11px}
   .panel-head h2,.panel-head h3{font-size:14px}
   /* 터치 타깃: 네비/탭 충분히 크게 */
@@ -1019,7 +1032,7 @@ td.mono,th.mono{font-family:var(--mono)}
     <div class="panel">
       <div class="panel-head"><span class="panel-title">보유종목</span><span style="font-size:11px;color:var(--text-3)" id="pfHoldCount">—</span></div>
       <div class="tbl-wrap">
-        <table><thead><tr><th>종목</th><th>코드</th>
+        <table class="pf-holdings"><thead><tr><th>종목</th><th>코드</th>
           <th id="pfTh_qty" onclick="sortPf('qty')" style="cursor:pointer;user-select:none">수량 ↕</th>
           <th>평균단가</th>
           <th id="pfTh_cur" onclick="sortPf('cur')" style="cursor:pointer;user-select:none">현재가 ↕</th>
@@ -2653,15 +2666,15 @@ async function loadPortfolio() {
     const cls = pl>0?'up':pl<0?'dn':'flat'; // 손익 0 = 흰색
     return `<tr>
       <td style="font-weight:600;cursor:pointer" onclick="loadStock('${jsArg(p.pdno)}')">${name}${holderBadge(p.pdno)}</td>
-      <td class="mono" style="color:var(--text-3)">${code}</td>
-      <td class="mono">${qty}</td>
-      <td class="mono">₩${avg.toLocaleString()}</td>
-      <td class="mono ${cls}" id="pf-${code}-cur">₩${cur.toLocaleString()}</td>
-      <td class="mono" id="pf-${code}-ev">₩${ev.toLocaleString()}</td>
-      <td class="mono">₩${buy.toLocaleString()}</td>
-      <td class="mono ${cls}" id="pf-${code}-pl">${pl>0?'+':''}₩${pl.toLocaleString()}</td>
-      <td class="mono ${cls}" id="pf-${code}-rt">${pl>0?'+':''}${plRt.toFixed(2)}%</td>
-      <td><div class="progress" style="width:60px"><div class="progress-fill" style="width:${w}%"></div></div> <span style="font-size:10px">${w}%</span></td>
+      <td class="mono" style="color:var(--text-3)" data-label="코드">${code}</td>
+      <td class="mono" data-label="수량">${qty}</td>
+      <td class="mono" data-label="평균단가">₩${avg.toLocaleString()}</td>
+      <td class="mono ${cls}" id="pf-${code}-cur" data-label="현재가">₩${cur.toLocaleString()}</td>
+      <td class="mono" id="pf-${code}-ev" data-label="평가금액">₩${ev.toLocaleString()}</td>
+      <td class="mono" data-label="매입금액">₩${buy.toLocaleString()}</td>
+      <td class="mono ${cls}" id="pf-${code}-pl" data-label="평가손익">${pl>0?'+':''}₩${pl.toLocaleString()}</td>
+      <td class="mono ${cls}" id="pf-${code}-rt" data-label="수익률">${pl>0?'+':''}${plRt.toFixed(2)}%</td>
+      <td data-label="비중"><div class="progress" style="width:60px"><div class="progress-fill" style="width:${w}%"></div></div> <span style="font-size:10px">${w}%</span></td>
       <td><button class="panel-btn" onclick="sellFromPf('${jsArg(code)}','${jsArg(name)}',${qty},${cur})">매도</button></td>
     </tr>`;
   }).join('');
