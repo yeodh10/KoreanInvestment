@@ -864,18 +864,27 @@ function clientIp(req) {
 }
 
 // ── 로그인/가입 무차별 시도 방어 (IP 기준) ──
-const _authGuard = {}; // ip → { fails, lockUntil, regs, regDay }
+const _authGuard = {}; // ip → { fails, lockUntil, regs, regDay, seen }
+const _AUTHGUARD_CAP = 10000; // 맵 하드 상한 — 위조 IP 플러딩으로 무한 증식하는 것 차단
 function authGuardOf(req) {
   const ip = clientIp(req);
-  return _authGuard[ip] || (_authGuard[ip] = { fails: 0, lockUntil: 0, regs: 0, regDay: '' });
+  const g = _authGuard[ip] || (_authGuard[ip] = { fails: 0, lockUntil: 0, regs: 0, regDay: '', seen: 0 });
+  g.seen = Date.now();
+  return g;
 }
 // IP별 엔트리가 무한 증식하지 않도록 10분마다 청소 — 잠금 해제됐고 실패·가입 카운트가 0인(=의미있는 상태 없음) 엔트리만 제거.
-// 잠금 중(lockUntil>now)이거나 fails>0, regs>0 인 엔트리는 절대 삭제하지 않음(방어 상태 보존).
+// 잠금 중(lockUntil>now)이거나 fails>0, regs>0 인 엔트리는 평상시 보존하되,
+// 하드 상한을 넘으면(플러딩) 메모리 보호를 우선해 가장 오래 활동 없는 항목부터 축출한다.
 setInterval(() => {
   const now = Date.now();
   for (const ip in _authGuard) {
     const g = _authGuard[ip];
     if (g.lockUntil < now && (g.fails || 0) === 0 && (g.regs || 0) === 0) delete _authGuard[ip];
+  }
+  const keys = Object.keys(_authGuard);
+  if (keys.length > _AUTHGUARD_CAP) {
+    keys.sort((a, b) => (_authGuard[a].seen || 0) - (_authGuard[b].seen || 0));
+    for (const ip of keys.slice(0, keys.length - _AUTHGUARD_CAP)) delete _authGuard[ip];
   }
 }, 10 * 60 * 1000).unref();
 
@@ -1750,7 +1759,8 @@ async function handleRequest(req, res, session) {
       if (!isAdminSession(session)) { jsonRes(res, 403, { ok: false, message: '관리자 전용' }); return; }
       const b = await parseBody(req);
       if (!b.path || !b.trId) { jsonRes(res, 400, { ok: false, message: 'path/trId 필요' }); return; }
-      if (!/^\/uapi\//.test(b.path) || /(\.\.|\/\/|@|\\|`)/.test(b.path)) { jsonRes(res, 400, { ok: false, message: '허용되지 않은 경로' }); return; }
+      // %(퍼센트 인코딩)도 차단 — '%2e%2e' 같은 인코딩 트래버설이 리터럴 '..' 검사를 우회하던 갭. KIS 정상 경로엔 % 불필요.
+      if (!/^\/uapi\//.test(b.path) || /(\.\.|\/\/|@|\\|`|%)/.test(b.path)) { jsonRes(res, 400, { ok: false, message: '허용되지 않은 경로' }); return; }
       const r = await kisProxy(cfg, b.path, b.trId, b.params || {}, 'high');
       jsonRes(res, 200, { ok: true, data: r.body });
       return;
@@ -2586,21 +2596,32 @@ async function handleRequest(req, res, session) {
 const LOCK_FILE = path.join(__dirname, '.server.lock');
 (function acquireSingletonLock() {
   if (process.env.SKIP_LOCK === '1') return; // 테스트/특수 상황 탈출구
-  try {
-    if (fs.existsSync(LOCK_FILE)) {
-      const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim());
-      if (pid && pid !== process.pid) {
-        let alive = false;
-        try { process.kill(pid, 0); alive = true; } catch (e) { alive = (e.code === 'EPERM'); }
-        if (alive) {
-          console.error(`\n[기동 중단] 이미 다른 인스턴스가 실행 중입니다 (PID ${pid}).`);
-          console.error(`  같은 KIS 계좌 이중 봇(주문 충돌) 방지를 위해 두 번째 기동을 막습니다.`);
-          console.error(`  → 의도된 재기동이면 기존 프로세스를 먼저 종료하거나 ${LOCK_FILE} 삭제 후 재시도.\n`);
-          process.exit(1);
-        }
+  // ★ 락 획득은 원자적이어야 한다. existsSync→writeFileSync 2단계는 TOCTOU 경쟁이 있어
+  //   서로 다른 포트로 거의 동시에 기동한 두 프로세스가 둘 다 통과(이중 봇)할 수 있다.
+  //   fs.open 'wx'(배타적 생성)는 파일이 없을 때만 성공하고 있으면 EEXIST → 정확히 하나만 생존.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd;
+    try {
+      fd = fs.openSync(LOCK_FILE, 'wx'); // 원자적: 이미 있으면 throw(EEXIST)
+    } catch (e) {
+      if (e.code !== 'EEXIST') { console.error('[락] 단일 인스턴스 락 설정 실패(계속 진행):', e.message); return; }
+      // 락 파일 존재 — 보유 PID 생존 확인
+      let pid = 0;
+      try { pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim()); } catch (_) {}
+      let alive = false;
+      if (pid && pid !== process.pid) { try { process.kill(pid, 0); alive = true; } catch (er) { alive = (er.code === 'EPERM'); } }
+      if (alive) {
+        console.error(`\n[기동 중단] 이미 다른 인스턴스가 실행 중입니다 (PID ${pid}).`);
+        console.error(`  같은 KIS 계좌 이중 봇(주문 충돌) 방지를 위해 두 번째 기동을 막습니다.`);
+        console.error(`  → 의도된 재기동이면 기존 프로세스를 먼저 종료하거나 ${LOCK_FILE} 삭제 후 재시도.\n`);
+        process.exit(1);
       }
+      // 스테일 락(죽은 PID) — 제거 후 1회 재시도. 경쟁 시 한 쪽만 재생성에 성공한다.
+      try { fs.unlinkSync(LOCK_FILE); } catch (_) {}
+      continue;
     }
-    fs.writeFileSync(LOCK_FILE, String(process.pid));
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
     const release = () => {
       try {
         if (fs.existsSync(LOCK_FILE) && parseInt(fs.readFileSync(LOCK_FILE, 'utf8')) === process.pid) fs.unlinkSync(LOCK_FILE);
@@ -2609,7 +2630,11 @@ const LOCK_FILE = path.join(__dirname, '.server.lock');
     process.on('exit', release);
     process.on('SIGINT', () => { release(); process.exit(0); });
     process.on('SIGTERM', () => { release(); process.exit(0); });
-  } catch (e) { console.error('[락] 단일 인스턴스 락 설정 실패(계속 진행):', e.message); }
+    return;
+  }
+  // 재시도 후에도 획득 실패 = 경쟁자가 막 선점 → 안전을 위해 기동 중단
+  console.error('\n[기동 중단] 락 경쟁에서 밀렸습니다(다른 인스턴스가 막 선점). 이중 봇 방지를 위해 종료.\n');
+  process.exit(1);
 })();
 
 // ════════════════════════════════════════
