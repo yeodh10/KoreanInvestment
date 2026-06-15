@@ -355,6 +355,12 @@ td.mono,th.mono{font-family:var(--mono)}
   .trade-grid > *:nth-child(3){order:2}  /* 주문폼 → 차트 바로 아래(강조) */
   .page-body{padding:12px}
   #acctSummary{grid-template-columns:repeat(2,1fr) !important}
+  /* 토스식: 총 자산 카드를 풀폭 히어로로 — 나머지(예수금/매수가능/매입원금/보유) 2열 */
+  #acctSummary > .pf-stat:first-child{grid-column:1/-1}
+  #acctSummary > .pf-stat:first-child .val{font-size:24px !important}
+  /* 종목 헤더: 종목명 위 / 큰 가격·변동 아래로 세로 스택 → 좁은 폰에서 겹침 해소 */
+  .stock-header{flex-direction:column;gap:5px}
+  .stock-header > div:last-child{align-self:flex-start}
 }
 /* ── 폰(≤600px) 전용 다듬기 — 빽빽한 그리드 완화 + 넓은 표 가로 스크롤 + 밀도 ── */
 @media (max-width:600px){
@@ -2073,9 +2079,11 @@ function renderChart() {
     ctx.fillText('₩'+Math.round(v).toLocaleString(), pad.l-3, pad.t+(ch/4)*i+3);
   }
 
-  // X 라벨
+  // X 라벨 — 폭에 맞춰 개수 조절(좁은 폰에서 긴 날짜 라벨이 겹치던 문제). 라벨 간 최소 ~72px 확보.
   ctx.textAlign='center'; ctx.font='11px JetBrains Mono,monospace';
-  const step = Math.ceil(n/7);
+  const usableW = Math.max(0, W - pad.l - pad.r);
+  const maxLabels = Math.max(2, Math.floor(usableW / 72));
+  const step = Math.max(1, Math.ceil(n / maxLabels));
   for (let i=0; i<n; i+=step) {
     const lbl = fmtBarDate(data[i]) || String(i+1);
     ctx.fillText(lbl, xOf(i), H-7);
