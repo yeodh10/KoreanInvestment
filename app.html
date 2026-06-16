@@ -437,14 +437,21 @@ td.mono,th.mono{font-family:var(--mono)}
   /* 터치 타깃: 네비/탭 충분히 크게 */
   .nav-item{padding:13px 14px}
   /* ── 주문 폼 토스식: 큰 입력(16px=iOS 포커스 줌 방지)·강조 매수/매도·넉넉한 터치 ── */
-  .order-tab{padding:15px;font-size:15px}
+  /* 매수/매도 탭: 밑줄 → 토스식 알약 세그먼트(선 없이 채움으로 구분) */
+  .order-tabs{grid-template-columns:1fr 1fr;gap:5px;border-bottom:none;background:var(--bg-2);border-radius:13px;padding:4px;margin-bottom:12px}
+  .order-tab{padding:13px 0;font-size:15px;border-radius:10px;border-bottom:none !important;color:var(--text-2);min-height:46px}
+  .order-tab.buy.active{background:var(--red-dim);color:var(--red);border-color:transparent}
+  .order-tab.sell.active{background:rgba(52,133,250,.16);color:var(--down);border-color:transparent}
   .form-input{padding:13px 12px;font-size:16px}
   .form-label{font-size:12px;margin-bottom:5px}
-  .qty-btn{padding:12px 0;font-size:13px}
-  .order-submit{padding:17px !important;font-size:17px !important;border-radius:12px}
-  /* 토스식 터치 타깃 확대 — 폼 액션 버튼(저장/발송/프리셋/알림)·선택이 19~32px라 손가락으로 누르기 힘들던 문제 */
-  .panel-btn{min-height:40px;padding:9px 14px}
-  .form-select{min-height:42px;font-size:15px}
+  .qty-btn{padding:12px 0;font-size:13px;border-radius:9px}
+  .order-submit{padding:17px !important;font-size:17px !important;border-radius:14px}
+  /* ── 토스 컨트롤 언어 통일: 작은 라운드(4~5px) → 둥근 알약(10px+)·넉넉한 터치 ── */
+  .panel-btn{min-height:42px;padding:10px 16px;border-radius:10px}
+  .form-select{min-height:42px;font-size:15px;border-radius:10px}
+  .btn-grp{border-radius:11px;padding:3px}
+  .btn-grp button{padding:8px 13px;border-radius:9px;font-size:12.5px;min-height:36px}
+  .qbtn{border-radius:9px;padding:8px 14px;font-size:12.5px}
   /* ── 가독성: 모바일에서 너무 작던 라벨·헤더·설명(9~10px)을 12px로 상향 ── */
   .pf-stat .lbl,.mkt-stat .lbl,.stock-meta-item .lbl{font-size:12px}
   thead th{font-size:12px;padding:9px 10px}
