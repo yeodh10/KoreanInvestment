@@ -377,18 +377,23 @@ td.mono,th.mono{font-family:var(--mono)}
   .dash-grid.dt-home > *:nth-child(2),.dash-grid.dt-home > *:nth-child(3){display:none !important}
   .dash-grid.dt-hold > *:nth-child(1),.dash-grid.dt-hold > *:nth-child(2){display:none !important}
   .dash-grid.dt-bot  > *:nth-child(1),.dash-grid.dt-bot  > *:nth-child(3){display:none !important}
-  .page-body{padding:12px}
+  .page-body{padding:16px}
   #acctSummary{grid-template-columns:repeat(2,1fr) !important}
-  /* 토스식: 총 자산 카드를 풀폭 히어로로 — 나머지(예수금/매수가능/매입원금/보유) 2열 */
-  #acctSummary > .pf-stat:first-child{grid-column:1/-1}
-  #acctSummary > .pf-stat:first-child .val{font-size:24px !important}
+  /* 토스식: 총 자산 카드를 풀폭 히어로로 — 큰 굵은 숫자가 화면의 앵커 */
+  #acctSummary > .pf-stat:first-child{grid-column:1/-1;padding:20px 18px}
+  #acctSummary > .pf-stat:first-child .val{font-size:33px !important;font-weight:800;letter-spacing:-1px}
   /* 종목 헤더: 종목명 위 / 큰 가격·변동 아래로 세로 스택 → 좁은 폰에서 겹침 해소 */
   .stock-header{flex-direction:column;gap:5px}
   .stock-header > div:last-child{align-self:flex-start}
+  /* ── 토스 문법: 카드 테두리 제거 → 여백·서브배경·부드러운 그림자로 구분(다크 유지) ── */
+  .panel{border:none;border-radius:18px;box-shadow:0 4px 16px rgba(0,0,0,.30)}
+  .panel-head{border-bottom:none;padding:15px 16px 2px}
+  .dash-grid,.trade-grid{gap:14px}
+  body.light .panel{box-shadow:0 3px 12px rgba(0,0,0,.07)}
 }
 /* ── 폰(≤600px) 전용 다듬기 — 빽빽한 그리드 완화 + 넓은 표 가로 스크롤 + 밀도 ── */
 @media (max-width:600px){
-  .page-body{padding:8px}
+  .page-body{padding:14px}
   #stockInfo{grid-template-columns:repeat(3,1fr) !important}  /* 종목 메타 6열→3열 */
   .stock-meta{grid-template-columns:repeat(3,1fr)}            /* 5열→3열 */
   .pf-stats{grid-template-columns:repeat(2,1fr) !important}   /* 통계 5열→2열 */
@@ -399,7 +404,8 @@ td.mono,th.mono{font-family:var(--mono)}
   .pf-holdings{display:block}
   .pf-holdings thead{display:none}
   .pf-holdings tbody,.pf-holdings tr{display:block;width:100%}
-  .pf-holdings tr{border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:10px;background:var(--bg-1)}
+  .pf-holdings tr{border:none;border-radius:16px;padding:14px 16px;margin-bottom:11px;background:var(--bg-1);box-shadow:0 2px 10px rgba(0,0,0,.24)}
+  body.light .pf-holdings tr{box-shadow:0 2px 8px rgba(0,0,0,.05)}
   .pf-holdings td{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0;border:none !important;text-align:right;font-size:13px}
   .pf-holdings td::before{content:attr(data-label);color:var(--text-3);font-size:11px;font-weight:500;text-align:left;white-space:nowrap}
   .pf-holdings td:first-child{justify-content:flex-start;font-size:15px;padding:0 0 9px;margin-bottom:5px;border-bottom:1px solid var(--border) !important}
@@ -411,7 +417,8 @@ td.mono,th.mono{font-family:var(--mono)}
   /* ── 범용 카드형 표(내역/종목탐색 등): 균일 '라벨: 값' 카드 ── */
   .m-cardtable thead{display:none}
   .m-cardtable,.m-cardtable tbody,.m-cardtable tr{display:block;width:100%}
-  .m-cardtable tr{border:1px solid var(--border);border-radius:12px;padding:10px 13px;margin-bottom:9px;background:var(--bg-1)}
+  .m-cardtable tr{border:none;border-radius:14px;padding:12px 15px;margin-bottom:10px;background:var(--bg-1);box-shadow:0 2px 10px rgba(0,0,0,.24)}
+  body.light .m-cardtable tr{box-shadow:0 2px 8px rgba(0,0,0,.05)}
   .m-cardtable td{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;border:none !important;text-align:right;font-size:13px;min-height:0}
   .m-cardtable td::before{content:attr(data-label);color:var(--text-3);font-size:12px;font-weight:500;text-align:left;white-space:nowrap;flex-shrink:0}
   .m-cardtable td[data-label="종목"]{font-weight:700;font-size:14.5px;padding-bottom:8px;margin-bottom:3px;border-bottom:1px solid var(--border) !important}
