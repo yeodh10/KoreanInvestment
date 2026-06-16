@@ -82,7 +82,7 @@ sudo systemctl enable --now autotrade
 # /etc/systemd/system/autotrade-check.service
 [Service]
 Type=oneshot
-WorkingDirectory=/home/ydh/KoreanInvestment
+WorkingDirectory=/home/ubuntu/KoreanInvestment
 Environment=TZ=Asia/Seoul
 ExecStart=/usr/bin/node market-check.js
 ```
