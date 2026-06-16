@@ -1260,6 +1260,28 @@ async function refreshTick(cfg, code, priority = 'low') {
   finally { if (priority === 'low') _bgRefreshing.tick[code] = false; }
 }
 
+// ── 총자산 일별 스냅샷 (대시보드 히어로 스파크라인용) — best-effort, 잔고 응답에 영향 없음 ──
+function assetHistPath(uid) { return path.join(__dirname, 'user-configs', 'asset-hist-' + uid + '.json'); }
+function _kstDayKey() { return new Date(Date.now() + 9*3600*1000).toISOString().slice(0, 10).replace(/-/g, ''); }
+function recordAssetSnapshot(uid, totalVal) {
+  if (!uid || uid === '_global' || !(totalVal > 0)) return;
+  try {
+    const dir = path.join(__dirname, 'user-configs');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const fp = assetHistPath(uid);
+    let arr = [];
+    try { const j = JSON.parse(fs.readFileSync(fp, 'utf8')); if (Array.isArray(j)) arr = j; } catch (_) {}
+    const d = _kstDayKey();
+    if (arr.length && arr[arr.length - 1].d === d) arr[arr.length - 1].v = totalVal; // 같은 날 → 최신값 갱신
+    else arr.push({ d, v: totalVal });
+    if (arr.length > 60) arr = arr.slice(-60); // 최근 60일만 보존
+    fs.writeFileSync(fp, JSON.stringify(arr));
+  } catch (_) {} // 실패 무시 — 잔고 응답과 완전 분리
+}
+function getAssetHistory(uid) {
+  try { const j = JSON.parse(fs.readFileSync(assetHistPath(uid), 'utf8')); return Array.isArray(j) ? j : []; } catch (_) { return []; }
+}
+
 // ── 계좌 잔고 → global._acctCache[userKey] 갱신 ──
 async function refreshAccount(cfg, userKey, priority = 'low') {
   if (priority === 'low') { if (_bgRefreshing.acct[userKey]) return; _bgRefreshing.acct[userKey] = true; }
@@ -1275,6 +1297,8 @@ async function refreshAccount(cfg, userKey, priority = 'low') {
     const payload = { ok: true, data: result.body };
     if (result.body && result.body.rt_cd === '0') {
       global._acctCache[userKey] = { t: Date.now(), data: payload };
+      // 총자산 일별 스냅샷 적재 (히어로 스파크라인용) — best-effort
+      try { const o2 = (result.body.output2 || [])[0]; if (o2) recordAssetSnapshot(userKey, parseInt(o2.tot_evlu_amt || 0)); } catch (_) {}
       // 체결 판정: 잔고 수량과 저널의 접수 주문 대조
       const holdings = {};
       for (const p of (result.body.output1 || [])) holdings[p.pdno] = parseInt(p.hldg_qty || 0);
@@ -1703,6 +1727,11 @@ async function handleRequest(req, res, session) {
   if (pathname === '/api/auto/status') {
     const ut = getTrader(session.userId);
     jsonRes(res, 200, { ok: true, status: ut.getStatus() });
+    return;
+  }
+  // 총자산 일별 추이 (대시보드 히어로 스파크라인) — 잔고 조회 시 적재된 스냅샷
+  if (pathname === '/api/asset-history') {
+    jsonRes(res, 200, { ok: true, history: getAssetHistory(session.userId || 'default') });
     return;
   }
 
