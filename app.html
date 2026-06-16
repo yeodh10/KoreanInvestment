@@ -417,6 +417,10 @@ td.mono,th.mono{font-family:var(--mono)}
   .m-cardtable td[data-label="종목"]{font-weight:700;font-size:14.5px;padding-bottom:8px;margin-bottom:3px;border-bottom:1px solid var(--border) !important}
   .m-cardtable td.empty{justify-content:center;text-align:center;padding:18px 0}
   .m-cardtable td.empty::before{content:none}
+  /* 종목탐색: 컴팩트 브라우즈 — 순위·거래량·거래대금 숨겨 종목/현재가/등락률/관심/차트만 */
+  .stocks-cmp thead th:nth-child(1),.stocks-cmp tbody td:nth-child(1),
+  .stocks-cmp thead th:nth-child(5),.stocks-cmp tbody td:nth-child(5),
+  .stocks-cmp thead th:nth-child(6),.stocks-cmp tbody td:nth-child(6){display:none}
   table{font-size:11px}
   .panel-head h2,.panel-head h3{font-size:14px}
   /* 터치 타깃: 네비/탭 충분히 크게 */
@@ -1158,7 +1162,7 @@ td.mono,th.mono{font-family:var(--mono)}
     </div>
     <div class="panel">
       <div class="tbl-wrap" style="max-height:calc(100vh - var(--header-h) - 110px);overflow-y:auto">
-        <table>
+        <table class="stocks-cmp">
           <thead><tr><th>순위</th><th>종목</th>
             <th id="stTh_price" onclick="sortStocks('price')" style="cursor:pointer;user-select:none">현재가</th>
             <th id="stTh_chg" onclick="sortStocks('chg')" style="cursor:pointer;user-select:none">등락률</th>
