@@ -421,6 +421,10 @@ td.mono,th.mono{font-family:var(--mono)}
   .stocks-cmp thead th:nth-child(1),.stocks-cmp tbody td:nth-child(1),
   .stocks-cmp thead th:nth-child(5),.stocks-cmp tbody td:nth-child(5),
   .stocks-cmp thead th:nth-child(6),.stocks-cmp tbody td:nth-child(6){display:none}
+  /* 전략 설정: 빽빽한 3~4열 숫자입력 그리드를 모바일에서 2열로(입력칸 넓게) */
+  #page-strategy [style*="repeat(4"],#page-strategy [style*="repeat(3"]{grid-template-columns:repeat(2,1fr) !important}
+  /* 전략 숫자 입력 터치 높이 확보(2열화로 폭은 충분) */
+  #page-strategy input[type="number"]{min-height:44px}
   table{font-size:11px}
   .panel-head h2,.panel-head h3{font-size:14px}
   /* 터치 타깃: 네비/탭 충분히 크게 */
