@@ -4,6 +4,12 @@
 cd /home/ydh/KoreanInvestment || exit 1
 LOG=/home/ydh/KoreanInvestment/deploy-after-close.log
 TS=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S KST')
+# 헬스체크 헬퍼 — 운영 호스트에 curl이 없어(curl: not found) 재시작 후 검증이 스킵되던 문제 수정.
+# Node 빌트인(http)만 사용. 상태코드가 찍히면 HTTP 서버 응답 중(200/401 무관 = 정상),
+# ERR/TIMEOUT만 실제 장애. 5초 타임아웃으로 무인 배포가 멈추지 않게 한다.
+hc() {
+  node -e 'const http=require("http");const to=setTimeout(()=>{console.log("TIMEOUT");process.exit(0)},5000);http.get(process.argv[1],r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>{clearTimeout(to);console.log(r.statusCode+" "+d.slice(0,120).replace(/\n/g," "));process.exit(0)})}).on("error",e=>{clearTimeout(to);console.log("ERR "+e.code);process.exit(0)})' "$1"
+}
 {
   echo "===== [$TS] 배포 시작 (백로그 6종) ====="
   # 1) 배포 직전 테스트 그린 재확인 — 하나라도 실패하면 재시작 중단(운영 보호)
@@ -21,8 +27,8 @@ TS=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S KST')
   sleep 3
   echo "  service: $(systemctl is-active autotrade.service)"
   # 3) 헬스체크
-  echo "  /auth/me: $(curl -s -o /dev/null -w '%{http_code}' localhost:3000/auth/me)"
-  echo "  /api/orderbook(005930) head: $(curl -s 'localhost:3000/api/orderbook?code=005930' | head -c 160)"
+  echo "  /auth/me: $(hc 'http://127.0.0.1:3000/auth/me')"
+  echo "  /api/orderbook(005930): $(hc 'http://127.0.0.1:3000/api/orderbook?code=005930')"
   echo "  WS 최근로그: $(journalctl -u autotrade.service -n 40 --no-pager 2>/dev/null | grep -o 'WebSocket 연결됨' | tail -1)"
   echo "===== 배포 종료 ====="
   echo
