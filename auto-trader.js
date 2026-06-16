@@ -706,6 +706,8 @@ class AutoTrader {
                     // 부분체결이 여러 틱/청크로 쪼개져도 한 매매가 연속손실로 중복 집계되지 않게 누적만.
                     bot[c]._realizedAcc = (bot[c]._realizedAcc || 0) + realized;
                     this.log('sell', `🧾 체결 확정 ${this.deps.codeToName(c)||c} ${soldByBot}주 (실현손익 ${(realized>=0?'+':'')+Math.round(realized).toLocaleString()}원)`, { code:c, soldQty:soldByBot, realized });
+                    // 텔레그램: 실제 청산(체결) + 실현손익 — 체결당 1회(스팸 없음), 틱 지연 방지 위해 fire-and-forget
+                    if (this.deps.sendTelegram) this.deps.sendTelegram(cfg, `🧾 <b>체결 확정</b> ${realized>=0?'✅':'🔻'}\n${this.deps.codeToName(c)||c} (${c}) ${soldByBot}주 청산\n실현손익: <b>${(realized>=0?'+':'')+Math.round(realized).toLocaleString()}원</b>`).catch(()=>{});
                   }
                   bot[c]._sellPending = (bot[c]._sellPending || 0) - soldByBot;
                 }
@@ -788,6 +790,8 @@ class AutoTrader {
         // 실현손익만으로 한도 도달 = 고착 정지(오늘 신규매수 영구 중지)
         this.state.stoppedByLoss = true; buyingHalted = true; this.save();
         this.log('safety', `🛑 일일 손실 한도 도달 (${Math.round(this.state.dailyRealizedPnl).toLocaleString()}원 ≤ 자본 ${s.safety.dailyLossLimitPct}% = ${Math.round(dailyLossLimit).toLocaleString()}원) — 오늘 신규매수 중지`);
+        // 텔레그램: 서킷브레이커 발동(고착) — stoppedByLoss 래치로 하루 1회만
+        if (this.deps.sendTelegram) this.deps.sendTelegram(cfg, `🛑 <b>일일 손실 한도 도달</b>\n실현손익 ${Math.round(this.state.dailyRealizedPnl).toLocaleString()}원 (자본 ${s.safety.dailyLossLimitPct}%)\n오늘 신규매수를 중지합니다. (보유 종목 리스크 관리는 계속)`).catch(()=>{});
       }
       else if (capital > 0 && (this.state.dailyRealizedPnl + unrealized) <= dailyLossLimit) {
         // 실현+미실현 합산이 한도 이하 = 비고착 보류(깊은 평가손실 중 추가 진입 차단, 회복 시 재개)
@@ -795,6 +799,8 @@ class AutoTrader {
         if (!this._drawdownHalted) {
           this._drawdownHalted = true;
           this.log('safety', `⏸ 평가손실 포함 손실 한도 도달 (실현 ${Math.round(this.state.dailyRealizedPnl).toLocaleString()} + 평가 ${Math.round(unrealized).toLocaleString()} ≤ ${Math.round(dailyLossLimit).toLocaleString()}원) — 회복 시까지 신규매수 보류`);
+          // 텔레그램: 평가손실 보류 — _drawdownHalted 래치로 전환 시 1회(회복 후 재발 시 다시)
+          if (this.deps.sendTelegram) this.deps.sendTelegram(cfg, `⏸ <b>평가손실 손실한도 도달</b>\n실현 ${Math.round(this.state.dailyRealizedPnl).toLocaleString()} + 평가 ${Math.round(unrealized).toLocaleString()}원\n회복 시까지 신규매수 보류합니다.`).catch(()=>{});
         }
       }
       else { this._drawdownHalted = false; }

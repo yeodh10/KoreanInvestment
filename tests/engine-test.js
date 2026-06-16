@@ -84,7 +84,7 @@ function mkDeps(opts) {
     getMinuteBars: async () => opts.minBars || null,
     getAccount: async () => account,
     placeOrder: async (cfg, o) => { orders.push({ ...o }); return { rt_cd: '0' }; },
-    codeToName: c => c, sendTelegram: null
+    codeToName: c => c, sendTelegram: opts.sendTelegram || null
   };
 }
 function mkTrader(deps) {
@@ -356,6 +356,19 @@ function mkTrader(deps) {
   ok('G1 실제 손실 매도 누적으로 일일손실 한도 돌파 → 정지', t.state.stoppedByLoss === true);
   ok('G1 한도 돌파 후 신규매수 0', orders.filter(o => o.side === 'buy').length === 0);
   ok('G1 연속손실 2회(포지션 2개 완전종료, M-A)', t.state.consecLosses === 2);
+
+  // G-TG) 텔레그램 알림 — 체결확정(🧾)·일일손실한도(🛑) 발송 검증 (G1과 동일 셋업 + 녹화 목)
+  orders.length = 0;
+  const tgMsgs = [];
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(10000000), price: 270000,
+    sendTelegram: (cfg, m) => { tgMsgs.push(m); return Promise.resolve(); } }));
+  t.state.botPositions = {
+    '005930': { qty:10, entry:100000, stop:0, lastSellPrice:90000, _sellPending:10 },
+    '000660': { qty:10, entry:100000, stop:0, lastSellPrice:90000, _sellPending:10 }
+  };
+  t.tickCount = 0; await t.tick();
+  ok('G-TG 체결확정 텔레그램 발송(🧾)', tgMsgs.some(m => m.includes('체결 확정')));
+  ok('G-TG 일일손실한도 텔레그램 발송(🛑)', tgMsgs.some(m => m.includes('일일 손실 한도')));
 
   // G2) 부분체결 손절 — 10주 손절 중 6주만 체결, 4주는 미체결로 잔존(체결분만 손익·연속손실 미집계)
   orders.length = 0;
