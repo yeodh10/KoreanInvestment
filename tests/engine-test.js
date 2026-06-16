@@ -28,9 +28,14 @@ ok('sma 평균', sma([1,2,3,4,5],5) === 3);
 ok('sma 데이터 부족 → null', sma([1,2],5) === null);
 ok('RSI 단조상승 = 100', calcRSI([...Array(20).keys()].map(i=>100+i),14) === 100);
 ok('RSI 단조하락 = 0', calcRSI([...Array(20).keys()].map(i=>200-i),14) === 0);
-const S = { strategies:{goldenCross:true,rsi:true}, params:{maShort:5,maLong:20,rsiPeriod:14,rsiOversold:30,rsiOverbought:70} };
-ok('하락장 → BUY(RSI 과매도)', decideSignal([...Array(30).keys()].map(i=>300-i), S)?.side === 'BUY');
+const S = { strategies:{goldenCross:true,rsi:true,regimeFilter:true}, params:{maShort:5,maLong:20,rsiPeriod:14,rsiOversold:30,rsiOverbought:70} };
+// 개선된 신호의 매수 트리거: 하락 베이스 후 5일 반등 → 골든크로스 + 20MA 상승 + RSI<70 (decChart와 동일 ~27만 스케일).
+//   마지막 봉은 '당일 미완성' 가정(엔진이 제외) → 확정봉(slice(0,-1))에서 BUY가 나도록 구성.
+const buyCloses = [100,99.7,99.4,99.1,98.8,98.5,98.2,97.9,97.6,97.3,97,96.7,96.4,96.1,95.8,95.5,95.2,94.9,95.6,96.6,97.6,98.6,99.6].map(x=>Math.round(x*2700)).concat([271620]);
+ok('추세하락 RSI 과매도 → BUY 아님(칼잡기 차단)', (decideSignal([...Array(30).keys()].map(i=>300-i), S)||{}).side !== 'BUY');
 ok('상승장 → SELL(RSI 과매수)', decideSignal([...Array(30).keys()].map(i=>100+i), S)?.side === 'SELL');
+ok('상승전환 골든크로스(추세↑·확정봉) → BUY', decideSignal(buyCloses.slice(0,-1), S)?.side === 'BUY');
+ok('레짐/코히어런스: 추세하락은 regimeFilter OFF여도 매수 아님(RSI 눌림목 게이트)', (decideSignal([...Array(30).keys()].map(i=>300-i), {strategies:{goldenCross:true,rsi:true,regimeFilter:false},params:S.params})||{}).side !== 'BUY');
 // ATR
 const flatBars = [...Array(20)].map(() => ({ high: 101, low: 99, close: 100 })); // TR=2 매일
 ok('calcATR 일정 변동성 = 2', calcATR(flatBars, 14) === 2);
@@ -61,6 +66,7 @@ function chartFrom(closes, band=500) { return closes.map(c => ({ open:c, high:c+
 const decCloses = [...Array(30).keys()].map(i => 300000 - i*1000); // 하락 → RSI 과매도(BUY), 추세 아래
 const incCloses = [...Array(30).keys()].map(i => 100000 + i*1000); // 상승 → RSI 과매수(SELL), 추세 위
 const decChart = chartFrom(decCloses);
+const buyChart = chartFrom(buyCloses); // 개선된 신호에서 매수가 나는 차트(상승전환 골든크로스)
 const incChart = chartFrom(incCloses);
 // 보유: 평단 60000, 현재가 70000 (+16.6%)
 const heldAcct = { rt_cd:'0', output1: [{ pdno:'005930', hldg_qty:'10', pchs_avg_pric:'60000', prpr:'70000', evlu_pfls_rt:'16.6', evlu_amt:'700000' }],
@@ -130,13 +136,13 @@ function mkTrader(deps) {
 
   // 3) 쿨다운 — 과매도 지속 3틱에 매수 1회
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
   await t.tick(); await t.tick(); await t.tick();
   ok('과매도 지속 시 3틱에 매수 1회', orders.filter(o => o.side === 'buy').length === 1);
 
   // 4) 틱 겹침(재진입) 방지
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(), slowChartMs: 80 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(), slowChartMs: 80 }));
   await Promise.all([t.tick(), t.tick()]);
   ok('동시 2틱에 매수 1회(재진입 가드)', orders.filter(o => o.side === 'buy').length === 1);
 
@@ -144,7 +150,7 @@ function mkTrader(deps) {
 
   // 5) 리스크 기반 사이징 — 종목당 한도(자본 20%) 초과 금지
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(10000000), price: 270000 }));
   await t.tick();
   const buy = orders.find(o => o.side === 'buy');
   ok('매수 발생', !!buy);
@@ -156,7 +162,7 @@ function mkTrader(deps) {
 
   // 5-2) 종목당 절대 한도(원) — maxPerStock 설정 시 그 금액 이내로 사이징 (자본%보다 작으면 절대값이 바인딩)
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(10000000), price: 270000 }));
   t.state.settings.safety.maxPerStock = 1000000; // 절대 100만 한도 (자본20%=200만보다 작음 → 이게 바인딩)
   await t.tick();
   const absBuy = orders.find(o => o.side === 'buy');
@@ -164,7 +170,7 @@ function mkTrader(deps) {
 
   // 5-3) 절대 한도 0(미설정) → 자본%(20%=200만)만 적용, 100만 초과 가능 (절대값이 비활성임을 확인)
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(10000000), price: 270000 }));
   t.state.settings.safety.maxPerStock = 0; // 미설정 → 자본 20% 한도(200만)만 적용
   await t.tick();
   const pctBuy = orders.find(o => o.side === 'buy');
@@ -185,21 +191,21 @@ function mkTrader(deps) {
 
   // 7-1) 위험종목 필터 — 관리/투자경고/거래정지 종목 매수 차단
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
   t.deps.getStockFlags = async () => ({ blocked: true, reason: '관리종목' });
   await t.tick();
   ok('위험종목(blocked) 매수 0회', orders.filter(o => o.side === 'buy').length === 0);
 
   // 7-2) 정상 종목(blocked=false)은 매수 진행
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
   t.deps.getStockFlags = async () => ({ blocked: false });
   await t.tick();
   ok('정상종목(blocked=false) 매수 진행', orders.filter(o => o.side === 'buy').length === 1);
 
   // 7-3) avoidWarnStocks OFF → 필터 미적용(위험종목도 매수)
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
   t.state.settings.safety.avoidWarnStocks = false;
   t.deps.getStockFlags = async () => ({ blocked: true, reason: '관리종목' });
   await t.tick();
@@ -207,14 +213,14 @@ function mkTrader(deps) {
 
   // 7-4) getStockFlags 조회 예외 → 차단 안 함(과차단 방지)
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct() }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
   t.deps.getStockFlags = async () => { throw new Error('조회 실패'); };
   await t.tick();
   ok('getStockFlags 예외 시 매수 진행(과차단 방지)', orders.filter(o => o.side === 'buy').length === 1);
 
   // 8) 일일 손실 서킷브레이커 — 자본 -2% 도달 시 신규매수 정지
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(10000000), price: 270000 }));
   await t.tick(); // capital 세팅(1틱) — 첫틱에서 매수 1회 날 수 있음
   orders.length = 0;
   t.state.dailyRealizedPnl = -250000; // -2.5% < -2%
@@ -233,7 +239,7 @@ function mkTrader(deps) {
   const lossAcct = { rt_cd:'0',
     output1: [{ pdno:'000660', hldg_qty:'10', pchs_avg_pric:'100000', prpr:'70000', evlu_pfls_rt:'-30', evlu_amt:'700000' }],
     output2: [{ dnca_tot_amt:'9300000', nass_amt:'10000000' }] };
-  t = mkTrader(mkDeps({ chart: decChart, account: lossAcct, price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: lossAcct, price: 270000 }));
   t.state.botPositions = { '000660': { qty:10, entry:100000, stop:50000, target:500000, atr:1000, initRisk:1000, hw:100000 } };
   t.tickCount = 0; // 잔고 갱신 틱
   await t.tick();
@@ -242,7 +248,7 @@ function mkTrader(deps) {
 
   // 9) 연속손실 서킷브레이커 (균형=3패)
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(10000000), price: 270000 }));
   await t.tick();
   orders.length = 0;
   t.state.consecLosses = 3;
@@ -256,7 +262,7 @@ function mkTrader(deps) {
   const five = ['A','B','C','D','E'];
   const acct5 = { rt_cd:'0', output2:[{dnca_tot_amt:'10000000'}],
     output1: five.map(c => ({ pdno:c, hldg_qty:'1', pchs_avg_pric:'1000', prpr:'1000', evlu_pfls_rt:'0', evlu_amt:'1000' })) };
-  t = mkTrader(mkDeps({ chart: decChart, account: acct5, price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: acct5, price: 270000 }));
   t.state.botPositions = { A:{qty:1},B:{qty:1},C:{qty:1},D:{qty:1},E:{qty:1} }; // 5종목
   await t.tick();
   ok('동시보유 5 초과 신규 매수 금지', orders.filter(o => o.side === 'buy').length === 0);
@@ -341,7 +347,7 @@ function mkTrader(deps) {
 
   // G1) 일일 손실 한도 — 실제 손실 매도를 reconcile로 누적해 한도 돌파(직접 대입 아님)
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: cashAcct(10000000), price: 270000 })); // 실보유 0 = 전량 체결
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct(10000000), price: 270000 })); // 실보유 0 = 전량 체결
   t.state.botPositions = {
     '005930': { qty:10, entry:100000, stop:0, lastSellPrice:90000, _sellPending:10 }, // -10만/주 손실
     '000660': { qty:10, entry:100000, stop:0, lastSellPrice:90000, _sellPending:10 }
@@ -371,7 +377,7 @@ function mkTrader(deps) {
   const expAcct = { rt_cd:'0',
     output1: [{ pdno:'111111', hldg_qty:'1', pchs_avg_pric:'6000000', prpr:'6000000', evlu_pfls_rt:'0', evlu_amt:'6000000' }],
     output2: [{ dnca_tot_amt:'4000000', nass_amt:'10000000' }] };
-  t = mkTrader(mkDeps({ chart: decChart, account: expAcct, price: 270000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: expAcct, price: 270000 }));
   t.state.botPositions = { '111111': { qty:1, entry:6000000, stop:0 } }; // 노출 600만 = 자본 10M의 60%
   t.tickCount = 0; await t.tick();
   ok('G3 총 노출 한도 도달 → 신규매수 차단', orders.filter(o => o.side === 'buy').length === 0);

@@ -26,7 +26,8 @@ const DEFAULT_SETTINGS = {
   riskPreset: 'balanced',      // 선택한 프리셋(표시용)
   strategies: {
     goldenCross: true,         // 골든크로스 사용
-    rsi: true                  // RSI 사용
+    rsi: true,                 // RSI 사용
+    regimeFilter: true         // ★ 레짐 필터: 장기MA 상승 중일 때만 골든크로스 매수(횡보 휩쏘 차단)
   },
   params: {
     maShort: 5,                // 단기 이동평균
@@ -223,6 +224,10 @@ function calcATR(bars, period) {
 function decideSignal(closes, settings) {
   const { strategies, params } = settings;
   const signals = [];
+  // 레짐 필터 기본 ON (strategies.regimeFilter === false 일 때만 해제). 매수 품질 게이트.
+  const regimeOff = strategies.regimeFilter === false;
+  const cur = closes[closes.length - 1];
+  const maLongAll = (closes.length >= params.maLong) ? sma(closes, params.maLong) : null;
 
   // ── 골든크로스 / 데드크로스 ──
   if (strategies.goldenCross && closes.length >= params.maLong + 1) {
@@ -232,11 +237,13 @@ function decideSignal(closes, settings) {
     const shortPrev = sma(prevCloses, params.maShort);
     const longPrev  = sma(prevCloses, params.maLong);
     if (shortPrev && longPrev && shortNow && longNow) {
-      // 골든크로스: 단기선이 장기선을 아래→위로 돌파
-      if (shortPrev <= longPrev && shortNow > longNow) {
-        signals.push({ side:'BUY', reason:`골든크로스 (${params.maShort}MA가 ${params.maLong}MA 상향돌파)` });
+      // ★ 레짐 필터: 장기MA가 '상승 중'일 때만 골든크로스 매수 — 횡보장의 잦은 거짓 크로스(휩쏘) 차단.
+      //   추세 없는 박스권에선 longNow≈longPrev라 매수가 막혀, 천 번의 칼질 손실을 줄인다.
+      const trendingUp = regimeOff || (longNow > longPrev);
+      if (shortPrev <= longPrev && shortNow > longNow && trendingUp) {
+        signals.push({ side:'BUY', reason:`골든크로스 (${params.maShort}MA가 ${params.maLong}MA 상향돌파, 추세↑)` });
       }
-      // 데드크로스: 단기선이 장기선을 위→아래로 이탈
+      // 데드크로스 매도는 레짐과 무관(리스크 회피는 항상)
       if (shortPrev >= longPrev && shortNow < longNow) {
         signals.push({ side:'SELL', reason:`데드크로스 (${params.maShort}MA가 ${params.maLong}MA 하향이탈)` });
       }
@@ -247,8 +254,11 @@ function decideSignal(closes, settings) {
   if (strategies.rsi) {
     const rsi = calcRSI(closes, params.rsiPeriod);
     if (rsi !== null) {
-      if (rsi <= params.rsiOversold) {
-        signals.push({ side:'BUY', reason:`RSI 과매도 (${rsi.toFixed(1)} ≤ ${params.rsiOversold})` });
+      // ★ 과매도 매수는 '상승추세 눌림목'에서만(가격 > 장기MA). 추세하락 중 과매도 매수(떨어지는 칼 잡기)를
+      //   토글과 무관하게 코히어런트하게 차단한다. RSI(역추세)와 추세필터를 한 신호로 정합시킴.
+      const pullbackOk = (maLongAll != null) && (cur > maLongAll);
+      if (rsi <= params.rsiOversold && pullbackOk) {
+        signals.push({ side:'BUY', reason:`RSI 눌림목 매수 (${rsi.toFixed(1)} ≤ ${params.rsiOversold}, 추세 상단)` });
       }
       if (rsi >= params.rsiOverbought) {
         signals.push({ side:'SELL', reason:`RSI 과매수 (${rsi.toFixed(1)} ≥ ${params.rsiOverbought})` });
@@ -812,7 +822,11 @@ class AutoTrader {
         const closes = chart.map(c => c.close).filter(v => v > 0);
         if (closes.length < s.params.maLong + 2) continue;
 
-        const signal = decideSignal(closes, s);
+        // ★ 리페인팅 차단: 당일 미완성 봉(종가=현재가)을 제외한 '확정봉'으로만 신호 판정.
+        //   엔진은 장중에만 돌아 마지막 일봉은 항상 형성 중 → 확정 데이터로 크로스/RSI를 판정해
+        //   장중 출렁임에 의한 유령 골든크로스(미확정 매수)를 막는다. 현재가는 진입가·추세필터에만 사용.
+        const closedBars = closes.slice(0, -1);
+        const signal = decideSignal(closedBars, s);
         const held = heldPositions[code];
 
         if (signal?.side === 'BUY') {
@@ -825,9 +839,9 @@ class AutoTrader {
           const n = nowMin();
           if (n < startMin || n > timeToMin(s.safety.tradeEndTime)) continue;
 
-          // 추세 필터: 가격이 장기MA 위일 때만 매수 (하락추세 '떨어지는 칼' 회피)
+          // 추세 필터: 현재가가 확정봉 장기MA 위일 때만 매수 (하락추세 '떨어지는 칼' 회피)
           if (s.safety.trendFilter) {
-            const maL = sma(closes, s.params.maLong);
+            const maL = sma(closedBars, s.params.maLong);
             if (!maL || closes[closes.length - 1] < maL) continue;
           }
           // 이미 봇이 보유한 종목은 추가매수 금지 — 한 종목 1회 진입(분할 몰빵 방지) + 한도 찬 종목을
