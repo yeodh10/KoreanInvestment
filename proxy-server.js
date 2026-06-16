@@ -113,9 +113,14 @@ function saveConfig(cfg) {
 }
 
 // ── HTTPS 요청 헬퍼 ──
+// keep-alive 에이전트: KIS 호출마다 TCP+TLS 핸드셰이크를 새로 하던 것을 제거(연결 재사용).
+// 마감/개장 피크대에 핸드셰이크 지연이 10초 예산을 잠식해 '응답 시간 초과'가 잦던 문제 완화.
+// 동시성은 앱 자체 큐(inflight≤8/key)가 통제하므로 maxSockets는 넉넉히 둔다.
+// KIS가 Connection: close로 응답하면 재사용이 안 될 뿐, 부작용은 없다(안전).
+const kisAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 50, maxFreeSockets: 16 });
 function httpsRequest(options, body) {
   return new Promise((resolve, reject) => {
-    const req = https.request(options, res => {
+    const req = https.request({ agent: kisAgent, ...options }, res => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
