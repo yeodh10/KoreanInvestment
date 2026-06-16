@@ -5,6 +5,18 @@
  * 포트: 3000
  */
 
+// ── Node 버전 가드 ──
+// node:sqlite 의 DatabaseSync 는 Node 22.5.0+ 에서만 제공된다(auth.db/order-journal.db).
+// 구버전에서 실행하면 require('node:sqlite') 가 난해한 오류를 던지므로, 시작 즉시 명확히 안내하고 종료한다.
+{
+  const [maj, min] = process.versions.node.split('.').map(Number);
+  if (maj < 22 || (maj === 22 && min < 5)) {
+    console.error(`❌ Node 22.5.0 이상이 필요합니다(node:sqlite DatabaseSync). 현재: ${process.version}`);
+    console.error('   nvm 등으로 Node 22.5.0+ (권장 22 LTS 최신) 설치 후 다시 실행하세요.');
+    process.exit(1);
+  }
+}
+
 const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
@@ -17,6 +29,9 @@ const PORT = parseInt(process.env.PORT) || 3000;
 // 기본은 127.0.0.1 — 터널/리버스 프록시만 접속, LAN/공인망 직접 노출 차단.
 // LAN 직접 노출이 필요하면 HOST=0.0.0.0 으로 실행.
 const HOST = process.env.HOST || '127.0.0.1';
+// AI 세팅 어시스턴트(/api/ai) 사용 여부. 서버에 claude CLI 가 없거나 기능을 끄고 싶을 때 AI_ASSIST_ENABLED=0.
+// 기본 활성(미설정/그 외 값 = ON). 자동매매 본기능과 무관 — 꺼도 매매에 영향 없음.
+const AI_ASSIST_ENABLED = !/^(0|false|off|no)$/i.test(String(process.env.AI_ASSIST_ENABLED ?? '1').trim());
 const CONFIG_FILE = path.join(__dirname, 'kis-config.json');
 const STOCK_FILE = path.join(__dirname, 'stocks-data.json');
 
@@ -577,7 +592,6 @@ function heldQtyOf(userKey, code) {
 // ── 텔레그램 알림 발송 ──
 async function sendTelegram(cfg, message) {
   if (!cfg.telegramToken || !cfg.telegramChatId) return;
-  const url = `https://api.telegram.org/bot${cfg.telegramToken}/sendMessage`;
   const body = JSON.stringify({ chat_id: cfg.telegramChatId, text: message, parse_mode: 'HTML' });
   try {
     await httpsRequest({
@@ -2284,6 +2298,8 @@ async function handleRequest(req, res, session) {
     // 보안: 도구 전면 차단(--disallowedTools) + cwd를 프로젝트 밖(/tmp)으로 격리 + 시스템 프롬프트로
     //       서버·코드·파일·주문 접근 금지. AI는 '조언/설명 + 설정 변경 제안'만, 적용은 사용자 승인.
     if (pathname === '/api/ai' && req.method === 'POST') {
+      // 기능 스위치 — AI_ASSIST_ENABLED=0 이면 깔끔히 비활성(자동매매 본기능과 무관).
+      if (!AI_ASSIST_ENABLED) { jsonRes(res, 200, { ok: false, disabled: true, message: 'AI 비활성(관리자가 AI_ASSIST_ENABLED=0 으로 꺼둠)' }); return; }
       const body = await parseBody(req);
       const msg = String(body.message || '').slice(0, 1000).trim();
       if (!msg) { jsonRes(res, 400, { ok: false, message: '메시지를 입력하세요' }); return; }
@@ -2306,14 +2322,19 @@ async function handleRequest(req, res, session) {
             (err, stdout) => err ? reject(err) : resolve(String(stdout || '').trim()));
         });
         // 설정 변경 제안 파싱 — 화이트리스트 키만, 적용은 프론트에서 사용자 승인 후
-        const WL = new Set(['riskPerTradePct','maxPerStock','maxPositions','maxExposurePct','stopAtrMult','takeProfitR','dailyLossLimitPct','maxConsecLosses','maxTradesPerDay','trendFilter','intradayRebound','rbMinDrop','rbReboundPct']);
+        const WL = new Set(['riskPerTradePct','maxPerStockPct','maxPositions','maxExposurePct','stopAtrMult','takeProfitR','dailyLossLimitPct','maxConsecLosses','maxTradesPerDay','trendFilter','intradayRebound','rbMinDrop','rbReboundPct']);
         const sets = [];
         const re = /\[\[set\s+([a-zA-Z]+)\s*=\s*([^\]]+)\]\]/g; let mm;
         while ((mm = re.exec(reply))) { if (WL.has(mm[1])) sets.push({ key: mm[1], value: mm[2].trim() }); }
         const cleanReply = reply.replace(/\[\[set[^\]]*\]\]/g, '').trim();
         jsonRes(res, 200, { ok: true, reply: cleanReply || reply, suggestions: sets });
       } catch (e) {
-        jsonRes(res, 200, { ok: false, message: 'AI 응답 실패 (시간 초과 또는 일시 오류) — 잠시 후 다시' });
+        // ENOENT = claude CLI 미설치/PATH에 없음 → 타임아웃으로 오인하지 않게 명확히 안내(설치 또는 AI_ASSIST_ENABLED=0).
+        if (e && e.code === 'ENOENT') {
+          jsonRes(res, 200, { ok: false, disabled: true, message: 'AI 비활성(서버에 claude CLI 미설치)' });
+        } else {
+          jsonRes(res, 200, { ok: false, message: 'AI 응답 실패 (시간 초과 또는 일시 오류) — 잠시 후 다시' });
+        }
       } finally {
         global._aiInFlight.delete(session.userId); // 처리 완료 — 다음 요청 허용
       }

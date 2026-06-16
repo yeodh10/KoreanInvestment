@@ -549,8 +549,11 @@ function getFeed(cfg) {
 // SSE 핸들러 — GET /api/stream?codes=005930,000660&ob=005930
 // ════════════════════════════════════════
 function handleStream(req, res, { cfg, query, onPrice, onExecution }) {
-  const codes = (query.codes || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 35); // 시총30 시세표 전체 실시간 구독
-  const obCode = (query.ob || '').trim() || null;
+  // 종목코드 형식 검증 — 다른 엔드포인트(/api/prices 등)와 동일하게 6자 영숫자만 KIS WS 구독에 넘긴다.
+  // (변조 query 가 KIS WebSocket 에 비정상 코드를 보내 구독 슬롯을 낭비/오염하는 것을 차단)
+  const codes = (query.codes || '').split(',').map(s => s.trim()).filter(c => /^[0-9A-Z]{6}$/.test(c)).slice(0, 35); // 시총30 시세표 전체 실시간 구독
+  const obRaw = (query.ob || '').trim();
+  const obCode = /^[0-9A-Z]{6}$/.test(obRaw) ? obRaw : null;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',

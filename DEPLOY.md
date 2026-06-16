@@ -117,6 +117,46 @@ TRUSTED_PROXY=cloudflare ./go-live.sh   # ← IP 신뢰 헤더를 CF-Connecting-
 | `HOST` | `127.0.0.1` | 바인딩 주소. LAN 직접 노출 시 `0.0.0.0` |
 | `TZ`   | (시스템) | 로그 시간 표기용. `Asia/Seoul` 권장 |
 | `TRUSTED_PROXY` | `tailscale` | 클라이언트 IP 신뢰 헤더. `tailscale`=X-Forwarded-For, `cloudflare`=CF-Connecting-IP |
+| `AI_ASSIST_ENABLED` | `1` | AI 세팅 어시스턴트(`/api/ai`) 사용 여부. `0`/`false`/`off` 면 기능을 깔끔히 비활성화한다. |
+
+### AI 세팅 어시스턴트 의존성 (`/api/ai`)
+설정 화면의 'AI 세팅 어시스턴트'는 서버에 **`claude` CLI**(Claude Code 헤드리스)가 설치되어 PATH에 있어야 동작한다.
+- 미설치 시 사용자에게 `AI 비활성(서버에 claude CLI 미설치)` 라고 명확히 안내된다(타임아웃으로 오인하지 않게).
+- 이 기능을 아예 끄려면 `AI_ASSIST_ENABLED=0` 으로 실행한다(자동매매 본기능과 무관 — 꺼도 매매에 영향 없음).
+- CLI는 `--disallowedTools` 로 파일/셸/네트워크 도구를 모두 차단하고 `cwd=/tmp` 로 실행되어, 설정 조언·제안만 수행한다.
+
+## 정기 백업 — scripts/backup.mjs
+민감 파일(`.enckey`·`auth.db`·`order-journal.db`)을 `backups/YYYYMMDD-HHMMSS/` 로 백업한다.
+SQLite는 **WAL-safe**(`VACUUM INTO`)로 스냅샷을 떠 `-wal`/`-shm` 에 남은 최신 트랜잭션까지 일관되게 보존한다(서버 정지 불필요·운영 DB 변경 없음).
+```bash
+node scripts/backup.mjs            # 즉시 1회 백업 (backups/ 아래에 생성)
+```
+> 참고: `backups/` 는 `.gitignore` 대상이며, 별도 호스트/스토리지로 `scp`·동기화하는 것을 권장한다.
+
+**자동화(매일 03:30 KST) — systemd 타이머 예시** (아래는 *설명용 텍스트*이며, 이 문서대로 직접 enable 할 것):
+```ini
+# /etc/systemd/system/autotrade-backup.service
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/KoreanInvestment
+Environment=TZ=Asia/Seoul
+ExecStart=/usr/bin/node scripts/backup.mjs
+```
+```ini
+# /etc/systemd/system/autotrade-backup.timer
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+```bash
+sudo systemctl enable --now autotrade-backup.timer   # 확인: systemctl list-timers autotrade-backup.timer
+```
+**또는 cron** (`crontab -e`):
+```cron
+30 3 * * *  cd /home/ubuntu/KoreanInvestment && /usr/bin/node scripts/backup.mjs >> backups/backup.log 2>&1
+```
 
 ## 보존해야 할 민감 파일 (.gitignore — 백업/이전 대상)
 `auth.db`(계정·세션 SQLite) · `.enckey`(없으면 user-configs 복호화 불가) ·

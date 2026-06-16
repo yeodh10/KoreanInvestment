@@ -44,3 +44,13 @@ Importamos las librerias necesarias.txt
 CURRENT-URL.txt
 # 장중 자동 점검 리포트 (런타임 산출물)
 장중점검-*.md
+
+# 백업 산출물 (scripts/backup.mjs) — 민감 파일 스냅샷, 절대 커밋 금지
+backups/
+# 레드팀/임시 테스트 스크립트 (예: tests/_redteam_chartcache.js)
+tests/_redteam_*.js
+# 방어적 광역 규칙 — 모든 SQLite DB·테스트 임시 DB(+WAL/SHM 사이드카) 차단
+*.db
+*.db-wal
+*.db-shm
+*.test.db*

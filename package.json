@@ -1,0 +1,13 @@
+{
+  "name": "autotrade-kr",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AutoTrade KR — KIS API 프록시 + 자동매매 서버 (Node 빌트인 모듈만 사용, npm 의존성 0)",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node proxy-server.js",
+    "test": "node tests/auth-test.js && node tests/engine-test.js && node tests/fallback-test.js && node tests/journal-test.js && node tests/realtime-test.js"
+  }
+}
