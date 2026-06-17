@@ -824,9 +824,15 @@ function setCors(res, req) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   }
-  // 보안 헤더
+  // 보안 헤더 (securityheaders.com 권고 — CSP·HSTS·Referrer·Permissions)
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains'); // Funnel이 항상 HTTPS — preload는 공유 TLD라 제외
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()');
+  // CSP: 앱은 외부 리소스·eval 미사용(자기완결, 동일 출처) → 'self' 기반. 인라인 스크립트/스타일/onclick·
+  //      style 속성을 쓰므로 'unsafe-inline'만 허용(unsafe-eval 불필요). 실시간은 동일출처 SSE라 connect-src 'self'로 충분.
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'");
 }
 
 // ── CSRF: 상태변경 요청은 동일 출처만 ──
