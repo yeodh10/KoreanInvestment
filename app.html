@@ -3565,6 +3565,8 @@ async function loadDashTick() {
   if (!ticks.length) {
     // 시간대 인지 문구 (토스 톤)
     const k = new Date(Date.now()+9*3600*1000), mins = k.getUTCHours()*60+k.getUTCMinutes(), wd = k.getUTCDay();
+    // 같은 종목의 장중 일시적 빈 응답(KIS hang up/타임아웃)이면 기존 체결 유지 — 빈칸으로 깜빡이지 않게
+    if (wd>=1 && wd<=5 && mins>=9*60 && mins<=15*60+30 && tbody.dataset.tickCode === code && tbody.querySelector('td.mono')) return;
     const msg = (wd===0||wd===6) ? '주말이에요 — 장이 열리면 체결이 표시돼요'
       : mins < 9*60 ? '장 시작 전이에요 (09:00 개장)'
       : mins > 15*60+30 ? '오늘 장이 마감됐어요'
@@ -3585,6 +3587,7 @@ async function loadDashTick() {
   if (sig === _dashTickLast) return;
   _dashTickLast = sig;
   tbody.innerHTML = html;
+  if (ticks.length) tbody.dataset.tickCode = code; // 표시된 체결의 종목 기록(일시 빈응답 시 유지 판단용)
 }
 let _dashTickLast = '';
 // 뉴스 날짜 → KST 짧은 포맷 (M/D HH:mm) — GMT 원문 노출 방지
