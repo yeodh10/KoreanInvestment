@@ -1966,10 +1966,31 @@ function goTrade() {
 }
 
 let _chartReqSeq = 0; // 늦게 도착한 이전 요청이 최신 차트를 덮어쓰는 것 방지
+let _chartMem = {}; // 브라우저 차트 캐시: memKey → {data, ts}. 종목 재조회 체감속도 0 + SWR.
+function _applyChartData(data) {
+  const isMin = dashPeriod.startsWith('m');
+  setText('chartCount', `${data.length}봉 · ${isMin ? dashMinDays+'일' : dashYears+'년'}`);
+  dashData = data;
+  // 기본은 최근 약 70봉만 보이게 → 오른쪽으로 끌면 과거로 패닝 가능(토스식). 데이터 적으면 전체.
+  const DEFAULT_BARS = 70;
+  dashZoom = data.length > DEFAULT_BARS ? data.length / DEFAULT_BARS : 1;
+  dashPan = 0;
+  renderChart();
+  setupChartEvents();
+}
 async function loadChart() {
   const reqId = ++_chartReqSeq;
   const code = currentCode;
-  setText('chartCount', '불러오는 중...');
+  // 브라우저 캐시(SWR): 같은 종목·기간 재조회면 즉시 렌더(체감 0). 신선(<30s)하면 서버 호출 생략,
+  // 오래됐으면 화면은 채운 채 백그라운드로 갱신. KIS(특히 모의 280ms 레이트리밋) 왕복 대기를 체감에서 제거.
+  const memKey = `${code}_${dashPeriod}_${dashYears}_${dashMinDays}`;
+  const mem = _chartMem[memKey];
+  if (mem && mem.data.length) {
+    _applyChartData(mem.data);
+    if (Date.now() - mem.ts < 30000) return; // 30초 내면 그대로 — 과도한 재호출 방지
+  } else {
+    setText('chartCount', '불러오는 중...');
+  }
   if (!proxyOnline) await checkProxy();
   if (reqId !== _chartReqSeq) return; // 이미 새 요청이 시작됨 (stale)
   let data = null;
@@ -1985,6 +2006,7 @@ async function loadChart() {
     }
   }
   if (!data || !data.length) {
+    if (mem && mem.data.length) return; // 캐시가 이미 떠 있으면 일시적 빈 응답에 지우지 않음(깜빡임 방지)
     // ★ 금융앱 안전: 실데이터 없으면 '가짜 시뮬레이션 차트'를 절대 그리지 않는다(현재가와 불일치 → 오인 위험).
     //   빈 차트 + 정직한 안내로 대체. 캔버스 잔상도 제거.
     dashData = [];
@@ -1992,17 +2014,8 @@ async function loadChart() {
     const cv = $('mainCandle'); if (cv) { const c2 = cv.getContext('2d'); if (c2) c2.clearRect(0, 0, cv.width, cv.height); }
     return;
   }
-  {
-    const isMin = dashPeriod.startsWith('m');
-    setText('chartCount', `${data.length}봉 · ${isMin ? dashMinDays+'일' : dashYears+'년'}`);
-  }
-  dashData = data;
-  // 기본은 최근 약 70봉만 보이게 → 오른쪽으로 끌면 과거로 패닝 가능(토스식). 데이터 적으면 전체.
-  const DEFAULT_BARS = 70;
-  dashZoom = data.length > DEFAULT_BARS ? data.length / DEFAULT_BARS : 1;
-  dashPan = 0;
-  renderChart();
-  setupChartEvents();
+  _chartMem[memKey] = { data, ts: Date.now() }; // 캐시 적재
+  _applyChartData(data);
 }
 
 function parseChart(body) {
