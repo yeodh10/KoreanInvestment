@@ -605,6 +605,7 @@ td.mono,th.mono{font-family:var(--mono)}
       <span style="font-size:12px;color:var(--text-1)" id="hdrUsername">—</span>
       <button class="panel-btn" id="themeToggle" onclick="toggleTheme()" style="font-size:13px;padding:4px 8px" title="라이트/다크 전환">🌙</button>
       <button class="panel-btn" onclick="doLogout()" style="font-size:11px">로그아웃</button>
+      <button class="panel-btn" onclick="doLogoutAll()" style="font-size:11px" title="다른 기기·브라우저의 세션도 모두 끊기(도난 세션 회수)">모든 기기</button>
     </div>
   </div>
 </header>
@@ -4715,6 +4716,13 @@ async function doLogout() {
   // 공유 브라우저 위생: 떠나는 유저의 계좌 스냅샷·설정 캐시를 지운다(타 유저 화면 오염 방지)
   try { localStorage.removeItem(uk('acctSnap')); localStorage.removeItem(uk('kisConfig')); localStorage.removeItem('acctSnap'); localStorage.removeItem('kisConfig'); localStorage.removeItem('watchCodes'); } catch(_) {}
   await apiPost('/api/auth/logout', {});
+  location.reload();
+}
+// 모든 기기에서 로그아웃 — 도난/분실 세션 회수(다른 브라우저·폰 세션 전부 폐기)
+async function doLogoutAll() {
+  if (!confirm('모든 기기에서 로그아웃할까요?\n다른 브라우저·폰에 남은 세션이 전부 끊깁니다.')) return;
+  try { localStorage.removeItem(uk('acctSnap')); localStorage.removeItem(uk('kisConfig')); localStorage.removeItem('acctSnap'); localStorage.removeItem('kisConfig'); localStorage.removeItem('watchCodes'); } catch(_) {}
+  await apiPost('/api/auth/logout-all', {});
   location.reload();
 }
 async function checkAuth() {

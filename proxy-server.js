@@ -151,7 +151,7 @@ async function getKisToken(cfg) {
   // 유효한 토큰이 있으면 무조건 재사용 (재인증 불필요)
   if (cfg.token && cfg.tokenExpiry > now + 60000) return cfg.token;
 
-  const tkey = cfg.appKey || '_global';
+  const tkey = (cfg.appKey || '_global') + '|' + (cfg.txMode === 'vts' ? 'vts' : 'live'); // #6: 실전/모의는 도메인별 토큰 → 메모리 미러를 모드별 분리(전환 시 반대도메인 토큰 재사용 차단). cfg.token은 설정저장 시 이미 클리어됨.
   const st = _tokenIssue[tkey] || (_tokenIssue[tkey] = { p: null, failUntil: 0, token: null, expiry: 0 });
 
   // 메모리 토큰 미러 — cfg(매 요청 새로 로드)에 토큰이 없어도 발급분 재사용.
@@ -1638,6 +1638,13 @@ async function handleRequest(req, res, session) {
     auth.logout(auth.parseCookies(req).session); // cookies는 handleRequest 스코프 밖이었음 → 직접 파싱 (로그아웃 500 수정)
     res.setHeader('Set-Cookie', `session=; Max-Age=0; ${cookieFlags(req)}`);
     jsonRes(res, 200, { ok:true });
+    return;
+  }
+  // 모든 기기에서 로그아웃 — 이 유저의 전 세션 폐기(도난 세션 회수). 본인 세션만 대상.
+  if (pathname === '/api/auth/logout-all' && req.method === 'POST') {
+    const r = (session && session.userId) ? auth.purgeUserSessions(session.userId) : { ok:false, removed:0 };
+    res.setHeader('Set-Cookie', `session=; Max-Age=0; ${cookieFlags(req)}`);
+    jsonRes(res, 200, { ok:true, removed: r.removed || 0, message: '모든 기기에서 로그아웃되었습니다.' });
     return;
   }
   if (pathname === '/api/auth/me') {

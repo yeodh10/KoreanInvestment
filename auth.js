@@ -236,6 +236,14 @@ function logout(token) {
   return { ok:true };
 }
 
+// ── 유저의 모든 세션 폐기 (도난 세션 회수 / 모든 기기 로그아웃) ──
+// 로그아웃은 제출 토큰 1개만 지운다 → 세션 유출 시 30일 TTL 끝까지 회수 불가하던 갭(적대감사 MEDIUM) 보완.
+function purgeUserSessions(userId) {
+  if (!userId) return { ok:false, removed:0 };
+  try { const r = db.prepare('DELETE FROM sessions WHERE userId = ?').run(userId); return { ok:true, removed: r.changes }; }
+  catch (e) { return { ok:false, removed:0 }; }
+}
+
 // ── 만료 세션 일괄 정리 ── (서버 부팅 시 1회 명시 호출. require 시점 자동 실행하지 않아
 //   market-check 등 단명 프로세스가 auth.js를 require해도 live DB에 DELETE 쓰기를 하지 않게 분리.)
 function purgeExpiredSessions() {
@@ -295,7 +303,7 @@ function parseCookies(req) {
 }
 
 module.exports = {
-  register, login, logout, getUserBySession,
+  register, login, logout, purgeUserSessions, getUserBySession,
   loadUserConfig, saveUserConfig,
   loadUsers, parseCookies, encrypt, decrypt, purgeExpiredSessions
 };

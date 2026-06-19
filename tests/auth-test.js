@@ -47,6 +47,15 @@ ok('빈 토큰 거부', A.getUserBySession('') === null);
 A.logout(lr.token);
 ok('로그아웃 후 세션 무효', A.getUserBySession(lr.token) === null);
 
+// 모든 기기 로그아웃 — 한 유저의 전 세션 일괄 폐기(도난 세션 회수, 적대감사 MEDIUM 보완)
+const _m1 = await A.login('alice', 'password123');
+const _m2 = await A.login('alice', 'password123');
+ok('전체폐기 전 두 세션 유효', !!A.getUserBySession(_m1.token) && !!A.getUserBySession(_m2.token));
+const _pr = A.purgeUserSessions(r1.userId);
+ok('purgeUserSessions 폐기 건수 ≥ 2', _pr.ok && _pr.removed >= 2);
+ok('전체폐기 후 세션1 무효', A.getUserBySession(_m1.token) === null);
+ok('전체폐기 후 세션2 무효', A.getUserBySession(_m2.token) === null);
+
 // 세션 토큰은 해시로만 저장 — 원본 토큰이 DB 키로 그대로 들어가지 않음
 const lr2 = await A.login('bob', 'password123');
 const { DatabaseSync } = require('node:sqlite');
