@@ -117,7 +117,9 @@ function saveConfig(cfg) {
 // 마감/개장 피크대에 핸드셰이크 지연이 10초 예산을 잠식해 '응답 시간 초과'가 잦던 문제 완화.
 // 동시성은 앱 자체 큐(inflight≤8/key)가 통제하므로 maxSockets는 넉넉히 둔다.
 // KIS가 Connection: close로 응답하면 재사용이 안 될 뿐, 부작용은 없다(안전).
-const kisAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 50, maxFreeSockets: 16 });
+const kisAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 5000, maxSockets: 50, maxFreeSockets: 4, scheduling: 'lifo' });
+// maxFreeSockets↓ + scheduling 'lifo'(최근 사용 소켓 우선 재사용=살아있을 확률↑) — 죽은 keep-alive 소켓 재사용(socket hang up) 노출 축소.
+// (빌트인 Agent엔 freeSocketTimeout이 없어 0-dep로 완전 제거는 불가 — withRetry가 잔여 hang up 회복)
 function httpsRequest(options, body) {
   return new Promise((resolve, reject) => {
     const req = https.request({ agent: kisAgent, ...options }, res => {
@@ -268,13 +270,20 @@ async function pumpKis(key) {
       // high 우선이되 4:1로 low(백그라운드 시세 갱신)도 섞어 기아 방지.
       // 폭락장처럼 high 요청이 폭주할 때 low가 영구히 밀려 화면 시세 캐시가 멈추던 문제 차단.
       let job;
-      if (q.high.length && (q._lowStarve || 0) < 4) { job = q.high.shift(); q._lowStarve = (q._lowStarve || 0) + 1; }
+      // high 우선. low는 '대기 중일 때만' 4:1로 양보(기아 방지). low가 없으면 카운터 리셋 →
+      // 신선한 high 버스트가 직전 누적 _lowStarve 때문에 백그라운드 low에 추월당하던 버그 수정(체감속도 보호).
+      if (q.high.length && (q.low.length === 0 || (q._lowStarve || 0) < 4)) {
+        job = q.high.shift();
+        q._lowStarve = q.low.length ? (q._lowStarve || 0) + 1 : 0;
+      }
       else if (q.low.length) { job = q.low.shift(); q._lowStarve = 0; }
       else { job = q.high.shift(); }
       // 주문(직발사) 진행 중이면 그 시간만큼 일반 큐가 양보 (초당 한도 충돌 방지)
-      const hold = (q.holdUntil || 0) - Date.now();
-      const wait = Math.max(q.gap - (Date.now() - q.last), hold);
+      const wait = Math.max(q.gap - (Date.now() - q.last), (q.holdUntil || 0) - Date.now());
       if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      // 대기 중 주문이 새로 holdUntil을 세팅했을 수 있어 1회 재확인 — 이미 잠든 잡이 주문과 동시발사되던 갭(EGW00201) 차단
+      const extraHold = (q.holdUntil || 0) - Date.now();
+      if (extraHold > 0) await new Promise(r => setTimeout(r, extraHold));
       q.last = Date.now();
       // 핵심: 발사 간격(초당 한도)만 지키고 응답은 기다리지 않는다(병렬).
       // KIS가 느려져도 처리량이 발사율(초당 ~4건)을 유지 — 직렬 대기로 인한 적체 제거.
@@ -360,7 +369,7 @@ async function kisProxyReal(cfg, kispath, trId, queryParams, priority) {
   // 실전 도메인 호출도 같은 앱키 큐를 공유한다(앱키 단위 한도 보호). 간격은 실전 한도 적용.
   const qKey = cfg.appKey || '_global';
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await kisSchedule(qKey, KIS_GAP_MS.live, async () => {
+    const res = await kisSchedule(qKey, kisGapFor(cfg), async () => { // 공유 큐 gap을 vts(280)→60으로 떨구지 않게 cfg 기준
       const token = await getKisTokenReal(cfg);
       return httpsRequest({
         hostname, port: parseInt(port), path: fullPath, method: 'GET',
@@ -370,7 +379,7 @@ async function kisProxyReal(cfg, kispath, trId, queryParams, priority) {
         }
       });
     }, priority);
-    if (res?.body && res.body.msg_cd === 'EGW00201' && attempt < 2) { await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue; }
+    if (res?.body && res.body.msg_cd === 'EGW00201' && attempt < 2) { const q = _kisQ(qKey); q.penalty = Math.min(300, (q.penalty || 0) + 100); await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue; } // #5 적응형 백오프
     return res;
   }
 }

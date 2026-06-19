@@ -2014,7 +2014,8 @@ async function loadChart() {
     const cv = $('mainCandle'); if (cv) { const c2 = cv.getContext('2d'); if (c2) c2.clearRect(0, 0, cv.width, cv.height); }
     return;
   }
-  _chartMem[memKey] = { data, ts: Date.now() }; // 캐시 적재
+  delete _chartMem[memKey]; _chartMem[memKey] = { data, ts: Date.now() }; // 캐시 적재(최신=끝)
+  { const _mk = Object.keys(_chartMem); if (_mk.length > 40) delete _chartMem[_mk[0]]; } // 메모리 상한(최대 40)
   _applyChartData(data);
 }
 
