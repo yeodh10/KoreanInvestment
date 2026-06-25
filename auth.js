@@ -61,6 +61,20 @@ function getEncKey() {
     ENC_KEY = key;
     return ENC_KEY;
   }
+  // 신규 키 생성은 '진짜 최초'에만 안전하다. .enckey가 없는데 user-configs/에 기존 설정이 있으면
+  // (백업 분실·이관 누락) 새 키를 만드는 순간 기존 KIS 자격증명이 전부 영구 복호화 불가가 된다.
+  // 무성 전손을 막기 위해 기동을 중단하고 복구를 안내한다(시작 시 키-데이터 정합 검증).
+  let _hasExistingConfigs = false;
+  try {
+    _hasExistingConfigs = fs.existsSync(USER_CONFIG_DIR)
+      && fs.readdirSync(USER_CONFIG_DIR).some((f) => f.endsWith('.json'));
+  } catch (_) { _hasExistingConfigs = false; }
+  if (_hasExistingConfigs) {
+    throw new Error(
+      '.enckey가 없는데 user-configs/에 기존 설정이 있습니다 — 새 키를 만들면 기존 KIS 자격증명이 ' +
+      '영구 복호화 불가가 됩니다. 백업에서 .enckey를 복원하세요. (진짜 새 출발이면 user-configs/를 비우고 재시작.)',
+    );
+  }
   // 신규 생성. ★ 쓰기 실패는 절대 무시하지 않는다 — 미영속 키로 운영하면 재시작 때 새 키가
   //   생성돼 기존 user-configs 가 전부 영구 복호화 불가(무음 자격증명 전손)가 된다. 실패 시 기동 중단.
   const key = crypto.randomBytes(32);
