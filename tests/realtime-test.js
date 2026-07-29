@@ -224,6 +224,28 @@ function startFakeKis(onClientMsg) {
   ok('연결 실패 상태로 남음 (connected=false)', dead.connected === false);
   dead._closed = true; dead.removeClient(dc); try { dead.ws && dead.ws.close(); } catch (_) {}
 
+  // ── 좀비 재연결 방지 (2026-07-04 실장애 회귀) ──
+  // 연결 실패로 재시도가 예약된 상태에서 클라이언트가 0이 되어 피드가 정리되면, 남은 타이머가
+  // 계속 connect()를 불러도 _closed 가드에 막혀 "성공도 실패도 없는 침묵" 좀비가 됐다(3일 방치).
+  // → 정리 시 예약 타이머를 취소하고, 폐기된 피드는 깨어나도 재연결하지 않아야 한다.
+  rt._setEndpointOverride({ host: '127.0.0.1', port: deadPort, skipApproval: true });
+  const zombie = rt.getFeed({ appKey: 'ZOMBIEKEY', appSecret: 'S', txMode: 'vts' });
+  const zc = { id: 902, res: { write() {} }, codes: new Set(['005930']), obCode: null };
+  zombie.addClient(zc);
+  await sleep(400);
+  ok('실패 후 재연결 타이머 예약됨', !!zombie._reconnectTimer);
+  zombie.removeClient(zc);
+  if (zombie._idleTimer) clearTimeout(zombie._idleTimer);
+  zombie._closed = true;                                        // 유휴 정리 본문과 동일 상태 재현
+  if (zombie._reconnectTimer) { clearTimeout(zombie._reconnectTimer); zombie._reconnectTimer = null; }
+  ok('피드 정리 시 재연결 타이머 취소됨', zombie._reconnectTimer === null);
+  zombie._closed = false;                                       // 폐기 피드가 깨어난 상황 모사
+  zombie._feedKey = '__evicted__';                              // _feeds에 없는 키 = 폐기됨
+  zombie._scheduleReconnect(10);
+  await sleep(150);
+  ok('폐기된 피드는 재연결하지 않음(좀비 차단)', zombie.connecting === false && zombie.connected === false);
+  zombie._closed = true; try { zombie.ws && zombie.ws.close(); } catch (_) {}
+
   console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('테스트 오류:', e); process.exit(2); });

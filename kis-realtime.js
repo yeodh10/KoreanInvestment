@@ -341,15 +341,28 @@ class KisFeed {
         if (this._closed) return;
         const delay = Math.min(30000, 1000 * Math.pow(2, this._retry++));
         this.log(`🔄 연결 끊김 — ${Math.round(delay / 1000)}초 후 재연결`);
-        setTimeout(() => this.connect(), delay);
+        this._scheduleReconnect(delay);
       };
       ws.connect();
     } catch (e) {
       this.connecting = false;
       const delay = Math.min(60000, 5000 * (this._retry + 1)); this._retry++;
       this.log(`❌ 연결 실패(${e.message}) — ${Math.round(delay / 1000)}초 후 재시도`);
-      setTimeout(() => this.connect(), delay);
+      this._scheduleReconnect(delay);
     }
+  }
+
+  // 재연결 예약 — 타이머를 보관해 피드 정리 시 확실히 취소한다(좀비 재연결 루프 방지).
+  // 폐기된 피드(_feeds에서 빠진 객체)는 깨어나도 스스로 중단해 침묵 좀비가 되지 않게 한다.
+  _scheduleReconnect(delay) {
+    if (this._closed) return;
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (this._closed || _feeds[this._feedKey] !== this) return; // 폐기된 피드는 재연결하지 않음
+      this.connect();
+    }, delay);
+    if (this._reconnectTimer.unref) this._reconnectTimer.unref();
   }
 
   // ── 무수신 watchdog ──
@@ -520,6 +533,9 @@ class KisFeed {
           this._closed = true;
           try { this.ws && this.ws.close(); } catch (_) {}
           this._stopWatchdog && this._stopWatchdog();
+          // 예약된 재연결 타이머 취소 — 안 지우면 폐기된 피드가 계속 connect()를 부르고
+          // _closed 가드에 막혀 "성공도 실패도 없는 침묵" 상태로 좀비가 된다(2026-07-04 실제 발생).
+          if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
           delete _feeds[this._feedKey];
           this.log('💤 클라이언트 없음 — 피드 정리');
         }
