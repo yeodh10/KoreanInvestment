@@ -687,7 +687,10 @@ function getTrader(userId) {
     // 미체결(접수) 주문 목록 — 엔진의 중복매도 방지·매수한도 계산에 사용
     getPendingOrders: () => orderJournal.pendingList(userId === '_global' ? null : userId),
     // 잔고 대조로 저널 체결 확정 — 헤드리스(브라우저 미접속) 운영에서도 미체결 가드/자동취소 정상화
-    reconcileOrders: (holdings) => orderJournal.reconcile(userId === '_global' ? null : userId, holdings)
+    reconcileOrders: (holdings) => orderJournal.reconcile(userId === '_global' ? null : userId, holdings),
+    // 봇 소유권 추적(전수조사 pos-1) — 봇 지분을 '봇이 실제 체결한 분'으로 상한 걸어 수동 보유분 오매도 차단
+    botNetFilled:     (code) => orderJournal.botNetFilled(userId === '_global' ? null : userId, code),
+    botPendingBuyQty: (code) => orderJournal.botPendingBuyQty(userId === '_global' ? null : userId, code)
   });
   _traders[userId] = t;
   return t;
@@ -2056,6 +2059,9 @@ async function handleRequest(req, res, session) {
 
       // 60초 응답 캐시 — 기간 전환/재진입 시 즉시 응답
       if (!global._minChartCache) global._minChartCache = {};
+      // ★ 전수조사 proxy-4: 분봉 캐시(code_unit_days, 종목당 최대 5400변형)는 프루닝이 없어 무한 팽창했다.
+      //   TTL(60초)을 크게 지난(5분) 엔트리를 요청당 1회 정리해 메모리·디스크 팽창을 막는다.
+      { const _now = Date.now(); for (const k in global._minChartCache) if (_now - global._minChartCache[k].t > 300000) delete global._minChartCache[k]; }
       const mcKey = `${code}_${unit}_${days}`;
       const mcHit = global._minChartCache[mcKey];
       if (mcHit && Date.now() - mcHit.t < 60000) { jsonRes(res, 200, mcHit.resp); return; }

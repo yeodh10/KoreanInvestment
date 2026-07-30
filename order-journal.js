@@ -260,6 +260,28 @@ function pendingList(userId) {
   return todayList(userId).filter(e => e.status === '접수' || e.status === '부분체결');
 }
 
+// ── 봇 소유권 추적 (전수조사 pos-1: protectManual 무력화 방지) ──
+// bot.qty는 '접수' 즉시 부풀려져 미체결 매수의 유령 수량을 담고, 수동 보유분과 섞이면
+// 봇이 사용자의 수동 보유 주식을 매도하는 사고가 난다. 저널의 실체결/미체결을 source='bot'·userId로
+// 좁혀, 봇 지분을 '봇이 실제 소유(체결)한 분'으로 상한 거는 데 쓴다.
+//   botNetFilled     = 봇 매수 체결 - 봇 매도 체결 (실제 순보유). reconcile이 fillQty를 채우므로 VTS도 반영.
+//   botPendingBuyQty = 봇 매수 미체결 잔량(접수/부분체결). '곧 도달할 봇 수량' 계산용.
+const _botFilledBuy  = db.prepare(`SELECT COALESCE(SUM(fillQty),0) q FROM orders WHERE userId = ? AND code = ? AND source = 'bot' AND side = 'buy'`);
+const _botFilledSell = db.prepare(`SELECT COALESCE(SUM(fillQty),0) q FROM orders WHERE userId = ? AND code = ? AND source = 'bot' AND side = 'sell'`);
+const _botPendBuy    = db.prepare(`SELECT COALESCE(SUM(qty - fillQty),0) q FROM orders WHERE userId = ? AND code = ? AND source = 'bot' AND side = 'buy' AND status IN ('접수','부분체결')`);
+function botNetFilled(userId, code) {
+  if (!userId) return null; // 레거시(_global/무소유)는 상한 미적용 → 호출부 폴백(과차단 방지)
+  try {
+    const b = _botFilledBuy.get(userId, code)?.q || 0;
+    const s = _botFilledSell.get(userId, code)?.q || 0;
+    return Math.max(0, b - s);
+  } catch (_) { return null; }
+}
+function botPendingBuyQty(userId, code) {
+  if (!userId) return null;
+  try { return Math.max(0, _botPendBuy.get(userId, code)?.q || 0); } catch (_) { return null; }
+}
+
 // ── 기간 목록 (KST yyyymmdd ~ yyyymmdd, 양끝 포함) ──
 const _selRangeAll = db.prepare(
   `SELECT * FROM orders WHERE t >= ? AND t < ? ORDER BY t DESC, id DESC`);
@@ -307,4 +329,4 @@ function toKisFormat(entries, nameOf) {
   });
 }
 
-module.exports = { add, markFilled, markCancel, reconcile, todayList, pendingList, listRange, toKisFormat, lastBuySource, findOrderOwner, _kstDateKey };
+module.exports = { add, markFilled, markCancel, reconcile, todayList, pendingList, listRange, toKisFormat, lastBuySource, findOrderOwner, botNetFilled, botPendingBuyQty, _kstDateKey };

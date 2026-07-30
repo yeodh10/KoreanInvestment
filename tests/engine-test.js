@@ -134,6 +134,52 @@ function mkTrader(deps) {
   const f2 = orders.find(o => o.side === 'sell');
   ok('보호 OFF 시 전량(10주) 매도', !!f2 && f2.qty === 10);
 
+  // 2-4~6) ★ 전수조사 pos-1: 봇 지분(bot.qty)은 '접수' 즉시 부풀려져 미체결 매수의 유령 수량을
+  //   담는다. 이를 그대로 매도 상한으로 쓰면 수동 보유분을 판다. 저널의 봇 실체결(botNetFilled)로
+  //   캡해야 안전. 수동 100주 + 봇 접수 10주 시나리오로 검증.
+  const heldAcct100 = { rt_cd:'0', output1:[{ pdno:'005930', hldg_qty:'100', pchs_avg_pric:'60000', prpr:'70000', evlu_pfls_rt:'16.6', evlu_amt:'7000000' }], output2:[{ dnca_tot_amt:'10000000' }] };
+
+  // 2-4) 봇 미체결(실체결 0)이면 수동 보유분을 절대 매도하지 않음
+  orders.length = 0;
+  let dPos = mkDeps({ chart: incChart, account: heldAcct100 });
+  dPos.botNetFilled = () => 0;       // 봇 미체결 → 실체결 순보유 0
+  dPos.botPendingBuyQty = () => 10;  // 봇 미체결 매수 10주
+  t = mkTrader(dPos);
+  t.state.botPositions = { '005930': { qty: 10, entry: 60000 } }; // 접수 즉시 부풀려진 유령 지분
+  await t.tick();
+  ok('pos-1: 봇 미체결분이 수동 보유분을 매도하지 않음', orders.filter(o => o.side === 'sell').length === 0);
+
+  // 2-5) 봇이 실제 체결한 분(저널)만 매도 (수동 90주 보존)
+  orders.length = 0;
+  let dPos2 = mkDeps({ chart: incChart, account: heldAcct100 });
+  dPos2.botNetFilled = () => 10;     // 봇 10주 실체결
+  dPos2.botPendingBuyQty = () => 0;
+  t = mkTrader(dPos2);
+  t.state.botPositions = { '005930': { qty: 10, entry: 60000 } };
+  await t.tick();
+  const psPos = orders.find(o => o.side === 'sell');
+  ok('pos-1: 봇 실체결 10주만 매도(수동 90주 보존)', !!psPos && psPos.qty === 10);
+
+  // 2-6) 미체결 취소된 봇 유령 지분이 수동 보유분에 가려지지 않고 잔고대조에서 정리됨
+  orders.length = 0;
+  let dPos3 = mkDeps({ chart: incChart, account: heldAcct100 });
+  dPos3.botNetFilled = () => 0;      // 봇 실체결 0 (미체결 취소)
+  dPos3.botPendingBuyQty = () => 0;  // 봇 미체결 없음(취소됨)
+  t = mkTrader(dPos3);
+  t.state.botPositions = { '005930': { qty: 10, entry: 60000 } }; // 유령 10주
+  await t.tick();
+  ok('pos-1: 미체결 취소 유령 지분 정리(수동 100주에 안 가려짐)', !t.state.botPositions['005930']);
+
+  // 2-7) ★ 전수조사 reconcile-1: 미체결(pending) 조회가 예외로 실패한 틱엔 봇 지분을 삭제하지 않음
+  //   (접수 직후 미체결 봇 지분이 유령 삭제→그 종목 무손절 방치되는 사고 방지)
+  orders.length = 0;
+  let dRec = mkDeps({ chart: incChart, account: cashAcct() }); // 보유 0 (봇 매수 미체결 상태)
+  dRec.getPendingOrders = () => { throw new Error('DB locked'); }; // 저널 일시 장애
+  t = mkTrader(dRec);
+  t.state.botPositions = { '005930': { qty: 10, entry: 60000, stop: 50000 } };
+  await t.tick(); // tickCount 1 → 잔고 대조 실행
+  ok('reconcile-1: 미체결 조회 실패 시 봇 지분 보존(무손절 방지)', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
+
   // 3) 쿨다운 — 과매도 지속 3틱에 매수 1회
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));

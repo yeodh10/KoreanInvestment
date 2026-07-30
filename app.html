@@ -2033,7 +2033,7 @@ function parseChart(body) {
     low:   parseInt(d.stck_lwpr||d.low||0),
     close: parseInt(d.stck_clpr||d.close||0),
     vol:   parseInt(d.acml_vol||d.vol||0)
-  })).filter(d => d.close > 0);
+  })).filter(d => d.close > 0 && d.high > 0 && d.low > 0 && d.open > 0); // ★ render-1: 결측 OHLC(0)가 minP=0으로 스케일 붕괴시키는 것 방지
 }
 
 function fmtBarDate(bar) {
@@ -2084,6 +2084,7 @@ function renderChart() {
   const rect = wrap.getBoundingClientRect();
   const W = rect.width || wrap.offsetWidth;
   const H = rect.height || wrap.offsetHeight || Math.round(W * 7/16);
+  if (!W || !H) return; // ★ render-3: 숨김/0크기(다른 페이지에서 resize 발화 등) 상태로 그리면 0폭 캔버스로 깨짐
   canvas.width = W*dpr; canvas.height = H*dpr;
   canvas.style.width = W+'px'; canvas.style.height = H+'px';
   const ctx = canvas.getContext('2d');
@@ -2114,7 +2115,20 @@ function renderChart() {
         if (ma < minP) minP=ma; if (ma > maxP) maxP=ma;
       }
     });
+    // ★ render-2: BB 상/하단(ma20±2std)도 범위에 포함 — 안 하면 변동성 큰 구간에서 밴드가 플롯 밖
+    //   (Y축 가격라벨·X축 날짜라벨 영역)으로 넘쳐 그려진다. std는 그리기와 동일한 모표준편차(/20).
+    if (indicators.bb) {
+      for (let i = Math.max(0,start); i < end; i++) {
+        if (i < 19) continue;
+        const sl = closes.slice(i-19,i+1), ma = sl.reduce((a,b)=>a+b,0)/20;
+        const std = Math.sqrt(sl.reduce((a,b)=>a+(b-ma)**2,0)/20);
+        if (ma-2*std < minP) minP = ma-2*std; if (ma+2*std > maxP) maxP = ma+2*std;
+      }
+    }
   }
+  // ★ render-8: 표시 구간 전 봉이 동일가(무거래·상하한가 잠김)면 minP==maxP → 캔들이 바닥축에 눌린다.
+  //   ±0.5% 여백을 줘 값을 세로 중앙에 배치한다.
+  if (maxP === minP) { const c = maxP || 1; minP = c * 0.995; maxP = c * 1.005; }
   const pR = maxP - minP || 1;
   const pY = v => pad.t + (1-(v-minP)/pR)*ch;
   const candleW = Math.max(1, Math.min(12, cw/n - 1));
@@ -2272,11 +2286,13 @@ function drawMACD(allData, start, end, n, xOf, candleW) {
   if(closes.length<27) return;
   const ema=(arr,p)=>{const k=2/(p+1);let e=arr.slice(0,p).reduce((a,b)=>a+b,0)/p;const r=[e];for(let i=p;i<arr.length;i++){e=arr[i]*k+e*(1-k);r.push(e);}return r;};
   const e12=ema(closes,12),e26=ema(closes,26);
-  const macdLine=e12.slice(13).map((v,i)=>v-e26[i]);
+  // e12[k]=바(11+k), e26[i]=바(25+i) → 동일 바 정렬은 e12[14+i]. slice(13)이면 EMA12 1봉 지연 +
+  // e12.slice(13).length가 e26보다 1 길어 마지막이 e26[undefined]=NaN → maxV 오염으로 패널 전체 붕괴.
+  const macdLine=e12.slice(14).map((v,i)=>v-e26[i]);
   const sig=ema(macdLine,9);
   const hist=macdLine.slice(8).map((v,i)=>v-sig[i]);
   const allV=[...macdLine.slice(8),...sig,...hist];
-  const maxV=Math.max(...allV.map(Math.abs))||1;
+  const maxV=allV.reduce((m,v)=>Number.isFinite(v)?Math.max(m,Math.abs(v)):m,0)||1;
   const pad={l:4,r:4,t:4,b:4}, ch=H-pad.t-pad.b;
   const mY=v=>pad.t+(1-v/maxV*.9*.5-.5)*ch;
   ctx.strokeStyle='rgba(255,255,255,0.05)'; ctx.lineWidth=0.5;
@@ -2346,6 +2362,33 @@ function setupChartEvents() {
     dashZoom = Math.max(.2, Math.min(8, dashZoom*(e.deltaY<0?1.15:.87)));
     clampPan(); renderChart();
   }, {passive:false});
+  // ── 터치(모바일): 단일 드래그=팬, 두 손가락=핀치 줌 (★ 전수조사 render-7: 메인 차트 터치 미지원) ──
+  let pinchDist = 0, pinchZoom = 1;
+  canvas.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      dragging = true; moved = false; dragX = e.touches[0].clientX; dragPan = dashPan;
+      tip.style.display = 'none'; dashHover = -1;
+    } else if (e.touches.length === 2) {
+      dragging = false;
+      pinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+      pinchZoom = dashZoom;
+    }
+  }, {passive:true});
+  canvas.addEventListener('touchmove', e => {
+    const m = canvas._meta; if (!m) return;
+    if (e.touches.length === 2 && pinchDist > 0) {
+      e.preventDefault();
+      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+      dashZoom = Math.max(.2, Math.min(8, pinchZoom * (dist / pinchDist)));
+      clampPan(); renderChart();
+    } else if (dragging && e.touches.length === 1) {
+      e.preventDefault();
+      const dpx = e.touches[0].clientX - dragX, dCandles = Math.round(dpx / (m.cw / m.n));
+      dashPan = dragPan + dCandles; clampPan(); renderChart();
+      if (Math.abs(dpx) > 3) moved = true;
+    }
+  }, {passive:false});
+  canvas.addEventListener('touchend', e => { if (e.touches.length === 0) { dragging = false; pinchDist = 0; } });
   window.addEventListener('resize', () => renderChart());
 }
 
@@ -2963,7 +3006,7 @@ async function refreshOrders() {
     const side = isBuy ? '<span class="badge buy">매수</span>' : '<span class="badge sell">매도</span>';
     const qty = parseInt(o.ord_qty || 0), filled = parseInt(o.tot_ccld_qty || 0);
     const oprc = parseInt(o.ord_unpr || 0);
-    const typeName = o.ord_dvsn_name || '지정가';
+    const typeName = esc(o.ord_dvsn_name || '지정가'); // ★ misc-2: 외부 문자열 innerHTML 이스케이프
     const canceled = o.cncl_yn === 'Y' || o._status === '취소';
     const status = canceled     ? '<span style="color:var(--text-3)">취소됨</span>' :
                    filled >= qty ? '<span style="color:var(--green)">체결</span>' :
@@ -3127,10 +3170,13 @@ let _txModeCached = null;   // 모드(모의/실전) 캐시 — 매 전환마다
 let tradingLoadSeq = 0;     // 종목 전환 시퀀스 — 빠른 연속 전환 시 옛 로드 취소
 async function loadTradingChart(code, draw) {
   code = code || $('orderCode').value || currentCode;
+  const seq = tradingLoadSeq; // ★ 전수조사 render-4: 호출 시점 시퀀스 캡처(증가 X — setTradingStock이 관리)
   if (proxyOnline) {
     const r = await api(`/api/chart?code=${code}&market=J&period=D&years=1`);
+    if (seq !== tradingLoadSeq) return; // 그 사이 다른 종목 선택됨 → 늦게 온 응답 폐기(종목↔차트 불일치 방지)
     if (r?.ok && r.data?.rt_cd === '0') tradingChartData = parseChart(r.data) || [];
   }
+  if (seq !== tradingLoadSeq) return;
   if (draw) drawMiniCandles();
 }
 function drawMiniCandles() {
@@ -4139,7 +4185,7 @@ async function loadHistory() {
       <td class="mono" data-label="날짜">${date}</td>
       <td style="cursor:pointer" onclick="loadStock('${jsArg(o.pdno||'')}')" data-label="종목">${name}${srcBadge}</td>
       <td data-label="구분">${side}</td>
-      <td class="mono" data-label="유형">${o.ord_dvsn_name||'지정가'}</td>
+      <td class="mono" data-label="유형">${esc(o.ord_dvsn_name||'지정가')}</td>
       <td class="mono" data-label="주문가">${oprc>0?'₩'+oprc.toLocaleString():(isMkt?'시장가':'—')}</td>
       <td class="mono" data-label="체결가">${cprc>0?'₩'+cprc.toLocaleString():'<span style="color:var(--text-3)">체결가확인</span>'}</td>
       <td class="mono" data-label="수량">${qty}</td>
@@ -4615,6 +4661,19 @@ function applyLivePrice(d) {
     const chg = d.prev > 0 ? Math.abs(d.price - d.prev) : 0;
     if (hp) { hp.textContent = '₩' + d.price.toLocaleString(); hp.className = 'stock-price ' + cls; flash(hp); }
     if (hc) { hc.textContent = `${flat?'—':arrow(d.sign)} ${chg.toLocaleString()} (${flat?'':(up?'+':'')}${d.chgPct}%)`; hc.className = 'stock-chg ' + cls; }
+    // ★ 현재가↔차트 동기화: 헤더 현재가만 실시간 갱신되고 차트(현재가선·마지막 캔들)는 /api/chart 로드
+    //   시점에 멈춰 있어 장중에 서로 벌어지던 문제(개발 초기부터의 불일치). 일봉 '오늘 봉'을 실시간
+    //   현재가로 갱신해 헤더와 차트를 일치시킨다. 오늘 봉일 때만(과거 봉 왜곡 방지).
+    if (currentPage === 'dashboard' && dashPeriod === 'D' && dashData.length) {
+      const lb = dashData[dashData.length - 1];
+      const kstYmd = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+      if (lb && lb.date === kstYmd) {
+        lb.close = d.price;
+        if (d.price > lb.high) lb.high = d.price;
+        if (d.price > 0 && d.price < lb.low) lb.low = d.price;
+        renderChart();
+      }
+    }
   }
   // ★ 실시간 보유 평가액 — 보유종목이면 틱마다 현재가·평가액·손익·수익률을 재계산(4초 폴링이 아니라 즉시)
   const h = window._holds && window._holds[d.code];

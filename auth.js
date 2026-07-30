@@ -99,7 +99,12 @@ function decrypt(blob) {
     const decipher = crypto.createDecipheriv('aes-256-gcm', getEncKey(), Buffer.from(ivHex, 'hex'));
     decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
     return Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()]).toString('utf8');
-  } catch(e) { return ''; }
+  } catch(e) {
+    // ★ 전수조사 auth-2: 복호 실패(손상·변조·부분쓰기)를 빈 값과 구분해 로깅한다. 안 그러면 호출부가
+    //   '키 미설정'으로 오인해 조용히 무키(PUBLIC_READ) 모드로 강등돼 자격증명 소실이 은폐된다.
+    console.error('[auth] 유저 설정 복호화 실패(blob 손상/변조 의심):', e.message);
+    return '';
+  }
 }
 
 // ── 비밀번호 해시 (scrypt — 비동기) ──

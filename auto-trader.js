@@ -685,10 +685,23 @@ class AutoTrader {
             //   미체결·취소된 매수분이 줄어든 것을 '매도'로 오인해 유령 손익이 일일손익/연속패 서킷을 오염시키던
             //   문제를 차단. 매도는 '접수'가 아니라 여기(실제 체결)에서만 확정 → 미체결 취소 시 고아화도 방지.
             const now = Date.now();
+            // ★ 전수조사 reconcile-1: 미체결 조회가 실패한 틱엔 봇 지분 축소/삭제를 보류한다. 실패 시
+            //   pending이 빈 것으로 오인돼, 접수 직후 미체결 봇 지분이 유령 삭제→그 종목 무손절 방치되는
+            //   사고가 난다(빈잔고 유예와 동일 철학). 다음 정상 조회 틱에 정리된다.
+            if (this._pendingQueryOk === false) {
+              this.log('error', '⚠️ 미체결 조회 실패 — 이번 틱 봇 지분 대조 보류(유령 삭제 방지)');
+            } else {
             for (const c of Object.keys(bot)) {
               const realQty = holdMap[c] || 0;
-              const pendBuyQty = pending[c]?.buyQty || 0;
-              const expected = realQty + pendBuyQty;
+              // ★ 전수조사 pos-1: 축소 판정을 '총보유'가 아니라 '봇 소유 추정치'로 한다. 총보유를 쓰면
+              //   사용자의 수동 보유분이 봇 지분 축소를 영구히 가려(미체결/취소된 유령 수량이 안 지워짐),
+              //   그 유령 수량만큼 봇이 수동 주식을 매도한다. 봇 몫 실보유(저널 실체결을 실보유로 캡) +
+              //   봇 미체결 매수잔량 = '체결되면 도달할 봇 수량'. 저널 조회 실패 시 기존 로직 폴백.
+              const botFilled = this.deps.botNetFilled ? this.deps.botNetFilled(c) : null;
+              const botReal = (botFilled === null) ? realQty : Math.min(realQty, botFilled);
+              const botPendBuy = this.deps.botPendingBuyQty ? this.deps.botPendingBuyQty(c) : null;
+              const pendBuyQty = (botPendBuy === null) ? (pending[c]?.buyQty || 0) : botPendBuy;
+              const expected = botReal + pendBuyQty;
               if (expected < (bot[c].qty || 0)) {
                 const shrink = bot[c].qty - expected;
                 const soldByBot = Math.min(shrink, bot[c]._sellPending || 0); // 실제 낸 매도분만 손익 계상
@@ -699,7 +712,11 @@ class AutoTrader {
                     // 보수적 거래비용(매도세+수수료+슬리피지 왕복 추정)을 차감해 실현손익을 약간
                     // 더 보수적으로(손실은 더 크게) 잡는다 → 일일 손실 한도가 늦게가 아니라 제때 발동.
                     const COST_RATE = 0.0015;
-                    const cost = (sellPx + basis) * soldByBot * COST_RATE;
+                    // ★ 전수조사 loss-1: 시장가 매도(손절)는 슬리피지·호가공백으로 신호가보다 불리하게
+                    //   체결되기 쉬운데 VTS는 실체결가를 주지 않는다. 시장가분엔 슬리피지 버퍼를 더 얹어
+                    //   실현손실을 보수적으로 크게 잡아, 일일 손실 한도가 늦지 않게 발동하도록 한다.
+                    const SLIPPAGE_RATE = bot[c]._sellMarket ? 0.005 : 0;
+                    const cost = (sellPx + basis) * soldByBot * COST_RATE + sellPx * soldByBot * SLIPPAGE_RATE;
                     const realized = (sellPx - basis) * soldByBot - cost;
                     this.state.dailyRealizedPnl += realized;
                     // 연속손실은 청크마다가 아니라 포지션 완전 종료 시 1회만 판정한다(M-A) →
@@ -729,6 +746,7 @@ class AutoTrader {
                 delete bot[c];
               }
             }
+            } // ★ reconcile-1: 미체결 조회 실패 시 봇 지분 대조 보류 가드 끝
             this.save();
           }
         }
@@ -989,14 +1007,21 @@ class AutoTrader {
   // (사용자가 손으로 산 주식을 엔진이 멋대로 파는 사고 방지)
   _sellableQty(code, heldQty, s) {
     if (!s.safety.protectManual) return heldQty; // 보호 꺼짐 = 전량 관리 (기존 동작)
-    const botQty = botQtyOf(this.state.botPositions, code);
-    return Math.min(botQty, heldQty);
+    let botQty = botQtyOf(this.state.botPositions, code);
+    // ★ 전수조사 pos-1: bot.qty는 '접수' 즉시 부풀려져 미체결 매수의 유령 수량을 담는다. 이를 그대로
+    //   상한으로 쓰면 수동 보유분을 매도할 수 있으므로, 저널의 '봇 실체결 순보유'로 다시 캡한다.
+    //   (미체결 매수는 아직 봇 보유가 아니라 팔 수 없음. 체결되면 reconcile이 fillQty를 채워 캡이 늘어난다.)
+    const botFilled = this.deps.botNetFilled ? this.deps.botNetFilled(code) : null;
+    if (botFilled !== null) botQty = Math.min(botQty, botFilled); // 조회 실패(null)면 기존 동작 유지(과차단 방지)
+    return Math.max(0, Math.min(botQty, heldQty));
   }
 
   // 미체결 주문 맵: { code: { buyAmt, buyQty, hasBuy, hasSell } } — 잔량(qty-fillQty) 기준
   _pendingMap() {
     let list = [];
-    try { list = (this.deps.getPendingOrders && this.deps.getPendingOrders()) || []; } catch (_) {}
+    this._pendingQueryOk = true; // 조회 실패 감지(reconcile-1: 실패 틱엔 봇 지분 대조 보류)
+    try { list = (this.deps.getPendingOrders && this.deps.getPendingOrders()) || []; }
+    catch (_) { this._pendingQueryOk = false; }
     const m = {};
     for (const e of list) {
       if (!m[e.code]) m[e.code] = { buyAmt: 0, buyQty: 0, hasBuy: false, hasSell: false };
@@ -1068,7 +1093,7 @@ class AutoTrader {
       // 시장가 매도는 타임아웃이어도 체결됐을 가능성이 높다 → 봇 매도분으로 기록해 잔고대조에서 손실이
       // 계상되게(손실 누락→손실한도 서킷 약화 방지). 지정가는 미체결 가능성이 있어 기록하지 않음.
       if (market) { const bp = this.state.botPositions && this.state.botPositions[code];
-        if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; bp._sellAt = Date.now(); } }
+        if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; bp._sellAt = Date.now(); bp._sellMarket = true; } }
       this.log('error', `❌ 매도주문 예외 ${name}: ${e.message} (쿨다운 적용${market?', 시장가는 체결 가정 기록':''})`);
       return;
     }
@@ -1078,7 +1103,7 @@ class AutoTrader {
       //   접수 즉시 차감하면 미체결→자동취소 시 포지션이 봇 장부에서 사라져 손절 관리가
       //   영구 중단되는 고아화 사고가 난다. 여기선 체결 확정용 기준가만 기록.
       const bp = this.state.botPositions && this.state.botPositions[code];
-      if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; bp._sellAt = Date.now(); } // 실제 낸 매도분 — 잔고대조에서 이 수량만 손익 계상
+      if (bp) { bp.lastSellPrice = price; bp._sellPending = (bp._sellPending || 0) + qty; bp._sellAt = Date.now(); bp._sellMarket = !!market; } // 실제 낸 매도분 — 잔고대조에서 이 수량만 손익 계상. 시장가면 슬리피지 보수 계상(loss-1)
       const msg = `📉 <b>매도 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 ${pxStr}\n사유: ${reason}`;
       this.log('sell', `✅ 매도주문 접수 ${name} ${qty}주 ${pxStr} — ${reason}`, { code, qty, price, reason, market });
       this.save();

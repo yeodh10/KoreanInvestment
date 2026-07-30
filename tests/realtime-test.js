@@ -123,6 +123,16 @@ function startFakeKis(onClientMsg) {
   await sleep(200);
   ok('PINGPONG 동일 에코', fake.received.includes(ping));
 
+  // ★ 전수조사 watchdog-1: PINGPONG은 _lastRecv(half-open 감지)만 갱신하고 실데이터 시각(_lastData)은
+  //   갱신하지 않는다 — 재구독 침묵 거부로 시세 0건인데 PINGPONG만 오는 동결을 watchdog가 _lastData로 감지.
+  feed._lastData = 0;
+  fake.sendText(ping);
+  await sleep(150);
+  ok('watchdog-1: PINGPONG은 _lastData 불변', feed._lastData === 0 && feed._lastRecv > 0);
+  fake.sendText(mkPriceFrame('005930', 72050));
+  await sleep(150);
+  ok('watchdog-1: 실데이터 수신 시 _lastData 갱신', feed._lastData > 0);
+
   // 체결가 수신 → SSE + 가격캐시 훅
   sse.length = 0; cacheHits = [];
   fake.sendText(mkPriceFrame('005930', 72100));
@@ -184,6 +194,17 @@ function startFakeKis(onClientMsg) {
   await sleep(200);
   const msgs = fake.received.map(s => JSON.parse(s));
   ok('한도 초과 시 LRU 해제 발신', msgs.some(s => s.header.tr_type === '2'));
+
+  // ★ 전수조사 lru-1: 같은 appKey를 공유하는 두 클라이언트(멀티탭/기기)의 활성 구독이 상호 축출되지
+  //   않는다(스래싱 방지). 합집합이 MAX_REG(40)를 넘으면 축출 대신 새 구독을 보류하고 기존 활성을 보존.
+  const lfeed = rt.getFeed({ appKey: 'LRUTEST', appSecret: 'S', txMode: 'vts' });
+  const c1codes = [...Array(25)].map((_, i) => String(300000 + i));
+  const c2codes = [...Array(25)].map((_, i) => String(400000 + i));
+  lfeed.addClient({ id: 91, res: { write() {} }, codes: new Set(c1codes), obCode: null });
+  lfeed.addClient({ id: 92, res: { write() {} }, codes: new Set(c2codes), obCode: null });
+  let c1kept = 0; for (const code of c1codes) if (lfeed.regs.has('H0STCNT0:' + code)) c1kept++;
+  ok('lru-1: 멀티탭 활성 구독 상호 축출 안 함(c1 25개 보존)', c1kept === 25);
+  ok('lru-1: 한도 초과분은 축출 대신 보류(regs ≤ MAX_REG)', lfeed.regs.size <= 40);
 
   // 멀티탭 체결통보 중복 방지 — 피드당 '_journal' 훅 1개만, 클라이언트(탭) 수와 무관하게 1회만 확정
   feed.execHooks.clear();

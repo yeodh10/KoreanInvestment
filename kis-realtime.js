@@ -40,7 +40,21 @@ function _setEndpointOverride(o) { _endpointOverride = o; }
 // ════════════════════════════════════════
 // approval_key 발급
 // ════════════════════════════════════════
+// ★ 전수조사 reconnect-1: approval_key를 appKey별로 캐시한다. 재연결마다 신규 발급하면 다수 피드가
+//   KIS 순단으로 동시에 재연결할 때 /oauth2/Approval REST가 폭주(thundering herd)한다. KIS approval_key는
+//   통상 24h 유효 — 보수적으로 6h 캐시해 재발급 빈도를 낮춘다.
+const _approvalCache = new Map(); // appKey → { key, exp }
+const APPROVAL_TTL_MS = 6 * 3600 * 1000;
 function getApprovalKey(cfg) {
+  const ck = cfg.appKey || '';
+  const cached = _approvalCache.get(ck);
+  if (cached && cached.exp > Date.now()) return Promise.resolve(cached.key);
+  return _getApprovalKeyReal(cfg).then(key => {
+    if (ck) _approvalCache.set(ck, { key, exp: Date.now() + APPROVAL_TTL_MS });
+    return key;
+  });
+}
+function _getApprovalKeyReal(cfg) {
   return new Promise((resolve, reject) => {
     const rest = cfg.txMode === 'live' ? REST_REAL : REST_VTS;
     const body = JSON.stringify({
@@ -314,6 +328,7 @@ class KisFeed {
       ws.onopen = () => {
         this.connected = true; this.connecting = false;
         this._lastRecv = Date.now();
+        this._lastData = Date.now(); // ★ watchdog-1: 실데이터 수신 시각(재구독 후 유예 위해 연결시각으로 초기화)
         // 백오프 리셋은 30초 이상 유지된 연결만 — "연결 직후 끊김" 반복 시 1초 재연결 폭주 방지
         const rt = setTimeout(() => { if (this.connected) this._retry = 0; }, 30000);
         if (rt.unref) rt.unref();
@@ -357,11 +372,14 @@ class KisFeed {
   _scheduleReconnect(delay) {
     if (this._closed) return;
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    // ★ 전수조사 reconnect-1: 지터(50~100%) 추가 — 다수 피드가 KIS 순단으로 동시에 끊길 때 동일 시점에
+    //   재연결·approval 발급이 몰리는 폭주(thundering herd)를 분산한다.
+    const jittered = Math.round(delay * (0.5 + Math.random() * 0.5));
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
       if (this._closed || _feeds[this._feedKey] !== this) return; // 폐기된 피드는 재연결하지 않음
       this.connect();
-    }, delay);
+    }, jittered);
     if (this._reconnectTimer.unref) this._reconnectTimer.unref();
   }
 
@@ -372,8 +390,19 @@ class KisFeed {
     this._stopWatchdog();
     this._wd = setInterval(() => {
       if (!this.connected) return;
-      if (Date.now() - (this._lastRecv || 0) > 90000) {
+      const now = Date.now();
+      if (now - (this._lastRecv || 0) > 90000) {
         this.log('🛑 90초 무수신 — 죽은 연결로 판단, 강제 재연결');
+        try { this.ws.sock.destroy(); } catch (_) {}
+        return;
+      }
+      // ★ 전수조사 watchdog-1: PINGPONG만 오고 실데이터가 끊긴 동결 감지. 재연결 후 재구독이 조용히
+      //   거부되면(control rt_cd!=0) 시세 0건인데 PINGPONG이 _lastRecv를 갱신해 위 90초 체크에 안 걸린다.
+      //   활성 구독이 있는데 실데이터가 장기(180초) 없으면 죽은 것으로 보고 강제 재연결.
+      //   소강장(거래 없는 종목) 오탐을 피하려 무수신(90초)보다 임계를 넉넉히 둔다.
+      const hasSubs = (this.regs && this.regs.size > 0) || !!this._cniId;
+      if (hasSubs && now - (this._lastData || 0) > 180000) {
+        this.log('🛑 180초 무데이터(PINGPONG만 수신) — 구독 동결로 판단, 강제 재연결');
         try { this.ws.sock.destroy(); } catch (_) {}
       }
     }, 30000);
@@ -390,14 +419,28 @@ class KisFeed {
     }));
   }
 
+  // 현재 어느 클라이언트든 요구 중인 구독 키 집합 (lru-1: 축출 금지 대상)
+  _activeSubKeys() {
+    const active = new Set();
+    for (const c of this.clients) {
+      if (c.codes) for (const code of c.codes) active.add(`${TR_PRICE}:${code}`);
+      if (c.obCode) { active.add(`${TR_PRICE}:${c.obCode}`); active.add(`${TR_ORDERBOOK}:${c.obCode}`); }
+    }
+    return active;
+  }
+
   // 구독 보장 (LRU 한도 관리)
   ensure(trId, code) {
     const key = `${trId}:${code}`;
     if (this.regs.has(key)) { this.regs.get(key).lastUsed = Date.now(); return; }
     if (this.regs.size >= MAX_REG) {
-      // 가장 오래 안 쓴 등록 해제
+      // ★ 전수조사 lru-1: 참조카운트 축출 — 지금 어느 클라이언트도 요구하지 않는(합집합 밖) 구독만
+      //   LRU로 해제한다. 같은 appKey를 공유하는 멀티탭/기기가 서로 보고 있는 활성 구독을 축출해
+      //   subscribe/unsubscribe가 폭주하는 스래싱을 막는다.
+      const active = this._activeSubKeys();
       let oldest = null, oldestT = Infinity;
       for (const [k, v] of this.regs) {
+        if (active.has(k)) continue; // 활성 구독은 축출 금지
         if (v.lastUsed < oldestT) { oldest = k; oldestT = v.lastUsed; }
       }
       if (oldest) {
@@ -405,6 +448,10 @@ class KisFeed {
         this.regs.delete(oldest);
         this._sendSub(t, c, false);
         this.log(`↩️ 구독 한도 — LRU 해제: ${c}(${t})`);
+      } else {
+        // 활성 구독만으로 한도를 채움 → 새 구독을 거부하고 기존 활성 구독을 보존(스래싱 대신 폴백 폴링)
+        this.log(`⚠️ 구독 한도(${MAX_REG}) — 활성 구독이 한도를 채워 ${code}(${trId}) 실시간 구독 보류`);
+        return;
       }
     }
     this.regs.set(key, { lastUsed: Date.now() });
@@ -414,6 +461,10 @@ class KisFeed {
   _handle(text) {
     const m = parseKisMessage(text);
     if (m.type === 'pingpong') { this.ws.sendText(m.raw); return; } // 동일 페이로드 에코
+    // ★ 전수조사 watchdog-1: PINGPONG(위에서 return)을 제외한 실수신만 _lastData로 기록한다.
+    //   _lastRecv(모든 프레임)는 TCP half-open 감지용이라 PINGPONG만 와도 갱신돼, 재구독이 조용히
+    //   거부돼 시세 0건인 동결을 못 잡는다. watchdog가 _lastData로 무데이터 동결을 별도 감지한다.
+    this._lastData = Date.now();
     if (m.type === 'control') {
       // 암호화 TR(체결통보) 구독 응답에 AES key/iv가 담겨 옴 — 보관(길이 검증)
       // AES-256-CBC는 key 32바이트·iv 16바이트여야 한다. 손상된 제어 프레임의 잘못된 길이 키를
