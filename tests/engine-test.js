@@ -14,7 +14,7 @@ global.Date = class extends RealDate {
   static now() { return FIXED; }
 };
 
-const { AutoTrader, decideSignal, decideIntradayRebound, calcRSI, calcATR, sma, RISK_PRESETS } = require(path.join(__dirname, '..', 'auto-trader.js'));
+const { AutoTrader, decideSignal, decideIntradayRebound, isMarketBear, calcRSI, calcATR, sma, RISK_PRESETS } = require(path.join(__dirname, '..', 'auto-trader.js'));
 
 let pass = 0, fail = 0;
 function ok(name, cond) { cond ? (pass++, console.log('  ✅', name)) : (fail++, console.log('  ❌', name)); }
@@ -28,14 +28,22 @@ ok('sma 평균', sma([1,2,3,4,5],5) === 3);
 ok('sma 데이터 부족 → null', sma([1,2],5) === null);
 ok('RSI 단조상승 = 100', calcRSI([...Array(20).keys()].map(i=>100+i),14) === 100);
 ok('RSI 단조하락 = 0', calcRSI([...Array(20).keys()].map(i=>200-i),14) === 0);
-const S = { strategies:{goldenCross:true,rsi:true,regimeFilter:true}, params:{maShort:5,maLong:20,rsiPeriod:14,rsiOversold:30,rsiOverbought:70} };
-// 개선된 신호의 매수 트리거: 하락 베이스 후 5일 반등 → 골든크로스 + 20MA 상승 + RSI<70 (decChart와 동일 ~27만 스케일).
-//   마지막 봉은 '당일 미완성' 가정(엔진이 제외) → 확정봉(slice(0,-1))에서 BUY가 나도록 구성.
-const buyCloses = [100,99.7,99.4,99.1,98.8,98.5,98.2,97.9,97.6,97.3,97,96.7,96.4,96.1,95.8,95.5,95.2,94.9,95.6,96.6,97.6,98.6,99.6].map(x=>Math.round(x*2700)).concat([271620]);
-ok('추세하락 RSI 과매도 → BUY 아님(칼잡기 차단)', (decideSignal([...Array(30).keys()].map(i=>300-i), S)||{}).side !== 'BUY');
-ok('상승장 → SELL(RSI 과매수)', decideSignal([...Array(30).keys()].map(i=>100+i), S)?.side === 'SELL');
-ok('상승전환 골든크로스(추세↑·확정봉) → BUY', decideSignal(buyCloses.slice(0,-1), S)?.side === 'BUY');
-ok('레짐/코히어런스: 추세하락은 regimeFilter OFF여도 매수 아님(RSI 눌림목 게이트)', (decideSignal([...Array(30).keys()].map(i=>300-i), {strategies:{goldenCross:true,rsi:true,regimeFilter:false},params:S.params})||{}).side !== 'BUY');
+const S = { strategies:{breakout:true,regimeFilter:true}, params:{breakoutPeriod:20,exitPeriod:10,bkVolMult:1.5,maLong:20,atrPeriod:14} };
+// 돌파 매수 트리거: 20일 횡보 베이스(고가 100500) 후 마지막 확정봉이 종가 106000으로 신고가 돌파 + 거래량 3배
+const baseBar = (c, v) => ({ open:c, high:c+500, low:c-500, close:c, vol:v||1000000 });
+const buyBars = [...Array(21)].map(() => baseBar(100000))
+  .concat([{ open:100500, high:106500, low:100000, close:106000, vol:3000000 }]); // 돌파 확정봉
+ok('신고가 돌파+거래량 급증 → BUY', decideSignal(buyBars, S)?.side === 'BUY');
+ok('거래량 없는 돌파 → BUY 아님(가짜 돌파 필터)', (decideSignal([...Array(21)].map(()=>baseBar(100000)).concat([{ ...baseBar(106000), vol:1000000 }]), S)||{}).side !== 'BUY');
+ok('10일 저가 이탈 → SELL(추세 종료)', decideSignal([...Array(21)].map(()=>baseBar(100000)).concat([{ open:99000, high:99500, low:98000, close:98500, vol:2000000 }]), S)?.side === 'SELL');
+ok('횡보(신호 없음) → null', decideSignal([...Array(25)].map(()=>baseBar(100000)), S) === null);
+ok('숫자 배열 하위호환 — 상승 신고가 → BUY(거래량 필터 자동통과)', decideSignal([...Array(30).keys()].map(i=>100+i), S)?.side === 'BUY');
+ok('하락추세 → BUY 아님', (decideSignal([...Array(30).keys()].map(i=>300-i), S)||{}).side !== 'BUY');
+ok('breakout OFF → null', decideSignal(buyBars, { strategies:{breakout:false}, params:S.params }) === null);
+// 시장 레짐 판정 (isMarketBear)
+ok('지수 하락(종가<20MA) → 하락 국면', isMarketBear([...Array(30).keys()].map(i=>300-i), 20) === true);
+ok('지수 상승 → 하락 국면 아님', isMarketBear([...Array(30).keys()].map(i=>100+i), 20) === false);
+ok('지수 데이터 부족 → false(과차단 방지)', isMarketBear([100,101], 20) === false);
 // ATR
 const flatBars = [...Array(20)].map(() => ({ high: 101, low: 99, close: 100 })); // TR=2 매일
 ok('calcATR 일정 변동성 = 2', calcATR(flatBars, 14) === 2);
@@ -66,7 +74,8 @@ function chartFrom(closes, band=500) { return closes.map(c => ({ open:c, high:c+
 const decCloses = [...Array(30).keys()].map(i => 300000 - i*1000); // 하락 → RSI 과매도(BUY), 추세 아래
 const incCloses = [...Array(30).keys()].map(i => 100000 + i*1000); // 상승 → RSI 과매수(SELL), 추세 위
 const decChart = chartFrom(decCloses);
-const buyChart = chartFrom(buyCloses); // 개선된 신호에서 매수가 나는 차트(상승전환 골든크로스)
+// 매수가 나는 차트: 돌파 확정봉(buyBars) + 당일 형성 중 봉(엔진이 리페인팅 차단으로 제외)
+const buyChart = buyBars.concat([{ open:106000, high:106500, low:105500, close:106000, vol:500000 }]);
 const incChart = chartFrom(incCloses);
 // 보유: 평단 60000, 현재가 70000 (+16.6%)
 const heldAcct = { rt_cd:'0', output1: [{ pdno:'005930', hldg_qty:'10', pchs_avg_pric:'60000', prpr:'70000', evlu_pfls_rt:'16.6', evlu_amt:'700000' }],
@@ -273,7 +282,27 @@ function mkTrader(deps) {
   t.state.botPositions = { '005930': { qty: 10, entry: 60000, stop: 65000, target: 90000, atr: 1000, initRisk: 1000, hw: 70000 } };
   t.state.stoppedByLoss = true; // 신규매수 정지 상태
   await t.tick();
-  ok('정지 상태에서도 익절(목표 도달) 매도 실행', orders.filter(o => o.side === 'sell').length === 1);
+  ok('정지 상태에서도 리스크 관리(부분익절/트레일) 매도 실행', orders.filter(o => o.side === 'sell').length === 1);
+
+  // 11-1) 시장 레짐 필터 — 지수(프록시) 하락 국면이면 종목이 돌파해도 신규매수 차단
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
+  t.deps.getStockChart = async (cfg, code) => (code === '069500' ? decChart : buyChart);
+  await t.tick();
+  ok('시장 하락 국면 → 돌파 신호에도 신규매수 0(레짐 필터)', orders.filter(o => o.side === 'buy').length === 0);
+  // 11-2) 지수 상승 국면이면 매수 재개
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
+  t.deps.getStockChart = async (cfg, code) => (code === '069500' ? incChart : buyChart);
+  await t.tick();
+  ok('시장 상승 국면 → 돌파 매수 진행', orders.filter(o => o.side === 'buy').length === 1);
+  // 11-3) regimeFilter OFF → 지수 하락이어도 매수 (사용자 선택 존중)
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: buyChart, account: cashAcct() }));
+  t.state.settings.strategies.regimeFilter = false;
+  t.deps.getStockChart = async (cfg, code) => (code === '069500' ? decChart : buyChart);
+  await t.tick();
+  ok('레짐 필터 OFF → 지수 하락에도 매수 허용', orders.filter(o => o.side === 'buy').length === 1);
 
   realLog('== 체결 정합성 (접수≠체결, 고아화 방지) ==');
   const flatChart = chartFrom([...Array(30)].map(() => 70000)); // 신호 없음 — 보유 관리만 격리 검증
@@ -287,6 +316,39 @@ function mkTrader(deps) {
   ok('손절 트리거 시 시장가(01) 매도', !!stopSell && stopSell.orderType === '01');
   ok('매도 접수만으로 봇 지분 차감 안 함', t.state.botPositions['005930'] && t.state.botPositions['005930'].qty === 10);
   ok('매도 접수 시점 실현손익 미확정(0)', t.state.dailyRealizedPnl === 0);
+  ok('스탑 걸린 포지션은 부분익절이 아니라 전량 청산(손절 우선)', !!stopSell && stopSell.qty === 10);
+
+  realLog('== 부분익절 + 샹들리에 트레일링 (신 청산) ==');
+
+  // P1) +1R 도달 → 절반 익절 + 손절 본전 이상(브레이크이븐) + 1회 래치
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:58000, atr:1000, initRisk:1000, hw:60000 } };
+  await t.tick();
+  const halfSell = orders.find(o => o.side === 'sell');
+  ok('P1 +1R 도달 → 절반(5주)만 익절(지정가)', !!halfSell && halfSell.qty === 5 && halfSell.orderType === '00');
+  ok('P1 부분익절 후 손절 ≥ 본전(지지 않는 게임)', t.state.botPositions['005930'].stop >= 60000);
+  ok('P1 partialDone 래치 기록', t.state.botPositions['005930'].partialDone === true);
+  orders.length = 0; t.lastAction['005930'] = 0; // 쿨다운 해제 후 재틱
+  await t.tick();
+  ok('P1 부분익절 재실행 없음(1회 래치)', orders.filter(o => o.side === 'sell').length === 0);
+
+  // P2) 고정 익절 폐지 — 큰 수익(+10R)에도 전량청산 없이 샹들리에 트레일만 따라감
+  orders.length = 0;
+  t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 }));
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:58000, atr:1000, initRisk:1000, hw:70000, partialDone:true } };
+  await t.tick();
+  ok('P2 +10R에도 전량청산 없음(고정 익절 폐지)', orders.filter(o => o.side === 'sell').length === 0);
+  ok('P2 샹들리에 — 손절선이 고점−1.5×ATR(68,500)로 상승', t.state.botPositions['005930'].stop === 68500);
+
+  // P3) 1주 포지션은 쪼갤 수 없음 → 부분익절 스킵, 전량 트레일 유지
+  orders.length = 0;
+  const oneAcct = { rt_cd:'0', output1: [{ pdno:'005930', hldg_qty:'1', pchs_avg_pric:'60000', prpr:'70000', evlu_pfls_rt:'16.6', evlu_amt:'70000' }],
+                    output2: [{ dnca_tot_amt:'10000000' }] };
+  t = mkTrader(mkDeps({ chart: flatChart, account: oneAcct, price: 70000 }));
+  t.state.botPositions = { '005930': { qty:1, entry:60000, stop:58000, atr:1000, initRisk:1000, hw:60000 } };
+  await t.tick();
+  ok('P3 1주 포지션 — 부분익절 스킵(전량 트레일)', orders.filter(o => o.side === 'sell').length === 0 && !t.state.botPositions['005930'].partialDone);
 
   // 13) 잔고 대조로 매도 체결 확정 → 실현손익 계상 + 봇 지분 제거 (_sellPending=실제 낸 매도분)
   orders.length = 0;
@@ -312,7 +374,7 @@ function mkTrader(deps) {
   // 13-2) _sellPending 누수 정리 — 지정가 매도 미체결 취소 후 6분 경과 시 정리(수동매도 오귀속 방지)
   orders.length = 0;
   t = mkTrader(mkDeps({ chart: flatChart, account: heldAcct, price: 70000 })); // 보유 005930 10, 잔고 불변
-  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:50000, target:200000, atr:1000, initRisk:1000, hw:70000, lastSellPrice:55000, _sellPending:10, _sellAt: FIXED - 7*60*1000 } };
+  t.state.botPositions = { '005930': { qty:10, entry:60000, stop:50000, target:200000, atr:1000, initRisk:1000, hw:70000, partialDone:true, lastSellPrice:55000, _sellPending:10, _sellAt: FIXED - 7*60*1000 } };
   t.deps.getPendingOrders = () => []; // 미체결 매도 없음(취소됨)
   t.tickCount = 0;
   await t.tick();
@@ -464,10 +526,10 @@ function mkTrader(deps) {
   ok('낙폭 부족(-1%) → 장중반등 미진입', orders.filter(o => o.side === 'buy').length === 0);
   global._priceCache = {}; // 정리
 
-  // 20) 이미 봇이 보유한 종목은 BUY 신호가 떠도 추가매수 안 함 (분할 몰빵·한도찬 종목 헛시도 방지)
+  // 20) 이미 봇이 보유한 종목은 BUY 신호(돌파)가 떠도 추가매수 안 함 (분할 몰빵·한도찬 종목 헛시도 방지)
   //     heldAcct(005930 10주 보유)와 botPositions를 일치시켜 잔고대조에 안 지워지게 한 뒤 BUY 신호 확인
   orders.length = 0;
-  t = mkTrader(mkDeps({ chart: decChart, account: heldAcct, price: 60000 }));
+  t = mkTrader(mkDeps({ chart: buyChart, account: heldAcct, price: 60000 }));
   t.state.botPositions = { '005930': { qty: 10, entry: 60000, stop: 58000 } }; // 실보유와 일치
   await t.tick();
   ok('이미 봇 보유 종목은 추가매수 안 함(몰빵 방지)', orders.filter(o => o.side === 'buy').length === 0);

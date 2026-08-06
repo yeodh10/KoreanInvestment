@@ -2,8 +2,11 @@
  * AutoTrade KR — 자동매매 엔진 (auto-trader.js)
  * 프록시 서버 안에서 돌아가는 매매 두뇌
  *
- * 전략: 골든크로스(MA 교차) + RSI 과매도/과매수
- * 안전장치: 1회/종목당 매수한도, 하루 손실한도 자동정지, 손절·익절 자동실행
+ * 전략 (2026-06 전면 개편 — "추세 돌파형"):
+ *   진입: N일 신고가 돌파(종가 기준) + 거래량 급증 확인 + KOSPI 레짐 필터(시장 하락 국면 신규매수 중단)
+ *   청산: +1R 도달 시 절반 익절(본전 확보) → 잔여분은 샹들리에 트레일링으로 추세 끝까지 보유,
+ *         X일 저가 이탈 시 추세 종료 청산. 고정 익절(+2R)·RSI 과매수 매도는 승자를 일찍 잘라 폐기.
+ * 안전장치: 리스크 기반 사이징, 1회/종목당 매수한도, 하루 손실한도 자동정지, ATR 손절 자동실행
  */
 
 const fs = require('fs');
@@ -14,10 +17,11 @@ const LOG_FILE   = path.join(__dirname, 'autotrade-log.json');
 const ORDER_COOLDOWN_MS = 5 * 60 * 1000; // 같은 종목 재주문 금지 시간 (중복 주문 방지, 계좌 갱신 주기와 정렬)
 
 // ── 리스크 프리셋 (보수/균형/공격) — 화면에서 선택, safety 기본값을 결정 ──
+// (개편) takeProfitR 폐지 — 고정 익절이 추세 대박을 잘라 기대값을 깎던 주범. 청산은 부분익절+트레일링만.
 const RISK_PRESETS = {
-  conservative: { riskPerTradePct:0.4, dailyLossLimitPct:-1.2, maxPositions:3, maxExposurePct:40, maxPerStockPct:15, stopAtrMult:1.2, takeProfitR:2.5, trailAfterR:1, maxConsecLosses:2, maxTradesPerDay:12 },
-  balanced:     { riskPerTradePct:0.7, dailyLossLimitPct:-2.0, maxPositions:5, maxExposurePct:60, maxPerStockPct:20, stopAtrMult:1.5, takeProfitR:2.0, trailAfterR:1, maxConsecLosses:3, maxTradesPerDay:20 },
-  aggressive:   { riskPerTradePct:1.2, dailyLossLimitPct:-3.5, maxPositions:8, maxExposurePct:85, maxPerStockPct:25, stopAtrMult:2.0, takeProfitR:1.8, trailAfterR:1, maxConsecLosses:4, maxTradesPerDay:30 }
+  conservative: { riskPerTradePct:0.4, dailyLossLimitPct:-1.2, maxPositions:3, maxExposurePct:40, maxPerStockPct:15, stopAtrMult:1.2, trailAfterR:1, maxConsecLosses:2, maxTradesPerDay:12 },
+  balanced:     { riskPerTradePct:0.7, dailyLossLimitPct:-2.0, maxPositions:5, maxExposurePct:60, maxPerStockPct:20, stopAtrMult:1.5, trailAfterR:1, maxConsecLosses:3, maxTradesPerDay:20 },
+  aggressive:   { riskPerTradePct:1.2, dailyLossLimitPct:-3.5, maxPositions:8, maxExposurePct:85, maxPerStockPct:25, stopAtrMult:2.0, trailAfterR:1, maxConsecLosses:4, maxTradesPerDay:30 }
 };
 
 // ── 기본 설정값 (화면에서 덮어쓸 수 있음) — 균형 프리셋 기준 ──
@@ -25,16 +29,14 @@ const DEFAULT_SETTINGS = {
   enabled: false,              // 자동매매 on/off
   riskPreset: 'balanced',      // 선택한 프리셋(표시용)
   strategies: {
-    goldenCross: true,         // 골든크로스 사용
-    rsi: true,                 // RSI 사용
-    regimeFilter: true         // ★ 레짐 필터: 장기MA 상승 중일 때만 골든크로스 매수(횡보 휩쏘 차단)
+    breakout: true,            // ★ 추세 돌파: N일 신고가 돌파(종가) + 거래량 급증 진입 (메인 전략)
+    regimeFilter: true         // ★ 레짐 필터: ①KOSPI 하락 국면(지수<장기MA) 신규매수 중단 ②종목 장기MA 상승 중일 때만 진입
   },
   params: {
-    maShort: 5,                // 단기 이동평균
-    maLong: 20,                // 장기 이동평균
-    rsiPeriod: 14,             // RSI 기간
-    rsiOversold: 30,           // 과매도 (이하면 매수 후보)
-    rsiOverbought: 70,         // 과매수 (이상이면 매도 후보)
+    breakoutPeriod: 20,        // 신고가 돌파 기간(일) — 직전 N일 최고가를 종가로 넘어야 진입
+    exitPeriod: 10,            // 저가 이탈 청산 기간(일) — 직전 X일 최저가를 종가로 깨면 추세 종료 매도
+    bkVolMult: 1.5,            // 돌파일 거래량 ≥ 최근 평균×배수 (가짜 돌파 필터)
+    maLong: 20,                // 장기 이동평균 (종목/시장 추세 필터 공용)
     atrPeriod: 14              // ATR 기간 (변동성 기반 손절)
   },
   safety: {
@@ -42,10 +44,9 @@ const DEFAULT_SETTINGS = {
     riskPerTradePct: 0.7,      // 거래당 위험 = 자본의 0.7% (손절까지 거리로 수량 역산)
     maxPerStockPct: 20,        // 종목당 최대 보유 = 자본의 20% (집중 방지)
     maxPerStock: 0,            // 종목당 최대 보유 = 절대금액(원). 0=미설정(%만 적용). 설정 시 %와 함께 더 작은 쪽 적용
-    // ── 변동성 기반 손절/익절 + 트레일링 ──
-    stopAtrMult: 1.5,          // 손절 = 진입 − 1.5×ATR
-    takeProfitR: 2.0,          // 익절 = +2R (손익비 2:1)
-    trailAfterR: 1.0,          // +1R 도달 시 손절을 본전으로 + ATR 트레일링 시작
+    // ── 변동성 기반 손절 + 부분익절 + 샹들리에 트레일링 (고정 익절 없음 — 승자는 추세 끝까지) ──
+    stopAtrMult: 1.5,          // 손절 = 진입 − 1.5×ATR / 트레일 = 고점 − 1.5×ATR
+    trailAfterR: 1.0,          // +1R 도달 시: 절반 익절(본전 확보) + 손절 본전 이상 + ATR 트레일링 시작
     // ── 포트폴리오 서킷브레이커 ──
     dailyLossLimitPct: -2.0,   // 일일 손실 한도 = 자본의 −2% (도달 시 당일 신규매수 정지)
     maxPositions: 5,           // 동시 보유(봇) 최대 종목 수
@@ -217,51 +218,52 @@ function calcATR(bars, period) {
 }
 
 // ════════════════════════════════════════
-// 매매 신호 판단
-// closes: 과거→현재 순서의 종가 배열
+// 매매 신호 판단 — 추세 돌파형 (2026-06 전면 개편)
+// bars: 과거→현재 순서의 '확정봉' 배열 [{open,high,low,close,vol}] (숫자 배열도 종가로 승격 수용)
 // 반환: 'BUY' | 'SELL' | null  + 사유
+//
+// 왜 돌파형인가: 구 전략(골든크로스+RSI)은 ①크로스 확인 시점엔 이미 수% 오른 뒤라 진입이 늦고
+// ②RSI 과매수 매도가 강한 추세의 '초입'에 승자를 잘라, 손실은 -1R 꼬박꼬박 / 이익은 +2R을 못 채워
+// 거래비용 포함 기대값이 음수였다. 돌파형은 추세 '시작'에 타고, 청산은 트레일링에 맡겨 승자를 길게 둔다.
 // ════════════════════════════════════════
-function decideSignal(closes, settings) {
+function decideSignal(bars, settings) {
   const { strategies, params } = settings;
+  if (!Array.isArray(bars) || !bars.length) return null;
+  // 하위호환: 종가 숫자 배열이 오면 봉 객체로 승격 (거래량 없음 → 거래량 필터 자동 통과)
+  if (typeof bars[0] === 'number') bars = bars.map(c => ({ open: c, high: c, low: c, close: c, vol: 0 }));
+  if (strategies.breakout === false) return null; // 전략 OFF
+  const N  = (params.breakoutPeriod > 0) ? params.breakoutPeriod : 20;
+  const X  = (params.exitPeriod     > 0) ? params.exitPeriod     : 10;
+  const VM = (params.bkVolMult      > 0) ? params.bkVolMult      : 1.5;
+  const cur = bars[bars.length - 1];
   const signals = [];
-  // 레짐 필터 기본 ON (strategies.regimeFilter === false 일 때만 해제). 매수 품질 게이트.
-  const regimeOff = strategies.regimeFilter === false;
-  const cur = closes[closes.length - 1];
-  const maLongAll = (closes.length >= params.maLong) ? sma(closes, params.maLong) : null;
 
-  // ── 골든크로스 / 데드크로스 ──
-  if (strategies.goldenCross && closes.length >= params.maLong + 1) {
-    const shortNow  = sma(closes, params.maShort);
-    const longNow   = sma(closes, params.maLong);
-    const prevCloses = closes.slice(0, -1);
-    const shortPrev = sma(prevCloses, params.maShort);
-    const longPrev  = sma(prevCloses, params.maLong);
-    if (shortPrev && longPrev && shortNow && longNow) {
-      // ★ 레짐 필터: 장기MA가 '상승 중'일 때만 골든크로스 매수 — 횡보장의 잦은 거짓 크로스(휩쏘) 차단.
-      //   추세 없는 박스권에선 longNow≈longPrev라 매수가 막혀, 천 번의 칼질 손실을 줄인다.
-      const trendingUp = regimeOff || (longNow > longPrev);
-      if (shortPrev <= longPrev && shortNow > longNow && trendingUp) {
-        signals.push({ side:'BUY', reason:`골든크로스 (${params.maShort}MA가 ${params.maLong}MA 상향돌파, 추세↑)` });
-      }
-      // 데드크로스 매도는 레짐과 무관(리스크 회피는 항상)
-      if (shortPrev >= longPrev && shortNow < longNow) {
-        signals.push({ side:'SELL', reason:`데드크로스 (${params.maShort}MA가 ${params.maLong}MA 하향이탈)` });
-      }
+  // ── 청산: X일 저가 이탈 (추세 종료) — 매도는 항상 판정 (리스크 회피 우선) ──
+  if (bars.length >= X + 1) {
+    const priorX = bars.slice(-(X + 1), -1);
+    const ll = Math.min(...priorX.map(b => b.low > 0 ? b.low : Infinity));
+    if (Number.isFinite(ll) && cur.close < ll) {
+      signals.push({ side: 'SELL', reason: `${X}일 저가 이탈 (₩${cur.close.toLocaleString()} < ₩${ll.toLocaleString()}, 추세 종료)` });
     }
   }
 
-  // ── RSI ──
-  if (strategies.rsi) {
-    const rsi = calcRSI(closes, params.rsiPeriod);
-    if (rsi !== null) {
-      // ★ 과매도 매수는 '상승추세 눌림목'에서만(가격 > 장기MA). 추세하락 중 과매도 매수(떨어지는 칼 잡기)를
-      //   토글과 무관하게 코히어런트하게 차단한다. RSI(역추세)와 추세필터를 한 신호로 정합시킴.
-      const pullbackOk = (maLongAll != null) && (cur > maLongAll);
-      if (rsi <= params.rsiOversold && pullbackOk) {
-        signals.push({ side:'BUY', reason:`RSI 눌림목 매수 (${rsi.toFixed(1)} ≤ ${params.rsiOversold}, 추세 상단)` });
-      }
-      if (rsi >= params.rsiOverbought) {
-        signals.push({ side:'SELL', reason:`RSI 과매수 (${rsi.toFixed(1)} ≥ ${params.rsiOverbought})` });
+  // ── 진입: N일 신고가 돌파(종가 기준 — 고가 스침보다 엄격해 가짜 돌파를 거른다) + 거래량 급증 ──
+  if (bars.length >= N + 1) {
+    const prior = bars.slice(-(N + 1), -1);
+    const hh = Math.max(...prior.map(b => b.high || 0));
+    if (hh > 0 && cur.close > hh) {
+      // 거래량 확인: 돌파일 거래량이 최근 N일 평균의 VM배 이상 (수급이 실린 진짜 돌파만).
+      // 거래량 데이터가 없으면(숫자 배열 하위호환 등) 필터를 통과시킨다.
+      const avgVol = prior.reduce((a, b) => a + (b.vol || 0), 0) / prior.length;
+      const volOk = !(avgVol > 0) || (cur.vol || 0) >= avgVol * VM;
+      // 종목 추세 필터(레짐): 장기MA가 하락 중이 아닐 때만 — 하락추세 데드캣 돌파 차단
+      const closes = bars.map(b => b.close);
+      const maL  = (closes.length >= params.maLong + 1) ? sma(closes, params.maLong) : null;
+      const maLp = (closes.length >= params.maLong + 1) ? sma(closes.slice(0, -1), params.maLong) : null;
+      const slopeOk = strategies.regimeFilter === false || maL == null || maLp == null || maL >= maLp;
+      if (volOk && slopeOk) {
+        const volX = avgVol > 0 ? ((cur.vol || 0) / avgVol).toFixed(1) : '?';
+        signals.push({ side: 'BUY', reason: `${N}일 신고가 돌파 (₩${cur.close.toLocaleString()} > ₩${hh.toLocaleString()}, 거래량 ${volX}x)` });
       }
     }
   }
@@ -271,6 +273,22 @@ function decideSignal(closes, settings) {
   const sell = signals.find(s => s.side === 'SELL');
   if (sell) return sell;
   return signals.find(s => s.side === 'BUY');
+}
+
+// ── 시장 레짐 판정 — KOSPI 하락 국면이면 신규매수 중단 (하락장 연속 피격 차단) ──
+// 별도 지수 API 없이 KODEX 200 ETF(069500) 일봉을 지수 프록시로 사용 → 기존 차트 dep·캐시·
+// 네이버 무키 폴백이 전부 그대로 동작한다. bars 마지막(형성 중) 봉은 제외하고 확정봉으로 판정.
+// 데이터 부족/조회 실패 시 false(비하락) — 과차단 방지, 개별 종목 필터가 2차 게이트.
+const MARKET_PROXY_CODE = '069500';
+function isMarketBear(bars, period) {
+  period = period > 0 ? period : 20;
+  if (!Array.isArray(bars)) return false;
+  const closes = bars.map(b => (typeof b === 'number' ? b : (b && b.close) || 0)).filter(v => v > 0);
+  if (closes.length < period + 2) return false;
+  const closed = closes.slice(0, -1);      // 마지막 봉은 장중 형성 중 — 확정봉만
+  const cur = closed[closed.length - 1];
+  const ma = sma(closed, period);
+  return !!(ma && cur < ma);               // 지수 종가 < 장기MA = 하락 국면
 }
 
 // ════════════════════════════════════════
@@ -494,7 +512,6 @@ class AutoTrader {
     sf.maxPerStockPct    = num(sf.maxPerStockPct, 20, 1, 100);
     sf.maxPerStock       = num(sf.maxPerStock, 0, 0, 1e10); // 0=미설정. 절대(원) 종목당 한도
     sf.stopAtrMult       = num(sf.stopAtrMult, 1.5, 0.3, 6);
-    sf.takeProfitR       = num(sf.takeProfitR, 2.0, 0.5, 10);
     sf.trailAfterR       = num(sf.trailAfterR, 1.0, 0.1, 10);
     sf.dailyLossLimitPct = num(sf.dailyLossLimitPct, -2.0, -50, -0.1);
     sf.maxPositions      = Math.round(num(sf.maxPositions, 5, 1, 30));
@@ -752,16 +769,25 @@ class AutoTrader {
         const bp = (this.state.botPositions || {})[code];
         let exit = null, exitMarket = false;
         if (bp && bp.stop > 0) {
-          // 트레일링: 고점 갱신 → +trailAfterR 도달 시 손절선을 본전 이상/ATR 추적으로 끌어올림
+          // ── 개편된 청산: +1R 절반 익절(본전 확보) + 샹들리에 트레일링. 고정 익절 없음(승자는 추세 끝까지) ──
           bp.hw = Math.max(bp.hw || bp.entry || cur, cur);
-          if (bp.initRisk > 0 && cur >= bp.entry + s.safety.trailAfterR * bp.initRisk) {
-            let ns = Math.max(bp.stop, bp.entry); // 최소 본전 확보
-            if (bp.atr > 0) ns = Math.max(ns, bp.hw - s.safety.stopAtrMult * bp.atr); // ATR 트레일
+          const trailArmed = bp.initRisk > 0 && cur >= bp.entry + s.safety.trailAfterR * bp.initRisk;
+          if (trailArmed) {
+            let ns = Math.max(bp.stop, bp.entry); // 최소 본전 확보 — 이후 이 매매는 '지지 않는 게임'
+            if (bp.atr > 0) ns = Math.max(ns, bp.hw - s.safety.stopAtrMult * bp.atr); // 샹들리에(고점−ATR×배수) 트레일
             if (ns > bp.stop) bp.stop = ns;
           }
-          // 손절/트레일은 시장가로 — 묵은 지정가가 미체결→자동취소되며 포지션이 방치되는 사고 방지
+          // 손절/트레일 판정이 부분익절보다 항상 먼저 — 스탑에 걸린 포지션은 절반이 아니라 전량 시장가 청산.
+          // (손절/트레일은 시장가로 — 묵은 지정가가 미체결→자동취소되며 포지션이 방치되는 사고 방지)
           if (cur <= bp.stop) { exit = `손절/트레일 (₩${cur.toLocaleString()} ≤ ₩${Math.round(bp.stop).toLocaleString()})`; exitMarket = true; }
-          else if (bp.target > 0 && cur >= bp.target) exit = `익절 (₩${cur.toLocaleString()} ≥ ₩${Math.round(bp.target).toLocaleString()})`;
+          else if (trailArmed && !bp.partialDone && sellable >= 2) {
+            // 부분익절: +trailAfterR R 도달 시 절반만 확정(1회) — 손실 회수 + 잔여분은 대박 추세를 끝까지 탄다.
+            //   2주 이상일 때만(1주는 쪼갤 수 없어 전량 트레일). 이번 틱은 부분익절만 하고 다음 틱부터 잔여 관리.
+            const half = Math.floor(sellable / 2);
+            bp.partialDone = true; this.save(); // 주문 전에 마킹 — 주문 예외여도 재시도 중복 방지(보수적)
+            await this.sell(cfg, code, half, cur, `부분익절 +${s.safety.trailAfterR}R (절반 확보, 잔여 트레일링)`, pos);
+            continue;
+          }
         } else {
           // 레거시/수동 보호분: 손절정보 없음 → 보수적 % 폴백
           if (pos.pnlPct <= -3) { exit = `손절 (${pos.pnlPct}% ≤ -3%)`; exitMarket = true; }
@@ -807,6 +833,21 @@ class AutoTrader {
       if (!buyingHalted && (this.state.consecLosses || 0) >= s.safety.maxConsecLosses) buyingHalted = true;
       else if (!buyingHalted && (this.state.tradesToday || 0) >= s.safety.maxTradesPerDay) buyingHalted = true;
 
+      // ── 시장 레짐(KOSPI 프록시=KODEX200 일봉) — 하락 국면이면 신규매수 중단 (하락장 연속 피격 차단) ──
+      //   보유 포지션 관리·매도는 계속된다. 조회 실패 시엔 막지 않음(과차단 방지, 종목 추세 필터가 2차 게이트).
+      let marketBear = false;
+      if (s.strategies.regimeFilter !== false && !buyingHalted) {
+        try {
+          const idxBars = await this.deps.getStockChart(cfg, MARKET_PROXY_CODE, 'D');
+          marketBear = isMarketBear(idxBars, s.params.maLong);
+        } catch (_) {}
+        if (marketBear && this._bearNotified !== this.state.today) {
+          this._bearNotified = this.state.today; // 하루 1회만 로그 (매 틱 도배 방지)
+          this.log('safety', `🐻 시장 하락 국면 (KOSPI 프록시 < ${s.params.maLong || 20}일MA) — 신규매수 중단, 보유 관리는 계속`);
+        }
+        if (!marketBear) this._bearNotified = null; // 회복 시 리셋 — 재진입 시 다시 1회 알림
+      }
+
       // ── 2) 스캔 목록 전체: 전략 신호 체크 (순차 처리, 딜레이 적용) ──
       const scanTarget = this.scanList.length > 0 ? this.scanList : (s.watchList || []);
       this.log('system', `⏱ 스캔 시작 (${scanTarget.length}종목)`);
@@ -825,18 +866,20 @@ class AutoTrader {
         }
 
         if (!chart || !chart.length) continue;
-        const closes = chart.map(c => c.close).filter(v => v > 0);
-        if (closes.length < s.params.maLong + 2) continue;
+        const bars = chart.filter(b => b && b.close > 0);
+        const closes = bars.map(b => b.close);
+        if (bars.length < Math.max(s.params.breakoutPeriod || 20, s.params.maLong || 20) + 2) continue;
 
         // ★ 리페인팅 차단: 당일 미완성 봉(종가=현재가)을 제외한 '확정봉'으로만 신호 판정.
-        //   엔진은 장중에만 돌아 마지막 일봉은 항상 형성 중 → 확정 데이터로 크로스/RSI를 판정해
-        //   장중 출렁임에 의한 유령 골든크로스(미확정 매수)를 막는다. 현재가는 진입가·추세필터에만 사용.
-        const closedBars = closes.slice(0, -1);
+        //   엔진은 장중에만 돌아 마지막 일봉은 항상 형성 중 → 확정 데이터로 돌파/이탈을 판정해
+        //   장중 출렁임에 의한 유령 돌파(미확정 매수)를 막는다. 현재가는 진입가·추세필터에만 사용.
+        const closedBars = bars.slice(0, -1);
         const signal = decideSignal(closedBars, s);
         const held = heldPositions[code];
 
         if (signal?.side === 'BUY') {
           if (buyingHalted) continue;          // 서킷브레이커 — 신규매수 정지
+          if (marketBear) continue;            // 시장 레짐 필터 — 하락 국면 신규매수 중단
           if (this.inCooldown(code)) continue; // 쿨다운 내 반복 매수 방지
           if (capital <= 0) continue;          // 자본 미파악 → 사이징 불가, 매수 보류
           const startMin = s.safety.avoidFirst30min
@@ -847,7 +890,7 @@ class AutoTrader {
 
           // 추세 필터: 현재가가 확정봉 장기MA 위일 때만 매수 (하락추세 '떨어지는 칼' 회피)
           if (s.safety.trendFilter) {
-            const maL = sma(closedBars, s.params.maLong);
+            const maL = sma(closedBars.map(b => b.close), s.params.maLong);
             if (!maL || closes[closes.length - 1] < maL) continue;
           }
           // 이미 봇이 보유한 종목은 추가매수 금지 — 한 종목 1회 진입(분할 몰빵 방지) + 한도 찬 종목을
@@ -886,7 +929,7 @@ class AutoTrader {
             continue;
           }
           if (await this._riskBlocked(cfg, code, name)) continue; // 관리/투자경고·위험/거래정지 종목 차단
-          const target = price + s.safety.takeProfitR * stopDist;       // +R배수 익절
+          const target = price + s.safety.trailAfterR * stopDist;       // 표시용: 부분익절(+1R) 레벨 — 고정 익절 아님
           await this.buy(cfg, code, qty, price, signal.reason, { stop, target, atr: atr || 0, initRisk: stopDist });
 
         } else if (signal?.side === 'SELL' && held && held.qty > 0) {
@@ -903,8 +946,8 @@ class AutoTrader {
           }
         } else if (!signal && s.safety.intradayRebound && !buyingHalted) {
           // ── 장중 반등 모멘텀(분봉) — 일봉 신호가 전혀 없을 때만(SELL 신호 종목을 같은 틱에 사는 구멍 차단). ──
-          //   추세필터는 의도적으로 면제(하락추세 반등을 잡는 전략). 나머지 안전장치(쿨다운·자본·시간·
-          //   동시보유·리스크 사이징·종목당한도·노출한도·서킷)는 일봉 매수와 동일하게 그대로 적용한다.
+          //   추세필터·시장 레짐(marketBear)은 의도적으로 면제(하락일의 V반등을 잡는 역추세 전략).
+          //   나머지 안전장치(쿨다운·자본·시간·동시보유·리스크 사이징·종목당한도·노출한도·서킷)는 동일 적용.
           if (this.inCooldown(code)) continue;
           if (capital <= 0) continue;
           const startMin = s.safety.avoidFirst30min
@@ -958,7 +1001,7 @@ class AutoTrader {
           qty = Math.min(qty, Math.floor(Math.max(0, expRoom) / price));
           if (qty < 1) continue;
           if (await this._riskBlocked(cfg, code, name)) continue; // 관리/투자경고·위험/거래정지 종목 차단
-          const target = price + s.safety.takeProfitR * stopDist;
+          const target = price + s.safety.trailAfterR * stopDist; // 표시용: 부분익절 레벨
           await this.buy(cfg, code, qty, price, rb.reason, { stop: rb.stop, target, atr: 0, initRisk: stopDist });
         }
 
@@ -1045,7 +1088,7 @@ class AutoTrader {
         avgPrice: price, curPrice: price, pnlPct: 0,
         evalAmt: (prevPos?.evalAmt || 0) + qty * price
       };
-      const stopStr = plan.stop ? `\n손절: ₩${Math.round(plan.stop).toLocaleString()} / 목표: ₩${Math.round(plan.target||0).toLocaleString()}` : '';
+      const stopStr = plan.stop ? `\n손절: ₩${Math.round(plan.stop).toLocaleString()} / 1차익절(절반): ₩${Math.round(plan.target||0).toLocaleString()} 후 트레일링` : '';
       const msg = `📈 <b>매수 접수</b>\n종목: ${name} (${code})\n수량: ${qty}주 @ ₩${price.toLocaleString()}${stopStr}\n사유: ${reason}`;
       this.log('buy', `✅ 매수주문 접수 ${name} ${qty}주 @ ₩${price.toLocaleString()}` + (plan.stop?` (손절 ₩${Math.round(plan.stop).toLocaleString()})`:''), { code, qty, price, reason, stop: plan.stop, target: plan.target });
       if (this.deps.sendTelegram) await this.deps.sendTelegram(cfg, msg);
@@ -1089,4 +1132,4 @@ class AutoTrader {
   }
 }
 
-module.exports = { AutoTrader, getLogs, decideSignal, decideIntradayRebound, calcRSI, calcATR, sma, RISK_PRESETS, isMarketOpen, isHoliday };
+module.exports = { AutoTrader, getLogs, decideSignal, decideIntradayRebound, isMarketBear, MARKET_PROXY_CODE, calcRSI, calcATR, sma, RISK_PRESETS, isMarketOpen, isHoliday };

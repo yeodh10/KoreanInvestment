@@ -1331,16 +1331,16 @@ td.mono,th.mono{font-family:var(--mono)}
       <div class="panel">
         <div class="panel-head"><span class="panel-title">전략</span></div>
         <div class="panel-body">
-          <div class="toggle-row"><div><div class="toggle-name">📈 골든크로스 (MA 교차)</div><div class="toggle-desc">단기MA 상향돌파 매수, 하향이탈 매도</div></div><div class="tog on" id="togGC" onclick="this.classList.toggle('on')"></div></div>
-          <div class="toggle-row"><div><div class="toggle-name">📊 RSI 과매도/과매수</div><div class="toggle-desc">RSI 기준 이하 매수, 이상 매도</div></div><div class="tog on" id="togRSI" onclick="this.classList.toggle('on')"></div></div>
+          <div class="toggle-row"><div><div class="toggle-name">🚀 추세 돌파 (신고가+거래량)</div><div class="toggle-desc">N일 신고가를 거래량 급증과 함께 돌파하면 매수 — 추세 '시작'에 진입</div></div><div class="tog on" id="togBK" onclick="this.classList.toggle('on')"></div></div>
+          <div class="toggle-row"><div><div class="toggle-name">🧭 시장 레짐 필터 (KOSPI)</div><div class="toggle-desc">지수가 하락 국면(20일선 아래)이면 신규매수 중단 — 하락장 연타 차단</div></div><div class="tog on" id="togRegime" onclick="this.classList.toggle('on')"></div></div>
           <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:12px">
             <div class="form-row">
-              <div class="form-group"><div class="form-label">단기 MA(일)</div><input class="form-input" type="number" id="pMaS" value="5"></div>
-              <div class="form-group"><div class="form-label">장기 MA(일)</div><input class="form-input" type="number" id="pMaL" value="20"></div>
+              <div class="form-group"><div class="form-label">돌파 기간(일)</div><input class="form-input" type="number" id="pBkN" value="20" title="직전 N일 최고가를 종가로 넘으면 매수 후보"></div>
+              <div class="form-group"><div class="form-label">이탈 청산(일)</div><input class="form-input" type="number" id="pBkX" value="10" title="직전 X일 최저가를 종가로 깨면 추세 종료 매도"></div>
             </div>
             <div class="form-row">
-              <div class="form-group"><div class="form-label">RSI 기간</div><input class="form-input" type="number" id="pRsiP" value="14"></div>
-              <div class="form-group"><div class="form-label">과매도 / 과매수</div><div style="display:flex;gap:4px"><input class="form-input" type="number" id="pRsiOs" value="30" style="flex:1"><input class="form-input" type="number" id="pRsiOb" value="70" style="flex:1"></div></div>
+              <div class="form-group"><div class="form-label">거래량 배수</div><input class="form-input" type="number" step="0.1" id="pBkVol" value="1.5" title="돌파일 거래량이 평균×배수 이상이어야 진짜 돌파로 인정"></div>
+              <div class="form-group"><div class="form-label">장기 MA(일)</div><input class="form-input" type="number" id="pMaL" value="20"></div>
             </div>
             <div class="form-group"><div class="form-label">ATR 기간 (변동성 손절 계산)</div><input class="form-input" type="number" id="pAtr" value="14"></div>
           </div>
@@ -1356,8 +1356,8 @@ td.mono,th.mono{font-family:var(--mono)}
             <div class="form-group"><div class="form-label">종목당 한도 (원, 절대 상한)</div><input class="form-input" type="number" step="100000" id="sPerStkWon" value="0" title="0=미설정(%만 적용). 자본%와 이 절대금액 중 더 작은 쪽이 적용됩니다"></div>
           </div>
           <div class="form-row">
-            <div class="form-group"><div class="form-label">손절 (ATR배수)</div><input class="form-input" type="number" step="0.1" id="sStopAtr" value="1.5"></div>
-            <div class="form-group"><div class="form-label">익절 (R배수, 손익비)</div><input class="form-input" type="number" step="0.1" id="sTpR" value="2"></div>
+            <div class="form-group"><div class="form-label">손절/트레일 (ATR배수)</div><input class="form-input" type="number" step="0.1" id="sStopAtr" value="1.5"></div>
+            <div class="form-group"><div class="form-label">부분익절+트레일 시작(R)</div><input class="form-input" type="number" step="0.1" id="sTrailR" value="1" title="+이 R배수 도달 시 절반 익절 + 손절 본전 + 샹들리에 트레일링 시작. 고정 익절은 없음(잔여분은 추세 끝까지)"></div>
           </div>
           <div class="form-row">
             <div class="form-group"><div class="form-label">일일 손실한도 (자본%)</div><input class="form-input" type="number" step="0.1" id="sDayLossPct" value="-2"></div>
@@ -1429,20 +1429,16 @@ td.mono,th.mono{font-family:var(--mono)}
           </div>
           <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
             <div class="form-row">
-              <div class="form-group"><div class="form-label">단기 MA</div><input class="form-input" type="number" id="btMaS" value="5"></div>
-              <div class="form-group"><div class="form-label">장기 MA</div><input class="form-input" type="number" id="btMaL" value="20"></div>
+              <div class="form-group"><div class="form-label">돌파 기간(일)</div><input class="form-input" type="number" id="btBkN" value="20"></div>
+              <div class="form-group"><div class="form-label">이탈 청산(일)</div><input class="form-input" type="number" id="btBkX" value="10"></div>
             </div>
             <div class="form-row">
-              <div class="form-group"><div class="form-label">RSI 과매도</div><input class="form-input" type="number" id="btRsiOs" value="30"></div>
-              <div class="form-group"><div class="form-label">RSI 과매수</div><input class="form-input" type="number" id="btRsiOb" value="70"></div>
+              <div class="form-group"><div class="form-label">거래량 배수</div><input class="form-input" type="number" step="0.1" id="btBkVol" value="1.5"></div>
+              <div class="form-group"><div class="form-label">손절/트레일 (ATR배수)</div><input class="form-input" type="number" step="0.1" id="btAtrMult" value="1.5"></div>
             </div>
             <div class="form-row">
               <div class="form-group"><div class="form-label">초기 자금(원)</div><input class="form-input" type="number" id="btCapital" value="10000000"></div>
               <div class="form-group"><div class="form-label">1회 매수(원)</div><input class="form-input" type="number" id="btPerOrder" value="1000000"></div>
-            </div>
-            <div class="form-row">
-              <div class="form-group"><div class="form-label">익절(%)</div><input class="form-input" type="number" id="btTp" value="5"></div>
-              <div class="form-group"><div class="form-label">손절(%)</div><input class="form-input" type="number" id="btSl" value="-3"></div>
             </div>
           </div>
           <button class="order-submit buy" onclick="runBacktest()" style="margin-top:8px;padding:10px">▶ 백테스트 실행</button>
@@ -2716,7 +2712,7 @@ function aiBubble(role, text, suggestions, noSave) {
     (role === 'user' ? 'background:var(--blue);color:#fff;align-self:flex-end' : 'background:var(--bg-2);color:var(--text-1);align-self:flex-start');
   d.textContent = text;
   if (suggestions && suggestions.length) {
-    const L = { riskPerTradePct:'거래당리스크%', maxPerStock:'종목당한도', maxPositions:'최대보유종목', maxExposurePct:'노출상한%', stopAtrMult:'손절ATR배수', takeProfitR:'익절R', dailyLossLimitPct:'일일손실한도%', maxConsecLosses:'연속손실서킷', maxTradesPerDay:'일일거래수', trendFilter:'추세필터', intradayRebound:'장중반등', rbMinDrop:'반등낙폭', rbReboundPct:'반등확인%' };
+    const L = { riskPerTradePct:'거래당리스크%', maxPerStock:'종목당한도', maxPositions:'최대보유종목', maxExposurePct:'노출상한%', stopAtrMult:'손절ATR배수', trailAfterR:'부분익절·트레일R', dailyLossLimitPct:'일일손실한도%', maxConsecLosses:'연속손실서킷', maxTradesPerDay:'일일거래수', trendFilter:'추세필터', intradayRebound:'장중반등', rbMinDrop:'반등낙폭', rbReboundPct:'반등확인%' };
     const sd = document.createElement('div'); sd.style.marginTop = '8px';
     suggestions.forEach(s => {
       const b = document.createElement('button'); b.className = 'panel-btn'; b.style.cssText = 'margin:3px 3px 0 0;font-size:11px';
@@ -3246,11 +3242,10 @@ async function runBacktest() {
   const name = nameOf(code);
   const from = $('btFrom').value, to = $('btTo').value;
   if (!from || !to) { showToast('시작일과 종료일을 입력해주세요', 'err'); return; }
-  const maS = parseInt($('btMaS').value||5), maL = parseInt($('btMaL').value||20);
-  const rsiOs = parseInt($('btRsiOs').value||30), rsiOb = parseInt($('btRsiOb').value||70);
+  const bkN = parseInt($('btBkN').value||20), bkX = parseInt($('btBkX').value||10);
+  const bkVol = parseFloat($('btBkVol').value||1.5), atrMult = parseFloat($('btAtrMult').value||1.5);
   const capital = parseInt($('btCapital').value||10000000);
   const perOrder = parseInt($('btPerOrder').value||1000000);
-  const tp = parseFloat($('btTp').value||5), sl = parseFloat($('btSl').value||-3);
 
   $('btMsg').textContent = '📊 차트 데이터 불러오는 중...';
   const years = Math.ceil((new Date(to)-new Date(from))/(365*24*60*60*1000))+1;
@@ -3260,69 +3255,68 @@ async function runBacktest() {
   }
   // 날짜 범위 필터링
   const allBars = parseChart(r.data).filter(b => b.date >= from.replace(/-/g,'') && b.date <= to.replace(/-/g,''));
-  if (allBars.length < maL + 5) { $('btMsg').textContent = `❌ 데이터 부족 (${allBars.length}개)`; return; }
+  if (allBars.length < bkN + 5) { $('btMsg').textContent = `❌ 데이터 부족 (${allBars.length}개)`; return; }
 
   $('btMsg').textContent = `⚙️ ${allBars.length}개 봉 시뮬레이션 중...`;
 
-  // ── 백테스트 엔진 ──
+  // ── 백테스트 엔진 (운영 전략과 동일: 돌파 진입 + 부분익절 + 샹들리에 트레일 + 이탈 청산) ──
   let cash = capital, position = 0, avgPrice = 0;
   let peakAsset = capital, mdd = 0, wins = 0, losses = 0;
+  let ps = null; // {entry, stop, atr, risk0, hw, armed, partial}
   const trades = [];
+  const atrAt = (i, p=14) => { // i일 종가까지의 ATR
+    if (i < p+1) return null; let s = 0;
+    for (let j = i-p+1; j <= i; j++) { const h=allBars[j].high, lo=allBars[j].low, pc=allBars[j-1].close;
+      s += Math.max(h-lo, Math.abs(h-pc), Math.abs(lo-pc)); }
+    return s/p;
+  };
 
-  for (let i = maL; i < allBars.length; i++) {
-    const closes = allBars.slice(0, i+1).map(b => b.close);
-    const cur = closes[closes.length-1];
-    const maShort = closes.slice(-maS).reduce((a,b)=>a+b,0)/maS;
-    const maLong  = closes.slice(-maL).reduce((a,b)=>a+b,0)/maL;
-    const prevS   = closes.slice(-maS-1,-1).reduce((a,b)=>a+b,0)/maS;
-    const prevL   = closes.slice(-maL-1,-1).reduce((a,b)=>a+b,0)/maL;
-    // RSI
-    let g=0,l=0;
-    for(let j=closes.length-14;j<closes.length;j++){const d=closes[j]-closes[j-1];if(d>=0)g+=d;else l-=d;}
-    const avgL=l/14; const rsi=avgL===0?100:100-(100/(1+g/14/avgL));
+  for (let i = bkN + 1; i < allBars.length; i++) {
+    const b = allBars[i], cur = b.close;
 
     const totalAsset = cash + position * cur;
     if (totalAsset > peakAsset) peakAsset = totalAsset;
     const drawdown = (totalAsset - peakAsset) / peakAsset * 100;
     if (drawdown < mdd) mdd = drawdown;
 
-    // 보유 중 손절/익절
-    if (position > 0) {
-      const pnlPct = (cur - avgPrice) / avgPrice * 100;
-      if (pnlPct >= tp) {
-        const pnl = (cur - avgPrice) * position;
-        cash += position * cur;
+    // ── 보유 관리: 손절/트레일 → 부분익절 → 이탈 청산 ──
+    if (position > 0 && ps) {
+      const sellAll = (px, sig) => { const pnl = (px - avgPrice) * position; cash += position * px;
         pnl > 0 ? wins++ : losses++;
-        trades.push({ date:allBars[i].date, side:'sell', price:cur, qty:position, pnl, asset:cash, signal:`익절 +${pnlPct.toFixed(1)}%` });
-        position = 0; avgPrice = 0; continue;
+        trades.push({ date:b.date, side:'sell', price:px, qty:position, pnl, asset:cash, signal:sig });
+        position = 0; avgPrice = 0; ps = null; };
+      // 1) 손절/트레일 — 당일 저가가 스탑을 스치면 체결(갭하락은 시가)
+      if (b.open <= ps.stop || b.low <= ps.stop) { sellAll(Math.min(b.open, ps.stop), '손절/트레일'); continue; }
+      // 2) 부분익절: +1R 도달 시 절반 확정 + 손절 본전
+      if (!ps.partial && position >= 2 && b.high >= ps.entry + ps.risk0) {
+        const half = Math.floor(position/2), px = Math.max(ps.entry + ps.risk0, b.open);
+        const pnl = (px - avgPrice) * half; cash += half * px; wins++;
+        trades.push({ date:b.date, side:'sell', price:px, qty:half, pnl, asset:cash+(position-half)*cur, signal:'부분익절 +1R' });
+        position -= half; ps.partial = true; ps.stop = Math.max(ps.stop, ps.entry);
       }
-      if (pnlPct <= sl) {
-        const pnl = (cur - avgPrice) * position;
-        cash += position * cur;
-        losses++;
-        trades.push({ date:allBars[i].date, side:'sell', price:cur, qty:position, pnl, asset:cash, signal:`손절 ${pnlPct.toFixed(1)}%` });
-        position = 0; avgPrice = 0; continue;
-      }
+      // 3) 샹들리에 트레일 (고점−ATR×배수, +1R 이후)
+      ps.hw = Math.max(ps.hw, b.high);
+      if (b.high >= ps.entry + ps.risk0) ps.armed = true;
+      if (ps.armed) ps.stop = Math.max(ps.stop, ps.entry, ps.hw - atrMult * ps.atr);
+      // 4) X일 저가 이탈 = 추세 종료
+      let ll = Infinity; for (let j = i-bkX; j < i; j++) ll = Math.min(ll, allBars[j].low);
+      if (position > 0 && cur < ll) { sellAll(cur, `${bkX}일 저가 이탈`); }
+      continue;
     }
 
-    // 골든크로스 매수
-    const gcBuy = prevS <= prevL && maShort > maLong;
-    const rsiBuy = rsi <= rsiOs;
-    const gcSell = prevS >= prevL && maShort < maLong;
-    const rsiSell = rsi >= rsiOb;
-
-    if ((gcBuy || rsiBuy) && position === 0 && cash >= cur) {
+    // ── 진입: N일 신고가 돌파(종가) + 거래량 급증 ──
+    let hh = 0, volSum = 0;
+    for (let j = i-bkN; j < i; j++) { hh = Math.max(hh, allBars[j].high); volSum += allBars[j].vol||0; }
+    const avgVol = volSum / bkN;
+    const volOk = !(avgVol > 0) || (b.vol||0) >= avgVol * bkVol;
+    if (cur > hh && volOk && cash >= cur) {
+      const atr = atrAt(i) || cur * 0.02;
       const qty = Math.floor(Math.min(perOrder, cash) / cur);
       if (qty > 0) {
         position = qty; avgPrice = cur; cash -= qty * cur;
-        trades.push({ date:allBars[i].date, side:'buy', price:cur, qty, pnl:null, asset:cash+position*cur, signal: gcBuy?'골든크로스':'RSI과매도' });
+        ps = { entry: cur, stop: cur - atrMult * atr, atr, risk0: atrMult * atr, hw: cur, armed: false, partial: false };
+        trades.push({ date:b.date, side:'buy', price:cur, qty, pnl:null, asset:cash+position*cur, signal:`${bkN}일 신고가 돌파` });
       }
-    } else if ((gcSell || rsiSell) && position > 0) {
-      const pnl = (cur - avgPrice) * position;
-      cash += position * cur;
-      pnl > 0 ? wins++ : losses++;
-      trades.push({ date:allBars[i].date, side:'sell', price:cur, qty:position, pnl, asset:cash, signal: gcSell?'데드크로스':'RSI과매수' });
-      position = 0; avgPrice = 0;
     }
   }
   // 미청산 포지션 강제 청산
@@ -4223,14 +4217,14 @@ async function loadAutoStatus() {
   const st=r.status;
   applyAutoUI(st);
   const s=st.settings;
-  $('togGC').classList.toggle('on',s.strategies.goldenCross);
-  $('togRSI').classList.toggle('on',s.strategies.rsi);
-  $('pMaS').value=s.params.maShort; $('pMaL').value=s.params.maLong;
-  $('pRsiP').value=s.params.rsiPeriod; $('pRsiOs').value=s.params.rsiOversold; $('pRsiOb').value=s.params.rsiOverbought;
+  $('togBK').classList.toggle('on',s.strategies.breakout!==false);
+  $('togRegime').classList.toggle('on',s.strategies.regimeFilter!==false);
+  $('pBkN').value=s.params.breakoutPeriod||20; $('pBkX').value=s.params.exitPeriod||10;
+  $('pBkVol').value=s.params.bkVolMult||1.5; $('pMaL').value=s.params.maLong||20;
   $('pAtr').value=s.params.atrPeriod||14;
   const sf=s.safety;
   $('sRisk').value=sf.riskPerTradePct; $('sPerStk').value=sf.maxPerStockPct; $('sPerStkWon').value=sf.maxPerStock||0;
-  $('sStopAtr').value=sf.stopAtrMult; $('sTpR').value=sf.takeProfitR;
+  $('sStopAtr').value=sf.stopAtrMult; $('sTrailR').value=sf.trailAfterR||1;
   $('sDayLossPct').value=sf.dailyLossLimitPct; $('sMaxExpo').value=sf.maxExposurePct;
   $('sMaxPos').value=sf.maxPositions; $('sConsec').value=sf.maxConsecLosses; $('sMaxTrades').value=sf.maxTradesPerDay;
   $('sStart').value=sf.tradeStartTime; $('sEnd').value=sf.tradeEndTime;
@@ -4261,7 +4255,7 @@ function renderAutoStatus(st){
   $('stBreaker').innerHTML = br.length?br.join(' · '):`일일 손실한도 ₩${(st.dailyLossLimitAmt||0).toLocaleString()} · 정상 범위`;
   const ps=st.positions||[];
   $('stPositions').innerHTML = ps.length ?
-    ('<table style="width:100%;font-size:11px"><thead><tr><th>종목</th><th>수량</th><th>진입</th><th>현재</th><th>손절</th><th>목표</th></tr></thead><tbody>'+
+    ('<table style="width:100%;font-size:11px"><thead><tr><th>종목</th><th>수량</th><th>진입</th><th>현재</th><th>손절</th><th>1차익절</th></tr></thead><tbody>'+
     ps.map(p=>{ const w=v=>v>0?'₩'+v.toLocaleString():'—'; return `<tr><td>${esc(p.name)}</td><td class="mono">${p.qty}</td><td class="mono">${w(p.entry)}</td><td class="mono">${w(p.cur)}</td><td class="mono dn">${w(p.stop)}</td><td class="mono up">${w(p.target)}</td></tr>`; }).join('')+
     '</tbody></table>') : '<div style="font-size:11px;color:var(--text-3)">봇 보유 포지션 없음</div>';
 }
@@ -4282,11 +4276,11 @@ function applyAutoUI(st) {
 }
 function collectAutoSettings() {
   return {
-    strategies:{goldenCross:$('togGC').classList.contains('on'), rsi:$('togRSI').classList.contains('on')},
-    params:{maShort:+$('pMaS').value||5, maLong:+$('pMaL').value||20, rsiPeriod:+$('pRsiP').value||14, rsiOversold:+$('pRsiOs').value||30, rsiOverbought:+$('pRsiOb').value||70, atrPeriod:+$('pAtr').value||14},
+    strategies:{breakout:$('togBK').classList.contains('on'), regimeFilter:$('togRegime').classList.contains('on')},
+    params:{breakoutPeriod:+$('pBkN').value||20, exitPeriod:+$('pBkX').value||10, bkVolMult:+$('pBkVol').value||1.5, maLong:+$('pMaL').value||20, atrPeriod:+$('pAtr').value||14},
     safety:{
       riskPerTradePct:+$('sRisk').value||0.7, maxPerStockPct:+$('sPerStk').value||20, maxPerStock:+$('sPerStkWon').value||0,
-      stopAtrMult:+$('sStopAtr').value||1.5, takeProfitR:+$('sTpR').value||2,
+      stopAtrMult:+$('sStopAtr').value||1.5, trailAfterR:+$('sTrailR').value||1,
       dailyLossLimitPct:+$('sDayLossPct').value||-2, maxExposurePct:+$('sMaxExpo').value||60,
       maxPositions:+$('sMaxPos').value||5, maxConsecLosses:+$('sConsec').value||3, maxTradesPerDay:+$('sMaxTrades').value||20,
       tradeStartTime:$('sStart').value||'09:05', tradeEndTime:$('sEnd').value||'15:00',
